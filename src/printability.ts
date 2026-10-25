@@ -1,5 +1,6 @@
 ﻿import { api, type Summary, type PrintabilityParams, type PrintabilityReport, type Vec3 } from "./api";
 import { num, onLangChange, t, tKey } from "./i18n";
+import "./styles/printability.css";
 
 /** The report belongs to one document revision. Geometry/profile changes clear it. */
 export function setupPrintability(options: {
