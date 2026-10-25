@@ -16,7 +16,13 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   Voron y Voxelab), con las boquillas de su perfil, o una impresora propia con su volumen, sus
   boquillas y, si se quiere, el perfil de una del catálogo. Las propias y la última elección se
   guardan en `printers.json`, en la carpeta de configuración de la app.
-- Tamaño final, con aviso y ajuste a la placa y a la altura de la impresora elegida.
+- Tamaño por ejes (X, Y, Z) con bloqueo de proporciones, escala en %, tamaño original y
+  deshacer; ajuste a la placa que respeta el margen, las zonas excluidas de la impresora y
+  la reserva de la torre de purga. Regla para medir entre dos puntos del modelo (`M`).
+- Desperdicio estimado: purga por cambio según el sentido del cambio de color (editable por
+  par y exportada al 3MF), multiplicador, purga inicial, torre y purga aprovechada en relleno,
+  con desglose en g, m y mm³. Los ajustes se guardan en `settings.json`.
+- Interfaz en español e inglés (menú Editar > Preferencias).
 - La boquilla manda en la preparación: los bordes de color no se cortan más fino que media
   boquilla, la estimación usa la altura de capa de su perfil y se avisa de las manchas de color
   demasiado pequeñas para ella.
@@ -25,7 +31,7 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
-  dentro; opcionalmente el color principal como sólido completo) y un `colores.txt`.
+  dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 
 ## Perfiles de impresora en el 3MF
 
@@ -50,6 +56,50 @@ la boquilla y la altura de capa.
 
 Quedan fuera las impresoras de dos extrusores (H2D, H2D Pro, H2C, X2D): su 3MF necesita otra
 configuración de filamentos.
+
+## Torre de purga y desperdicio
+
+BlendParser **no cambia la torre** que el 3MF pide a Bambu Studio: sigue en la posición de
+siempre (`wipe_tower_x/y`) y la genera el laminador. La app estima su huella (20 mm de ancho
+más 3 mm de borde, y un fondo según la purga de la capa con más cambios, o el que se indique)
+y aparta ese espacio, con la separación y el margen elegidos, al comprobar si el modelo cabe
+y al ajustarlo a la placa. El modelo sigue centrado. Las zonas excluidas (`bed_exclude_area`)
+salen del perfil de Bambu Studio.
+
+Los cambios se cuentan como el laminador los hace: un color solo cuenta en una capa si ocupa
+al menos dos líneas de la boquilla (las astillas de borde no provocan un cambio), y el orden de
+los colores se planifica en todas las capas para purgar lo mínimo: cada capa empieza con el
+filamento cargado y termina en el que conviene a la siguiente.
+
+El desperdicio suma tres partes, cada una una sola vez: purga en los cambios (a la basura;
+la parte aprovechada en relleno o soportes se muestra aparte y no suma), purga inicial y
+torre (paredes, relleno de capas sin cambios, borde y cebado por cambio). En las impresoras
+sin conducto de purga la purga acaba en la torre, pero se cuenta como purga. La purga por
+cambio va de 107 a 800 mm³ según ΔE y lo que aclara el nuevo color, como sugiere Bambu Studio.
+
+Pendiente: comparar la estimación con lo que informa Bambu Studio al laminar. La CLI de
+Bambu Studio 2.x se cierra al laminar desde la línea de comandos en Windows, así que hay que
+hacerlo desde la interfaz: exportar el modelo de ejemplo a 75 mm con 4 colores y anotar la
+diferencia con «Filamento → Purgado» y «Torre» del resumen de laminado. Con ese modelo la app
+estima 430 cambios, 164,4 g de purga, 15,0 g de torre y 179,5 g en total.
+
+## Idiomas
+
+Los textos de la interfaz están en `src/i18n/`: `es.ts` es la referencia y el respaldo, y cada
+idioma es un archivo con las mismas claves. En el primer arranque se usa el idioma del sistema
+si hay catálogo para él; si no, el español. La elección se guarda en el almacenamiento de la
+ventana. El backend no redacta mensajes: envía una clave (`error.*`, `progress.*`) con sus
+valores y la interfaz la traduce.
+
+Para añadir un idioma:
+
+1. Copia `src/i18n/en.ts` como `xx.ts` y traduce los textos. Respeta los huecos `{nombre}`; las
+   entradas `{ one, other }` son plurales.
+2. Regístralo en `LANGS` y `CATALOGS` en `src/i18n/index.ts`, con su nombre en ese idioma.
+3. Si el ZIP por color debe salir en ese idioma, añade su `ZipText` en `crates/bp-3mf/src/lib.rs`.
+4. Comprueba: `npm run build` falla si al catálogo le falta o le sobra una clave, y
+   `npm run check:i18n` revisa textos vacíos, huecos y las claves que usan `index.html`, el
+   backend y `extract.py`. Las dos corren en CI.
 
 ## Descarga
 
@@ -153,16 +203,19 @@ crates/
     encode      paint_color, bit a bit como Bambu Studio
     mesh        Reparación, piezas sueltas, simplificación (meshoptimizer), aplanado con corte real
     optimize    Limpieza de islas de color por adyacencia
-    estimate    Cambios de filamento por capa y purga
+    estimate    Cambios de filamento por capa, con su sentido
+    waste       Desperdicio: purga por par de colores, purga inicial y torre
     split       Una pieza cerrada por color (cáscara o sólido completo)
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
-  bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color
+  bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa
 src-tauri/    Capa de aplicación: comandos, estado, malla en binario hacia la UI
 src/          Interfaz (TypeScript + three.js), diseño Dose
   api.ts        Tipos y llamadas al backend
-  viewer.ts     Visor, controles orbitales, pincel
+  i18n/         Catálogos de textos y formatos por idioma
+  menubar.ts    Barra de menús
+  viewer.ts     Visor, controles orbitales, pincel, regla
   main.ts       Estados, arrastrar y soltar, ajustes, paneles
 ```
 
@@ -175,11 +228,11 @@ con Blender unos 2,5 s.
 
 - **Cambios de filamento**: cada capa con un color extra obliga a purgar y recargar.
   Limpiar islas y bajar el detalle de bordes quita colores sueltos de capas enteras.
-  La estimación asume 0,2 mm por capa y 280 mm³ de purga por cambio; sirve para
-  comparar ajustes, no como cifra exacta de Bambu Studio.
+  La estimación usa la altura de capa del perfil y la purga de cada par de colores; sirve
+  para comparar ajustes, no como cifra exacta de Bambu Studio.
 - **Simplificar**: menos triángulos laminan más rápido y el 3MF pesa menos; los colores
   se transfieren desde la malla original.
 - **Reducir colores**: es la palanca más fuerte. Con el modelo de ejemplo, pasar de 10 colores
-  detectados a 5 bajó los cambios estimados de 1 472 a 641 y la purga de 511 g a 223 g.
+  detectados a 5 bajó los cambios estimados de 1 472 a 641.
 - **Aplanar base**: corta la base en un plano (la malla sigue cerrada) para dar más
   contacto con la placa y evitar soportes o despegues.

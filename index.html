@@ -4,83 +4,173 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BlendParser</title>
-<meta name="description" content="Convierte un .blend con materiales en un 3MF pintado para Bambu Studio.">
+<meta name="description" content="Convierte un .blend con materiales en un 3MF pintado para Bambu Studio." data-i18n-attr="content:meta.description">
 <script type="module" src="/src/main.ts"></script>
 </head>
 <body>
+<!-- Every visible text carries its catalogue key: data-i18n for the text, data-i18n-attr for attributes. -->
 <div class="app" data-app data-state="empty" data-view="filament" data-tool="orbit">
 
   <header class="bar">
     <span class="wordmark">BlendParser</span>
-    <button class="version" type="button" id="version" title="Buscar actualizaciones"><span data-bind="version">v…</span><i class="version__dot" aria-hidden="true"></i></button>
+    <ul class="menubar" id="menubar" role="menubar" aria-label="Menú" data-i18n-attr="aria-label:menu.label">
+      <li>
+        <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.file"></button>
+        <ul class="menu" role="menu" hidden>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="open"><span data-i18n="menu.open"></span> <kbd>Ctrl+O</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+S</kbd></button></li>
+        </ul>
+      </li>
+      <li>
+        <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.edit"></button>
+        <ul class="menu" role="menu" hidden>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undo"><span data-i18n="menu.undo"></span> <kbd>Ctrl+Z</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undoSize"><span data-i18n="menu.undoSize"></span></button></li>
+          <li role="separator" class="menu__sep"></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="printers"><span data-i18n="menu.printers"></span></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="waste"><span data-i18n="menu.waste"></span></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="prefs"><span data-i18n="menu.prefs"></span> <kbd>Ctrl+,</kbd></button></li>
+        </ul>
+      </li>
+      <li>
+        <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.help"></button>
+        <ul class="menu" role="menu" hidden>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="updates"><span data-i18n="menu.updates"></span></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="shortcuts"><span data-i18n="menu.shortcuts"></span></button></li>
+        </ul>
+      </li>
+    </ul>
+    <button class="version" type="button" id="version" title="Buscar actualizaciones" data-i18n-attr="title:update.check"><span data-bind="version">v…</span><i class="version__dot" aria-hidden="true"></i></button>
     <p class="bar__file" data-bind="fileName"></p>
     <div class="bar__end">
       <div id="printer-picker"></div>
-      <label class="visually-hidden" for="nozzle">Boquilla</label>
-      <select class="select" id="nozzle" name="nozzle" title="Diámetro de la boquilla">
+      <label class="visually-hidden" for="nozzle" data-i18n="bar.nozzle">Boquilla</label>
+      <select class="select" id="nozzle" name="nozzle" title="Diámetro de la boquilla" data-i18n-attr="title:bar.nozzleTitle">
         <option value="0.4">0,4 mm</option>
       </select>
-      <button class="btn btn--quiet" type="button" id="open-printers">Mis impresoras</button>
       <!-- Oculto hasta que la exportación por piezas sólidas esté completa (PR #1). -->
-      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" hidden>Por color (.zip)</button>
+      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" hidden data-i18n="bar.byColour">Por color (.zip)</button>
       <button class="btn btn--primary" type="button" id="export" aria-disabled="true"><span class="btn__warn" aria-hidden="true"></span><span data-bind="exportLabel">Exportar .3mf</span></button>
     </div>
   </header>
 
   <main class="work">
     <!-- Archivo y ajustes -->
-    <aside class="side" aria-label="Archivo y ajustes">
+    <aside class="side" aria-label="Archivo y ajustes" data-i18n-attr="aria-label:side.label">
       <div class="tray">
         <button class="tray__drop" type="button" id="choose">
           <span class="tray__empty">
-            <strong>Suelta un .blend aquí</strong>
-            <span>Con sus materiales y texturas. Lo convierto en un 3MF pintado.</span>
-            <span class="btn btn--quiet">Elegir archivo</span>
+            <strong data-i18n="tray.drop">Suelta un .blend aquí</strong>
+            <span data-i18n="tray.dropHelp">Con sus materiales y texturas. Lo convierto en un 3MF pintado.</span>
+            <span class="btn btn--quiet" data-i18n="tray.choose">Elegir archivo</span>
           </span>
           <span class="label tray__ready">
             <span class="label__name" data-bind="fileName"></span>
-            <span class="label__line"><span class="label__row" data-bind="fileMeta"></span><span class="label__stamp">Convertido</span></span>
+            <span class="label__line"><span class="label__row" data-bind="fileMeta"></span><span class="label__stamp" data-i18n="tray.converted">Convertido</span></span>
           </span>
           <span class="label tray__busy">
-            <span class="label__head"><span>Convirtiendo</span></span>
-            <span class="label__name" data-bind="step">Abriendo Blender</span>
+            <span class="label__head"><span data-i18n="tray.converting">Convirtiendo</span></span>
+            <span class="label__name" data-bind="step"></span>
             <span class="progress"><span></span></span>
           </span>
           <span class="label label--grey tray__error">
-            <span class="label__head"><span>No se pudo leer</span></span>
+            <span class="label__head"><span data-i18n="tray.failed">No se pudo leer</span></span>
             <span class="label__msg" data-bind="error"></span>
-            <span class="btn btn--quiet">Elegir otro archivo</span>
+            <span class="btn btn--quiet" data-i18n="tray.chooseOther">Elegir otro archivo</span>
           </span>
         </button>
-        <button class="btn btn--quiet" type="button" id="find-blender" hidden>Buscar blender.exe</button>
+        <button class="btn btn--quiet" type="button" id="find-blender" hidden data-i18n="tray.findBlender">Buscar blender.exe</button>
       </div>
 
       <form class="settings" id="settings" novalidate>
-        <details class="group" open>
-          <summary><h2>Tamaño</h2><span class="group__sum num" data-bind="dims"></span></summary>
+        <details class="group" id="size-group" open>
+          <summary><h2 data-i18n="size.title">Tamaño</h2><span class="group__sum num" data-bind="dims"></span></summary>
           <div class="group__body">
+            <fieldset class="axes" id="axes">
+              <legend><span data-i18n="size.legend">Medidas finales</span>
+                <button class="lock" type="button" id="lock" aria-pressed="true" data-i18n-attr="title:size.lockTitle" title="Bloquear proporciones"><span class="lock__icon" aria-hidden="true"></span><span data-bind="lockLabel">Proporcional</span></button>
+              </legend>
+              <div class="field">
+                <label for="size-x" data-i18n="size.x">Ancho (X)</label>
+                <div class="field__unit"><input class="input" id="size-x" name="size-x" type="number" inputmode="decimal" min="1" max="1000" step="0.1" data-axis="0"></div>
+              </div>
+              <div class="field">
+                <label for="size-y" data-i18n="size.y">Fondo (Y)</label>
+                <div class="field__unit"><input class="input" id="size-y" name="size-y" type="number" inputmode="decimal" min="1" max="1000" step="0.1" data-axis="1"></div>
+              </div>
+              <div class="field">
+                <label for="size-z" data-i18n="size.z">Alto (Z)</label>
+                <div class="field__unit"><input class="input" id="size-z" name="size-z" type="number" inputmode="decimal" min="1" max="1000" step="0.1" data-axis="2"></div>
+              </div>
+            </fieldset>
             <div class="field">
-              <label for="height">Altura final</label>
-              <div class="field__unit"><input class="input" id="height" name="height" type="number" inputmode="decimal" min="1" max="1000" step="0.5"><span>mm</span></div>
+              <label for="scale-pct" data-i18n="size.scale">Escala</label>
+              <div class="field__unit stepper">
+                <button class="btn btn--quiet btn--sm" type="button" id="scale-down" aria-label="Reducir 1 %" data-i18n-attr="aria-label:size.scaleDown">−</button>
+                <input class="input" id="scale-pct" type="number" inputmode="decimal" min="0.1" max="10000" step="0.1" aria-describedby="scale-help"><span>%</span>
+                <button class="btn btn--quiet btn--sm" type="button" id="scale-up" aria-label="Aumentar 1 %" data-i18n-attr="aria-label:size.scaleUp">+</button>
+              </div>
+              <p class="help" id="scale-help" data-bind="scaleHelp"></p>
             </div>
+            <dl class="facts">
+              <dt data-i18n="size.original">Original</dt><dd class="num" data-bind="sizeOriginal"></dd>
+              <dt data-i18n="size.result">Resultado</dt><dd class="num" data-bind="sizeResult"></dd>
+            </dl>
             <p class="help" data-bind="bedFit"></p>
+            <div class="row-actions">
+              <button class="btn btn--quiet btn--sm" type="button" id="fit-side" data-i18n="size.fit">Ajustar a la placa</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="size-reset" data-i18n="size.reset">Tamaño original</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="size-undo" data-i18n="size.undo">Deshacer tamaño</button>
+            </div>
+            <p class="help" data-i18n="size.precision">Las medidas admiten centésimas de milímetro y se guardan tal como las escribes.</p>
             <div class="field">
-              <label for="flatten">Aplanar base</label>
+              <label for="flatten" data-i18n="size.flatten">Aplanar base</label>
               <div class="field__unit">
                 <input class="input" id="flatten" name="flatten" type="number" inputmode="decimal" min="0" max="50" step="0.2" value="0" aria-describedby="contact-help">
                 <span>mm</span>
-                <button class="btn btn--quiet" type="button" id="flatten-apply">Aplanar</button>
+                <button class="btn btn--quiet" type="button" id="flatten-apply" data-i18n="size.flattenApply">Aplanar</button>
               </div>
               <p class="help" id="contact-help" data-bind="contact"></p>
             </div>
           </div>
         </details>
 
+        <details class="group" id="plate-group">
+          <summary><h2 data-i18n="plate.title">Placa y torre</h2><span class="group__sum" data-bind="plateSum"></span></summary>
+          <div class="group__body">
+            <svg class="plate" id="plate-view" role="img" aria-labelledby="plate-desc" preserveAspectRatio="xMidYMid meet"></svg>
+            <p class="visually-hidden" id="plate-desc" data-bind="plateDesc"></p>
+            <ul class="plate__legend" aria-hidden="true">
+              <li><i class="sw sw--model"></i><span data-i18n="plate.legendModel">Modelo</span></li>
+              <li><i class="sw sw--tower"></i><span data-i18n="plate.legendTower">Torre estimada</span></li>
+              <li><i class="sw sw--keep"></i><span data-i18n="plate.legendKeep">Margen</span></li>
+              <li><i class="sw sw--excl"></i><span data-i18n="plate.legendExcluded">Zona excluida</span></li>
+            </ul>
+            <ul class="issues" id="plate-issues"></ul>
+            <label class="check"><input type="checkbox" id="tower-on" checked> <span data-i18n="plate.reserve">Reservar espacio para la torre de purga</span></label>
+            <div class="field">
+              <label for="tower-depth" data-i18n="plate.depth">Fondo de la torre</label>
+              <div class="field__unit"><input class="input" id="tower-depth" type="number" inputmode="decimal" min="5" max="250" step="1" aria-describedby="tower-depth-help"><span>mm</span></div>
+              <p class="help" id="tower-depth-help" data-bind="towerDepthHelp"></p>
+            </div>
+            <div class="field">
+              <label for="tower-gap" data-i18n="plate.gap">Separación entre modelo y torre</label>
+              <div class="field__unit"><input class="input" id="tower-gap" type="number" inputmode="decimal" min="0" max="50" step="0.5"><span>mm</span></div>
+            </div>
+            <div class="field">
+              <label for="margin" data-i18n="plate.margin">Margen con el borde de la placa</label>
+              <div class="field__unit"><input class="input" id="margin" type="number" inputmode="decimal" min="0" max="50" step="0.5"><span>mm</span></div>
+            </div>
+            <p class="help" data-bind="towerNote"></p>
+            <button class="link" type="button" id="plate-reset" data-i18n="plate.reset">Restablecer valores</button>
+          </div>
+        </details>
+
         <details class="group" id="color-group" open>
-          <summary><h2>Color</h2><span class="group__sum" data-bind="colorSum"></span></summary>
+          <summary><h2 data-i18n="colour.title">Color</h2><span class="group__sum" data-bind="colorSum"></span></summary>
           <div class="group__body">
             <fieldset class="keys" id="count">
-              <legend>Detectar de nuevo con</legend>
+              <legend data-i18n="colour.redetect">Detectar de nuevo con</legend>
               <input type="radio" name="count" id="c2" value="2"><label for="c2">2</label>
               <input type="radio" name="count" id="c3" value="3"><label for="c3">3</label>
               <input type="radio" name="count" id="c4" value="4" checked><label for="c4">4</label>
@@ -90,43 +180,43 @@
               <input type="radio" name="count" id="c10" value="10"><label for="c10">10</label>
               <input type="radio" name="count" id="c12" value="12"><label for="c12">12</label>
             </fieldset>
-            <p class="help">Vuelve a leer los colores del modelo; descarta lo pintado a mano.</p>
+            <p class="help" data-i18n="colour.redetectHelp">Vuelve a leer los colores del modelo; descarta lo pintado a mano.</p>
             <div class="field">
-              <label for="reduce-to">Unir los más parecidos hasta</label>
+              <label for="reduce-to" data-i18n="colour.reduce">Unir los más parecidos hasta</label>
               <div class="field__unit reduce">
                 <input class="input" id="reduce-to" type="number" inputmode="numeric" min="1" max="16" value="3" aria-describedby="reduce-help">
-                <span>colores</span>
-                <button class="btn btn--quiet" type="button" id="reduce">Unir</button>
+                <span data-i18n="colour.colours">colores</span>
+                <button class="btn btn--quiet" type="button" id="reduce" data-i18n="colour.join">Unir</button>
               </div>
-              <p class="help" id="reduce-help">Conserva lo pintado a mano. Se puede deshacer.</p>
+              <p class="help" id="reduce-help" data-i18n="colour.reduceHelp">Conserva lo pintado a mano. Se puede deshacer.</p>
             </div>
             <div class="field">
-              <label for="detail">Detalle de bordes <output for="detail" data-bind="detailOut"></output></label>
+              <label for="detail"><span data-i18n="colour.detail">Detalle de bordes</span> <output for="detail" data-bind="detailOut"></output></label>
               <input class="range" id="detail" name="detail" type="range" min="0" max="5" step="1" value="5">
             </div>
             <div class="field" id="island-field">
-              <label for="island">Limpiar islas menores de <output for="island" data-bind="islandOut"></output></label>
+              <label for="island"><span data-i18n="colour.islands">Limpiar islas menores de</span> <output for="island" data-bind="islandOut"></output></label>
               <input class="range" id="island" name="island" type="range" min="0" max="50" step="1" value="0">
-              <p class="help">Las manchas pequeñas toman el color vecino: menos cambios de filamento.</p>
+              <p class="help" data-i18n="colour.islandsHelp">Las manchas pequeñas toman el color vecino: menos cambios de filamento.</p>
             </div>
             <div class="note" id="detail-note" role="status" hidden>
               <p data-bind="detailNote"></p>
-              <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix">Limpiar islas</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix"></button>
             </div>
           </div>
         </details>
 
         <details class="group">
-          <summary><h2>Malla</h2><span class="group__sum" data-bind="meshSum"></span></summary>
+          <summary><h2 data-i18n="mesh.title">Malla</h2><span class="group__sum" data-bind="meshSum"></span></summary>
           <div class="group__body">
-            <label class="check"><input type="checkbox" id="repair" checked> Reparar malla</label>
+            <label class="check"><input type="checkbox" id="repair" checked> <span data-i18n="mesh.repair">Reparar malla</span></label>
             <p class="help" data-bind="repairOut"></p>
             <div class="field">
-              <label for="piece">Quitar piezas sueltas menores de</label>
+              <label for="piece" data-i18n="mesh.loose">Quitar piezas sueltas menores de</label>
               <div class="field__unit"><input class="input" id="piece" name="piece" type="number" inputmode="decimal" min="0" max="100" step="0.5" value="0"><span>mm</span></div>
             </div>
             <div class="field">
-              <label for="keep">Simplificar <output for="keep" data-bind="keepOut"></output></label>
+              <label for="keep"><span data-i18n="mesh.simplify">Simplificar</span> <output for="keep" data-bind="keepOut"></output></label>
               <input class="range" id="keep" name="keep" type="range" min="5" max="100" step="5" value="100">
               <p class="help" data-bind="triangles"></p>
             </div>
@@ -138,134 +228,245 @@
     <!-- Vista previa -->
     <section class="stage" aria-labelledby="h-preview">
       <div class="stage__top">
-        <h2 id="h-preview">Vista previa</h2>
+        <h2 id="h-preview" data-i18n="stage.title">Vista previa</h2>
         <div class="stage__tools">
-          <div class="seg" role="group" aria-label="Qué mostrar">
-            <button type="button" data-view="filament" aria-pressed="true">Resultado</button>
-            <button type="button" data-view="texture" aria-pressed="false">Original</button>
+          <div class="seg" role="group" aria-label="Qué mostrar" data-i18n-attr="aria-label:stage.show">
+            <button type="button" data-view="filament" aria-pressed="true" data-i18n="stage.result">Resultado</button>
+            <button type="button" data-view="texture" aria-pressed="false" data-i18n="stage.original">Original</button>
           </div>
-          <div class="seg" role="group" aria-label="Herramienta">
-            <button type="button" data-tool="orbit" aria-pressed="true" title="Orbitar (O)">Orbitar <kbd>O</kbd></button>
-            <button type="button" data-tool="brush" aria-pressed="false" title="Pincel (B)">Pincel <kbd>B</kbd></button>
-          </div>
-          <button class="btn btn--quiet btn--sm" type="button" id="undo" disabled title="Deshacer (Ctrl+Z)">Deshacer</button>
+          <button class="btn btn--quiet btn--sm" type="button" id="undo" disabled data-i18n="stage.undo">Deshacer</button>
         </div>
       </div>
       <div class="stage__view">
-        <canvas id="viewport" aria-label="Vista 3D del modelo. Arrastra para orbitar, rueda para acercar."></canvas>
+        <canvas id="viewport" aria-label="Vista 3D del modelo. Arrastra para orbitar, rueda para acercar." data-i18n-attr="aria-label:stage.canvas"></canvas>
+        <div class="toolbar" id="toolbar" role="toolbar" aria-orientation="vertical" data-i18n-attr="aria-label:stage.tool" data-expanded="false">
+          <button class="toolbar__btn" type="button" data-tool="orbit" aria-pressed="true" data-i18n-attr="title:stage.orbitTitle;aria-label:stage.orbitTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9.5a8 8 0 0 1 13.8-3.2"/><path d="M19.5 14.5a8 8 0 0 1-13.8 3.2"/><path d="M18.6 2.8v3.7h-3.7"/><path d="M5.4 21.2v-3.7h3.7"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg><span class="toolbar__label" data-i18n="stage.orbit"></span><kbd>O</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="brush" aria-pressed="false" data-i18n-attr="title:stage.brushTitle;aria-label:stage.brushTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4.5 19.5 9.5 11 18l-5-5z"/><path d="M6 13c-2 0-3 1.5-3 3.5S2 20 2 20s2.5.5 4.5-.5S10 17 10 15.5"/></svg><span class="toolbar__label" data-i18n="stage.brush"></span><kbd>B</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="measure" aria-pressed="false" data-i18n-attr="title:stage.measureTitle;aria-label:stage.measureTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5 15.5 3l5.5 5.5L8.5 21z"/><path d="M7.5 11l2 2M10.5 8l1.5 1.5M13.5 5l2 2M5 14l1.5 1.5"/></svg><span class="toolbar__label" data-i18n="stage.measure"></span><kbd>M</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="size" aria-pressed="false" data-i18n-attr="title:stage.sizeTitle;aria-label:stage.sizeTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 15v5h-5"/><path d="M4 4l6 6M20 20l-6-6"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg><span class="toolbar__label" data-i18n="stage.size"></span><kbd>S</kbd></button>
+          <span class="toolbar__sep" aria-hidden="true"></span>
+          <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
+          <span class="toolbar__sep" aria-hidden="true"></span>
+          <button class="toolbar__btn toolbar__expand" type="button" id="toolbar-expand" aria-expanded="false"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg><span class="toolbar__label" data-bind="toolbarExpand"></span></button>
+        </div>
         <div class="banner" id="fit-banner" hidden>
           <p data-bind="fitBanner"></p>
-          <button class="btn btn--quiet btn--sm" type="button" id="fit">Ajustar a la placa</button>
+          <button class="btn btn--quiet btn--sm" type="button" id="fit" data-i18n="size.fit">Ajustar a la placa</button>
         </div>
         <span class="busybar" aria-hidden="true"></span>
-        <p class="stage__empty">La vista previa aparece cuando sueltas un archivo.</p>
-        <p class="stage__busy" data-bind="step">Abriendo Blender</p>
-        <div class="toast" id="toast" role="status" hidden>
+        <p class="stage__empty" data-i18n="stage.empty">La vista previa aparece cuando sueltas un archivo.</p>
+        <p class="stage__busy" data-bind="step"></p>
+        <div class="toast" id="toast" role="status" popover="manual">
           <p data-bind="toast"></p>
           <button class="btn btn--quiet btn--sm" type="button" id="toast-action" hidden></button>
-          <button class="toast__close" type="button" id="toast-close" aria-label="Cerrar aviso">Cerrar</button>
+          <button class="toast__close" type="button" id="toast-close" aria-label="Cerrar aviso" data-i18n-attr="aria-label:toast.closeLabel" data-i18n="toast.close">Cerrar</button>
         </div>
       </div>
       <div class="stage__foot">
         <div class="brush">
-          <span class="brush__chip"><i class="brush__swatch" aria-hidden="true"></i><span data-bind="brushSlot">Ranura 1</span></span>
-          <label for="radius">Radio</label>
+          <span class="brush__chip"><i class="brush__swatch" aria-hidden="true"></i><span data-bind="brushSlot"></span></span>
+          <label for="radius" data-i18n="stage.radius">Radio</label>
           <input class="range" id="radius" type="range" min="0.5" max="20" step="0.5" value="3">
           <output for="radius" class="num" data-bind="radiusOut">3&nbsp;mm</output>
         </div>
-        <p class="stage__hint" data-bind="hint">Arrastra para orbitar, botón derecho para mover, rueda para acercar, F para encuadrar.</p>
+        <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
+        <p class="stage__hint" data-bind="hint"></p>
       </div>
     </section>
 
     <!-- AMS -->
     <aside class="ams" aria-labelledby="h-ams">
       <section class="swaps" aria-labelledby="h-swaps">
-        <h2 id="h-swaps" class="visually-hidden">Cambios de filamento</h2>
-        <p class="swaps__fig"><b class="num" data-bind="swaps">0</b> cambios de filamento <span class="swaps__delta" data-bind="swapsDelta"></span></p>
+        <h2 id="h-swaps" class="visually-hidden" data-i18n="swaps.title">Cambios de filamento</h2>
+        <p class="swaps__fig"><b class="num" data-bind="swaps">0</b> <span data-bind="swapsWord">cambios de filamento</span> <span class="swaps__delta" data-bind="swapsDelta"></span></p>
         <p class="help" data-bind="swapsDetail"></p>
-        <p class="swaps__how">Para bajarlo:
-          <button class="link" type="button" id="go-reduce">unir colores parecidos</button> o
-          <button class="link" type="button" id="go-islands">limpiar islas</button>.
+        <p class="swaps__how"><span data-i18n="swaps.lower">Para bajarlo:</span>
+          <button class="link" type="button" id="go-reduce" data-i18n="swaps.joinSimilar">unir colores parecidos</button> <span data-i18n="swaps.or">o</span>
+          <button class="link" type="button" id="go-islands" data-i18n="swaps.cleanIslands">limpiar islas</button>.
         </p>
+        <!-- The waste follows from the swaps: one line, its breakdown folded away. -->
+        <details class="waste" id="waste">
+          <summary><b class="num" data-bind="wasteTotal">0 g</b> <span data-i18n="waste.title">de desperdicio estimado</span></summary>
+          <div class="waste__body">
+            <p class="help" data-bind="wasteTotalDetail"></p>
+            <dl class="facts facts--wide" id="waste-breakdown"></dl>
+            <p class="help" data-bind="wasteAssumes"></p>
+            <button class="btn btn--quiet btn--sm" type="button" id="open-waste" data-i18n="waste.settings">Ajustes del desperdicio</button>
+          </div>
+        </details>
       </section>
 
-      <h2 id="h-ams">Ranuras del AMS</h2>
+      <h2 id="h-ams" data-i18n="ams.title">Ranuras del AMS</h2>
       <ol class="slots" id="slots"></ol>
-      <p class="ams__hint">Pulsa una ranura para pintar con ella. El círculo cambia su color.</p>
-      <button class="btn btn--quiet" type="button" id="suggest">Volver a sugerir colores</button>
+      <p class="ams__hint" data-i18n="ams.hint">Pulsa una ranura para pintar con ella. El círculo cambia su color.</p>
+      <button class="btn btn--quiet" type="button" id="suggest" data-i18n="ams.suggest">Volver a sugerir colores</button>
 
       <section class="mats" aria-labelledby="h-mats">
-        <h2 id="h-mats">Materiales</h2>
+        <h2 id="h-mats" data-i18n="materials.title">Materiales</h2>
         <dl id="materials"></dl>
       </section>
     </aside>
   </main>
 
+  <dialog class="dialog" id="prefs-dialog" aria-labelledby="h-prefs">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-prefs" data-i18n="prefs.title">Preferencias</h2>
+      <div class="field">
+        <label for="lang" data-i18n="bar.language">Idioma</label>
+        <select class="select" id="lang" aria-describedby="lang-help"></select>
+        <p class="help" id="lang-help" data-i18n="prefs.langHelp">Se aplica al momento y se recuerda la próxima vez que abras BlendParser.</p>
+      </div>
+      <div class="dialog__actions">
+        <button class="btn btn--primary" type="submit" value="close" data-i18n="common.close">Cerrar</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
-      <h2 id="h-zip">Exportar por color</h2>
-      <p class="help">Un STL cerrado por color en un .zip, para imprimir cada color como pieza aparte.</p>
+      <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>
+      <p class="help" data-i18n="zip.help">Un STL cerrado por color en un .zip, para imprimir cada color como pieza aparte.</p>
       <div class="field">
-        <label for="shell">Grosor de cada color</label>
+        <label for="shell" data-i18n="zip.thickness">Grosor de cada color</label>
         <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2" aria-describedby="shell-help"><span>mm</span></div>
-        <p class="help" id="shell-help">Entre 0,2 y 20&nbsp;mm.</p>
+        <p class="help" id="shell-help" data-bind="shellHelp"></p>
       </div>
-      <label class="check"><input type="checkbox" id="main-solid" checked> Color principal como sólido completo</label>
+      <label class="check"><input type="checkbox" id="main-solid" checked> <span data-i18n="zip.mainSolid">Color principal como sólido completo</span></label>
       <div class="dialog__actions">
-        <button class="btn btn--quiet" type="submit" value="cancel">Cancelar</button>
-        <button class="btn btn--primary" type="button" id="export-zip">Exportar .zip</button>
+        <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="button" id="export-zip" data-i18n="zip.export">Exportar .zip</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog dialog--sheet" id="waste-dialog" aria-labelledby="h-waste-dialog">
+    <form class="sheet" id="waste-form" novalidate>
+      <header class="sheet__head">
+        <h2 id="h-waste-dialog" data-i18n="wasteForm.title">Ajustes del desperdicio</h2>
+        <p class="help" data-i18n="wasteForm.help"></p>
+      </header>
+      <div class="sheet__body">
+        <section class="sheet__section" aria-labelledby="h-wf-print">
+          <h3 id="h-wf-print" data-i18n="wasteForm.print"></h3>
+          <div class="grid3">
+          <div class="field">
+            <label for="w-layer" data-i18n="wasteForm.layer"></label>
+            <div class="unit-input"><input class="input" id="w-layer" type="number" inputmode="decimal" min="0.04" max="1" step="0.01" aria-describedby="w-layer-help"><span aria-hidden="true">mm</span></div>
+            <p class="help" id="w-layer-help" data-bind="layerHelp"></p>
+          </div>
+          <div class="field">
+            <span class="field__label" data-i18n="wasteForm.nozzle"></span>
+            <p class="chip num" data-bind="wasteNozzle"></p>
+            <p class="help" data-i18n="wasteForm.nozzleHelp"></p>
+          </div>
+          </div>
+        </section>
+        <section class="sheet__section" aria-labelledby="h-wf-filament">
+          <h3 id="h-wf-filament" data-i18n="wasteForm.filament"></h3>
+          <div class="grid3">
+          <div class="field">
+            <label for="w-material" data-i18n="wasteForm.material"></label>
+            <select class="select" id="w-material"></select>
+          </div>
+          <div class="field">
+            <label for="w-density" data-i18n="wasteForm.density"></label>
+            <div class="unit-input"><input class="input" id="w-density" type="number" inputmode="decimal" min="0.5" max="3" step="0.01"><span aria-hidden="true">g/cm³</span></div>
+          </div>
+          <div class="field">
+            <label for="w-diameter" data-i18n="wasteForm.diameter"></label>
+            <div class="unit-input"><input class="input" id="w-diameter" type="number" inputmode="decimal" min="1" max="3.5" step="0.01"><span aria-hidden="true">mm</span></div>
+          </div>
+          </div>
+        </section>
+        <section class="sheet__section" aria-labelledby="h-wf-purge">
+          <h3 id="h-wf-purge" data-i18n="wasteForm.purge"></h3>
+          <div class="grid2">
+          <div class="field">
+            <label for="w-multiplier" data-i18n="wasteForm.multiplier"></label>
+            <div class="unit-input"><input class="input" id="w-multiplier" type="number" inputmode="decimal" min="0.1" max="3" step="0.05"><span aria-hidden="true">×</span></div>
+          </div>
+          <div class="field">
+            <label for="w-start" data-i18n="wasteForm.start"></label>
+            <div class="unit-input"><input class="input" id="w-start" type="number" inputmode="decimal" min="0" max="2000" step="5"><span aria-hidden="true">mm³</span></div>
+          </div>
+          <div class="field">
+            <label for="w-prime" data-i18n="wasteForm.prime"></label>
+            <div class="unit-input"><input class="input" id="w-prime" type="number" inputmode="decimal" min="0" max="500" step="1"><span aria-hidden="true">mm³</span></div>
+          </div>
+          <div class="field">
+            <label for="w-reuse" data-i18n="wasteForm.reuse"></label>
+            <div class="unit-input"><input class="input" id="w-reuse" type="number" inputmode="numeric" min="0" max="90" step="5" aria-describedby="w-reuse-help"><span aria-hidden="true">%</span></div>
+            <p class="help" id="w-reuse-help" data-i18n="wasteForm.reuseHelp"></p>
+          </div>
+          </div>
+        </section>
+        <section class="sheet__section" aria-labelledby="h-wf-flush">
+          <div class="sheet__row">
+            <h3 id="h-wf-flush" data-i18n="wasteForm.flushTitle"></h3>
+            <button class="link" type="button" id="flush-reset" data-i18n="wasteForm.flushReset"></button>
+          </div>
+          <p class="help" data-bind="flushHelp"></p>
+          <div class="flush" id="flush-table"></div>
+        </section>
+        <p class="form-error" id="waste-error" role="alert" hidden></p>
+      </div>
+      <footer class="sheet__foot">
+        <button class="link" type="button" id="waste-defaults" data-i18n="wasteForm.defaults"></button>
+        <span class="sheet__spacer"></span>
+        <button class="btn btn--quiet" type="button" id="waste-close" data-i18n="common.close"></button>
+        <button class="btn btn--primary" type="submit" id="waste-save" data-i18n="wasteForm.save"></button>
+      </footer>
     </form>
   </dialog>
 
   <dialog class="dialog dialog--wide" id="printer-dialog" aria-labelledby="h-printers">
     <div class="dialog__body">
-      <h2 id="h-printers">Mis impresoras</h2>
+      <h2 id="h-printers" data-i18n="printers.title">Mis impresoras</h2>
       <ul class="printers" id="printer-list"></ul>
-      <p class="help" id="printer-empty">Aún no tienes impresoras propias. Crea una si la tuya no está entre las de Bambu Lab; se guarda para las próximas sesiones.</p>
+      <p class="help" id="printer-empty" data-i18n="printers.empty">Aún no tienes impresoras propias. Crea una si la tuya no está entre las de Bambu Lab; se guarda para las próximas sesiones.</p>
 
       <form class="printer-form" id="printer-form" novalidate>
         <div class="printer-form__head">
-          <h3 id="h-printer-form">Nueva impresora</h3>
-          <button class="link" type="button" id="printer-new" hidden>Crear otra</button>
+          <h3 id="h-printer-form"></h3>
+          <button class="link" type="button" id="printer-new" hidden data-i18n="printers.another">Crear otra</button>
         </div>
         <div class="field">
-          <label for="pf-name">Nombre</label>
-          <input class="input" id="pf-name" name="pf-name" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Por ejemplo, Prusa MK4">
+          <label for="pf-name" data-i18n="printers.name">Nombre</label>
+          <input class="input" id="pf-name" name="pf-name" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Por ejemplo, Prusa MK4" data-i18n-attr="placeholder:printers.namePlaceholder">
         </div>
         <fieldset class="volume">
-          <legend>Volumen de impresión</legend>
+          <legend data-i18n="printers.volume">Volumen de impresión</legend>
           <div class="field">
-            <label for="pf-w">Ancho</label>
+            <label for="pf-w" data-i18n="printers.width">Ancho</label>
             <div class="field__unit"><input class="input" id="pf-w" name="pf-w" type="number" inputmode="decimal" min="20" max="2000" step="1"><span>mm</span></div>
           </div>
           <div class="field">
-            <label for="pf-d">Fondo</label>
+            <label for="pf-d" data-i18n="printers.depth">Fondo</label>
             <div class="field__unit"><input class="input" id="pf-d" name="pf-d" type="number" inputmode="decimal" min="20" max="2000" step="1"><span>mm</span></div>
           </div>
           <div class="field">
-            <label for="pf-h">Alto</label>
+            <label for="pf-h" data-i18n="printers.height">Alto</label>
             <div class="field__unit"><input class="input" id="pf-h" name="pf-h" type="number" inputmode="decimal" min="20" max="2000" step="1"><span>mm</span></div>
           </div>
         </fieldset>
         <fieldset class="keys keys--wide" id="pf-nozzles">
-          <legend>Boquillas que admite, en mm</legend>
+          <legend data-i18n="printers.nozzles">Boquillas que admite, en mm</legend>
         </fieldset>
         <div class="field">
-          <label for="pf-base-button">Perfil de Bambu Studio</label>
+          <label for="pf-base-button" data-i18n="printers.base">Perfil de Bambu Studio</label>
           <div class="picker--block" id="pf-base"></div>
-          <p class="help" id="pf-base-help">Con el perfil de una impresora de Bambu Studio, el 3MF abre con esa impresora, su proceso y su filamento. Sin perfil, el 3MF lleva el volumen y la boquilla, y lo abre cualquier slicer compatible con 3MF de Bambu.</p>
+          <p class="help" id="pf-base-help" data-i18n="printers.baseHelp">Con el perfil de una impresora de Bambu Studio, el 3MF abre con esa impresora, su proceso y su filamento. Sin perfil, el 3MF lleva el volumen y la boquilla, y lo abre cualquier slicer compatible con 3MF de Bambu.</p>
         </div>
         <p class="form-error" id="printer-error" role="alert" hidden></p>
         <div class="dialog__actions">
-          <button class="btn btn--quiet" type="button" id="printer-close">Cerrar</button>
-          <button class="btn btn--primary" type="submit" id="printer-save">Guardar impresora</button>
+          <button class="btn btn--quiet" type="button" id="printer-close" data-i18n="common.close">Cerrar</button>
+          <button class="btn btn--primary" type="submit" id="printer-save" data-i18n="printers.save">Guardar impresora</button>
         </div>
       </form>
     </div>
   </dialog>
 
-  <div class="drop-veil" aria-hidden="true"><p>Suelta el .blend para convertirlo</p></div>
+  <div class="drop-veil" aria-hidden="true"><p data-i18n="tray.veil">Suelta el .blend para convertirlo</p></div>
   <p class="visually-hidden" aria-live="polite" id="live"></p>
 </div>
 </body>

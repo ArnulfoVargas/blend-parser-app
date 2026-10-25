@@ -24,8 +24,15 @@ interface PickerOptions {
   empty: (query: string) => string;
   /** Optional action under an empty list ("Crear una propia"). */
   emptyAction?: { label: string; run: (query: string) => void };
+  /** Accessible name of the search field ("Buscar: Impresora"). */
+  searchLabel: string;
+  /** What the button reads when nothing is picked. */
+  none: string;
   onPick: (value: string) => void;
 }
+
+/** The words a picker shows, so they can change with the interface language. */
+export type PickerTexts = Pick<PickerOptions, "label" | "placeholder" | "empty" | "emptyAction" | "searchLabel" | "none">;
 
 /** Lower case, no accents, hyphens as spaces: "Ender-3" matches "ender 3". */
 const fold = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[-_]/g, " ").toLowerCase();
@@ -44,7 +51,7 @@ export class Picker {
   private current = "";
   private readonly id = `picker-${++uid}`;
 
-  constructor(root: HTMLElement, private readonly opts: PickerOptions) {
+  constructor(root: HTMLElement, private opts: PickerOptions) {
     root.classList.add("picker");
     this.button = Object.assign(document.createElement("button"), { type: "button", className: "picker__button", id: `${root.id || this.id}-button` });
     this.button.setAttribute("aria-haspopup", "listbox");
@@ -61,7 +68,7 @@ export class Picker {
       spellcheck: false,
     });
     this.search.setAttribute("role", "combobox");
-    this.search.setAttribute("aria-label", `Buscar: ${opts.label}`);
+    this.search.setAttribute("aria-label", opts.searchLabel);
     this.search.setAttribute("aria-expanded", "true");
     this.search.setAttribute("aria-controls", `${this.id}-list`);
     this.search.setAttribute("aria-autocomplete", "list");
@@ -120,7 +127,17 @@ export class Picker {
     const item = this.items.find((i) => i.value === value);
     this.button.querySelector(".picker__value")!.textContent = item?.full ?? item?.label ?? "";
     this.button.title = item ? [item.group, item.label, item.detail].filter(Boolean).join(", ") : "";
-    this.button.setAttribute("aria-label", `${this.opts.label}: ${item?.label ?? "ninguna"}`);
+    this.button.setAttribute("aria-label", `${this.opts.label}: ${item?.label ?? this.opts.none}`);
+  }
+
+  /** New words for the same picker, after a language change. */
+  relabel(texts: PickerTexts) {
+    this.opts = { ...this.opts, ...texts };
+    this.search.placeholder = texts.placeholder;
+    this.search.setAttribute("aria-label", texts.searchLabel);
+    this.list.setAttribute("aria-label", texts.label);
+    this.setValue(this.current);
+    if (this.isOpen) this.filter();
   }
 
   open() {

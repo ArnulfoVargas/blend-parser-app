@@ -42,6 +42,7 @@ pub struct MaterialInfo {
     pub name: String,
     /// `flat`, `image` or `vertex`.
     pub kind: String,
+    /// What the UI words by kind: `WxH` pixels, the colour layer's name, or `#RRGGBB`.
     pub detail: String,
     pub faces: u32,
 }

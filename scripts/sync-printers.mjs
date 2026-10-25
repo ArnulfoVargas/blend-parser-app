@@ -7,8 +7,9 @@
 //
 // For each vendor in resources/profiles it reads every instantiable machine preset,
 // resolves `inherits`, and keeps single-extruder printers: their print area and height,
-// and per nozzle the machine preset, a process (the machine's default, or the compatible
-// one closest to half the nozzle) with its layer height, and a PLA filament preset.
+// the zones of the bed they keep free, and per nozzle the machine preset, a process (the
+// machine's default, or the compatible one closest to half the nozzle) with its layer
+// height, and a PLA filament preset.
 // Printers with two extruders are left out: their 3MF needs another filament layout.
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -48,6 +49,15 @@ const vendors = (await (await fetch(`https://api.github.com/repos/${REPO}/conten
   .map((e) => e.name.replace(/\.json$/, ''));
 
 const first = (v) => (Array.isArray(v) ? v[0] : v);
+/** `bed_exclude_area` is one polygon of "XxY" points; the app keeps its bounding box. */
+const excludeOf = (m) => {
+  const pts = [].concat(m.bed_exclude_area ?? []).map((p) => p.split('x').map(Number)).filter((p) => p.length === 2 && p.every(Number.isFinite));
+  if (pts.length < 3) return [];
+  const xs = pts.map((p) => p[0]);
+  const ys = pts.map((p) => p[1]);
+  const box = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  return box[2] > box[0] && box[3] > box[1] ? [box] : [];
+};
 const printers = [];
 
 for (const vendor of vendors) {
@@ -111,6 +121,7 @@ for (const vendor of vendors) {
       name: m.printer_model,
       area: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
       height,
+      exclude: excludeOf(m),
       nozzles: [],
     };
     if (model.nozzles.some((n) => n.diameter === diameter)) continue;

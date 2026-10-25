@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::plate::Rect;
+
 /// Nozzle diameters a custom printer can take, in millimetres.
 pub const NOZZLES: [f32; 4] = [0.2, 0.4, 0.6, 0.8];
 
@@ -39,6 +41,8 @@ struct CatalogPrinter {
     name: &'static str,
     area: [f32; 4],
     height: f32,
+    /// Zones of the bed the printer keeps free (min x, min y, max x, max y).
+    exclude: &'static [[f32; 4]],
     nozzles: &'static [CatalogNozzle],
 }
 
@@ -138,11 +142,37 @@ impl Printer {
 
     /// Where the model's centre goes: the middle of the catalogue printer's
     /// printable area, which does not always start at 0, 0.
-    pub(crate) fn plate_centre(&self) -> (f32, f32) {
-        match find(&self.profile.id).filter(|_| !self.profile.custom) {
-            Some(p) => ((p.area[0] + p.area[2]) / 2.0, (p.area[1] + p.area[3]) / 2.0),
-            None => (self.profile.volume_mm[0] / 2.0, self.profile.volume_mm[1] / 2.0),
+    pub fn plate_centre(&self) -> (f32, f32) {
+        let a = self.printable_area();
+        ((a.x0 + a.x1) / 2.0, (a.y0 + a.y1) / 2.0)
+    }
+
+    /// The bed area the printer prints on, in its own coordinates.
+    pub fn printable_area(&self) -> Rect {
+        match self.catalogued() {
+            Some(p) => Rect::new(p.area[0], p.area[1], p.area[2], p.area[3]),
+            None => Rect::new(0.0, 0.0, self.profile.volume_mm[0], self.profile.volume_mm[1]),
         }
+    }
+
+    /// Zones inside the printable area the printer keeps free, as Bambu Studio's profile lists them.
+    pub fn excluded_areas(&self) -> Vec<Rect> {
+        self.catalogued().map_or(vec![], |p| p.exclude.iter().map(|e| Rect::new(e[0], e[1], e[2], e[3])).collect())
+    }
+
+    /// Front left corner of the prime tower, as the 3MF tells Bambu Studio.
+    /// It stays on small custom beds.
+    pub fn tower_origin(&self) -> (f32, f32) {
+        (15.0, (self.bed_mm().1 - 40.0).clamp(15.0, 145.0).round())
+    }
+
+    /// Bambu Lab printers flush into a chute at the back; others flush into the tower.
+    pub fn purges_into_chute(&self) -> bool {
+        self.profile.base.as_deref().and_then(find).is_some_and(|p| p.vendor == "Bambu Lab")
+    }
+
+    fn catalogued(&self) -> Option<&'static CatalogPrinter> {
+        find(&self.profile.id).filter(|_| !self.profile.custom)
     }
 
     fn nozzle(&self) -> Option<(&'static CatalogPrinter, &'static CatalogNozzle)> {

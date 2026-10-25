@@ -1,5 +1,6 @@
 // Wires the window: file in (drop or dialog), settings out to Rust, the
 // summary back into the panels, and the preview in sync with the painting.
+// Every word the user reads comes from the catalogues in ./i18n.
 import "@fontsource/schibsted-grotesk/700.css";
 import "@fontsource/instrument-sans/400.css";
 import "@fontsource/instrument-sans/500.css";
@@ -10,8 +11,21 @@ import "./styles/app.css";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type PrinterProfile, type Printers, type Summary } from "./api";
-import { Picker, type PickerItem } from "./picker";
+import {
+  api,
+  isAppError,
+  type PlatePrefs,
+  type PrinterProfile,
+  type Printers,
+  type Prefs,
+  type Progress,
+  type Summary,
+  type Vec3,
+  type WastePrefs,
+} from "./api";
+import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, onLangChange, setLang, t, tKey, volume, type Key, type Lang } from "./i18n";
+import { menubar } from "./menubar";
+import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { Viewer, type Tool, type View } from "./viewer";
 
@@ -20,26 +34,45 @@ type State = "empty" | "converting" | "error" | "ready";
 const app = document.querySelector<HTMLElement>("[data-app]")!;
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 const live = $<HTMLParagraphElement>("#live");
-const nf = (n: number, d = 0) => n.toLocaleString("es", { maximumFractionDigits: d, minimumFractionDigits: d });
+const nf = (n: number, d = 0) => num(n, d);
 /** Millimetres as a printer spec reads them: 0,4, 0,25, 256. */
-const mm = (n: number) => n.toLocaleString("es", { maximumFractionDigits: 2 });
+const mm = (n: number) => num(n, 2, false);
+const dims = (v: number[], d = 1) => `${v.map((x) => nf(x, d)).join(" × ")} mm`;
 
 let summary: Summary | null = null;
 let printers: Printers | null = null;
+let prefs: Prefs | null = null;
 /** Swaps before the last change, to show what a setting did. */
 let previousSwaps: number | null = null;
 let brushSlot = 0;
+let state: State = "empty";
+/** The error shown in the tray, kept to word it again in another language. */
+let shownError: unknown = null;
+let step: Progress = { key: "blender", name: "" };
 
 function bind(key: string, text: string) {
   document.querySelectorAll(`[data-bind="${key}"]`).forEach((el) => (el.textContent = text));
 }
 
-function setState(s: State, detail?: string) {
+/** A backend error in the user's language. */
+function errText(e: unknown): string {
+  if (isAppError(e)) {
+    const params = { ...e.params };
+    for (const [k, v] of Object.entries(params)) if (typeof v === "number") params[k] = mm(v);
+    return tKey(e.key, params, t("error.unknown", { detail: String(e.params?.detail ?? e.key) }));
+  }
+  return String(e);
+}
+
+function setState(s: State, error?: unknown) {
+  state = s;
   app.dataset.state = s;
-  if (detail) bind(s === "error" ? "error" : "step", detail);
+  if (s === "error") shownError = error ?? shownError;
+  bind("error", s === "error" ? errText(shownError) : "");
+  bind("step", tKey(`progress.${step.key}`, { name: step.name }, step.name));
   $<HTMLButtonElement>("#choose").disabled = s === "converting";
   for (const id of ["#export", "#open-zip"]) $<HTMLButtonElement>(id).setAttribute("aria-disabled", String(s !== "ready"));
-  live.textContent = { empty: "Sin archivo", converting: "Convirtiendo", error: "Error", ready: "Listo para exportar" }[s];
+  live.textContent = t(`state.${s}` as Key);
 }
 
 // ---- toast ------------------------------------------------------------------------
@@ -49,21 +82,38 @@ const toastAction = $<HTMLButtonElement>("#toast-action");
 let toastTimer = 0;
 let onToastAction: (() => void) | null = null;
 
+/** Hides the notice. */
+const hideToast = () => toastEl.matches(":popover-open") && toastEl.hidePopover();
+
+/** Where the notice lives when no dialog is open. */
+const toastHome = toastEl.parentElement!;
+
+/** Shows the notice in the window's corner. It is a popover, so it lands above
+ *  any open dialog; it moves into that dialog, since a modal dialog makes
+ *  everything outside it inert and a click on the notice would reach the
+ *  dialog's backdrop instead. */
+function raiseToast() {
+  hideToast();
+  const host = document.querySelector<HTMLDialogElement>("dialog[open]") ?? toastHome;
+  if (toastEl.parentElement !== host) host.append(toastEl);
+  toastEl.showPopover();
+}
+
 /** A visible notice on the stage. Errors stay until closed; the rest fade after 8 s. */
 function toast(message: string, kind: "ok" | "error" = "ok", action?: { label: string; run: () => void }, sticky = false) {
   window.clearTimeout(toastTimer);
   bind("toast", message);
   toastEl.dataset.kind = kind;
   toastEl.setAttribute("role", kind === "error" ? "alert" : "status");
-  toastEl.hidden = false;
+  raiseToast();
   onToastAction = action?.run ?? null;
   toastAction.hidden = !action;
   if (action) toastAction.textContent = action.label;
-  if (kind !== "error" && !sticky) toastTimer = window.setTimeout(() => (toastEl.hidden = true), 8000);
+  if (kind !== "error" && !sticky) toastTimer = window.setTimeout(hideToast, 8000);
 }
-$("#toast-close").addEventListener("click", () => (toastEl.hidden = true));
+$("#toast-close").addEventListener("click", hideToast);
 toastAction.addEventListener("click", () => {
-  toastEl.hidden = true;
+  hideToast();
   onToastAction?.();
 });
 
@@ -73,7 +123,7 @@ async function work<T>(fn: () => Promise<T>): Promise<T | undefined> {
   try {
     return await fn();
   } catch (e) {
-    toast(String(e), "error");
+    toast(errText(e), "error");
     return undefined;
   } finally {
     app.classList.remove("is-working");
@@ -81,15 +131,21 @@ async function work<T>(fn: () => Promise<T>): Promise<T | undefined> {
 }
 
 /** A change that repaints: apply, render, refresh the mesh. */
-const apply = (call: () => Promise<Summary>, done?: () => void) =>
+const apply = (call: () => Promise<Summary | null>, done?: () => void) =>
   work(async () => {
     previousSwaps = summary?.estimate.swaps ?? null;
-    render(await call());
-    await reloadMesh();
+    const s = await call();
+    if (s) {
+      render(s);
+      await reloadMesh();
+    }
     done?.();
   });
 
 // ---- viewer ------------------------------------------------------------------------
+
+/** Measured points without the per-axis stretch, so they stay on the model when it is resized. */
+let measured: Vec3[] = [];
 
 const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   pick: (o, d) => api.pick(o, d),
@@ -103,12 +159,54 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     previousSwaps = summary?.estimate.swaps ?? null;
     void api.endStroke().then(render);
   },
+  measure: (p) => {
+    const st = summary?.size.stretch ?? [1, 1, 1];
+    if (measured.length >= 2) measured = [];
+    measured.push(p.map((v, i) => v / st[i]) as Vec3);
+    syncMeasure();
+  },
+  distance: (a, b, kind) => {
+    const d = nf(Math.hypot(...a.map((v, i) => v - b[i])) * (summary?.size.previewScale ?? 1), 2);
+    return kind === "free" ? t("measure.short", { d }) : kind === "height" ? t("measure.height", { d }) : t("measure.axis", { axis: "XYZ"[kind], d });
+  },
+  resize: async (f) => {
+    if (!summary) return false;
+    const next = summary.size.targetMm.map((v, i) => Math.round(v * f[i] * 10) / 10);
+    if (!next.every((v) => v >= SIZE_MIN && v <= SIZE_MAX)) {
+      toast(t("error.sizeRange", { min: nf(SIZE_MIN), max: nf(SIZE_MAX) }), "error");
+      return false;
+    }
+    return (await apply(() => api.setSize(next as Vec3))) !== undefined;
+  },
+});
+
+/** Points in preview units for the current size. */
+const measuredInPreview = () => {
+  const st = summary?.size.stretch ?? [1, 1, 1];
+  return measured.map((p) => p.map((v, i) => v * st[i]) as Vec3);
+};
+
+function syncMeasure() {
+  const pts = measuredInPreview();
+  viewer.setMeasure(pts);
+  $<HTMLButtonElement>("#measure-clear").hidden = pts.length === 0;
+  if (pts.length === 2 && summary) {
+    const k = summary.size.previewScale;
+    const d = pts[1].map((v, i) => Math.abs(v - pts[0][i]) * k);
+    bind("measure", t("measure.distance", { d: nf(Math.hypot(...d), 2), x: nf(d[0], 2), y: nf(d[1], 2), z: nf(d[2], 2) }));
+  } else {
+    bind("measure", pts.length === 1 ? t("measure.second") : app.dataset.tool === "measure" ? t("measure.first") : "");
+  }
+}
+$("#measure-clear").addEventListener("click", () => {
+  measured = [];
+  syncMeasure();
 });
 
 const radiusInput = $<HTMLInputElement>("#radius");
 const radiusMm = () => Number(radiusInput.value);
 function syncBrush() {
-  bind("radiusOut", `${nf(radiusMm(), 1)} mm`);
+  bind("radiusOut", `${nf(radiusMm(), 1)} mm`);
   const scale = summary && viewer.modelHeight() > 0 ? summary.sizeMm[2] / viewer.modelHeight() : 1;
   viewer.brushRadius = radiusMm() / scale;
   const hex = summary?.slots[brushSlot]?.hex;
@@ -116,40 +214,41 @@ function syncBrush() {
     app.style.setProperty("--brush", hex);
     viewer.setBrushColor(hex);
   }
-  bind("brushSlot", `Ranura ${brushSlot + 1}`);
+  bind("brushSlot", t("slot.name", { n: brushSlot + 1 }));
 }
 radiusInput.addEventListener("input", syncBrush);
 
 async function reloadMesh(frame = false) {
   viewer.load(await api.previewMesh(), frame);
   syncBrush();
+  syncMeasure();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
 
+/** Why the model does not fit, the first problem first; null when it fits. */
+function fitProblem(s: Summary): string | null {
+  const [x, y, z] = s.sizeMm;
+  const p = s.plate;
+  const plate = dims([p.area.x1 - p.area.x0, p.area.y1 - p.area.y0], 0);
+  if (!s.fitsHeight) return t("fit.tooTall", { z: nf(z), max: nf(s.maxHeightMm) });
+  if (p.offPlate) return t("fit.offPlate", { size: dims([x, y], 0), plate });
+  if (p.onExcluded) return t("fit.excluded");
+  if (p.onTower) return t("fit.tower", { gap: mm(p.prefs.towerGapMm) });
+  if (p.inMargin) return t("fit.margin", { margin: mm(p.prefs.marginMm) });
+  return null;
+}
+
 function render(s: Summary) {
   summary = s;
   bind("fileName", s.fileName);
-  bind("fileMeta", `${nf(s.fileSize / 1048576, 1)} MB, ${s.materials.length} mat.`);
+  bind("fileMeta", t("file.meta", { mb: nf(s.fileSize / 1048576, 1), count: s.materials.length, n: s.materials.length }));
 
-  // Size and plate.
-  const [x, y, z] = s.sizeMm;
-  bind("dims", `${nf(x, 1)} × ${nf(y, 1)} × ${nf(z, 1)} mm`);
-  const plate = `${nf(s.bedMm[0])} × ${nf(s.bedMm[1])} mm`;
-  const fits = s.fitsBed && s.fitsHeight;
-  bind("bedFit", !s.fitsBed
-    ? `No cabe en la placa de ${plate}.`
-    : !s.fitsHeight
-      ? `Mide ${nf(z)} mm de alto y la impresora llega a ${nf(s.maxHeightMm)} mm.`
-      : `Cabe en la placa de ${plate} y en sus ${nf(s.maxHeightMm)} mm de alto.`);
-  bind("fitBanner", !s.fitsBed ? `No cabe en la placa: mide ${nf(x)} × ${nf(y)} mm.` : `Es demasiado alto: mide ${nf(z)} mm y la impresora llega a ${nf(s.maxHeightMm)} mm.`);
-  $<HTMLDivElement>("#fit-banner").hidden = fits;
-  app.classList.toggle("is-oversize", !fits);
-  bind("exportLabel", "Exportar .3mf");
+  renderSize(s);
+  renderPlate(s);
 
   // Settings.
   const st = s.settings;
-  setIfIdle("#height", nf(st.heightMm, 1).replace(",", ".").replace(/\s/g, ""));
   setIfIdle("#keep", String(Math.round(st.keepRatio * 100)));
   setIfIdle("#flatten", String(st.flattenMm));
   setIfIdle("#piece", String(st.minPieceMm));
@@ -163,51 +262,55 @@ function render(s: Summary) {
   // Colour patches the nozzle cannot draw.
   const fixTo = Math.ceil(s.minDetailMm2);
   $<HTMLDivElement>("#detail-note").hidden = s.smallIslands === 0;
-  bind("detailNote", `${nf(s.smallIslands)} ${s.smallIslands === 1 ? "mancha de color mide" : "manchas de color miden"} menos de ${mm(s.minDetailMm2)} mm². Con boquilla de ${mm(st.nozzleMm)} mm salen borrosas o no salen.`);
-  bind("detailFix", `Limpiar islas menores de ${fixTo} mm²`);
+  bind("detailNote", t("colour.smallIslands", { count: s.smallIslands, n: nf(s.smallIslands), area: mm(s.minDetailMm2), nozzle: mm(st.nozzleMm) }));
+  bind("detailFix", t("colour.fixIslands", { area: nf(fixTo) }));
   document.querySelectorAll<HTMLInputElement>("#count input").forEach((i) => (i.checked = Number(i.value) === s.slots.length));
 
   // Mesh.
   bind("triangles", s.triangles === s.sourceTriangles
-    ? `${nf(s.triangles)} triángulos, ${nf(s.splitTriangles)} subdivididos en bordes`
-    : `${nf(s.triangles)} de ${nf(s.sourceTriangles)} triángulos`);
+    ? t("mesh.triangles", { n: nf(s.triangles), split: nf(s.splitTriangles) })
+    : t("mesh.trianglesOf", { n: nf(s.triangles), of: nf(s.sourceTriangles) }));
   bind("contact", st.flattenMm > 0
-    ? `Base aplanada ${nf(st.flattenMm, 1)} mm. Contacto con la placa: ${nf(s.contactMm2)} mm².`
-    : `Contacto con la placa: ${nf(s.contactMm2)} mm². Aplana 0,5 a 1 mm si la base no es plana.`);
+    ? t("mesh.contactFlat", { mm: nf(st.flattenMm, 1), area: nf(s.contactMm2) })
+    : t("mesh.contact", { area: nf(s.contactMm2) }));
   const r = s.repair;
   const fixes = [
-    r.weldedVertices && `${nf(r.weldedVertices)} vértices unidos`,
-    r.degenerateTriangles && `${nf(r.degenerateTriangles)} triángulos degenerados`,
-    r.duplicateTriangles && `${nf(r.duplicateTriangles)} caras repetidas`,
-    r.loosePieces && `${nf(r.loosePieces)} piezas sueltas (${nf(r.looseTriangles)} triángulos)`,
-  ].filter(Boolean);
-  bind("repairOut", !st.repair && !r.loosePieces ? "Sin reparar." : fixes.length ? `Corregido: ${fixes.join(", ")}.` : "La malla ya estaba limpia.");
-  bind("meshSum", `${nf(s.triangles)} triángulos`);
-  bind("colorSum", `${s.slots.length} colores`);
+    r.weldedVertices && t("mesh.welded", { count: r.weldedVertices, n: nf(r.weldedVertices) }),
+    r.degenerateTriangles && t("mesh.degenerate", { count: r.degenerateTriangles, n: nf(r.degenerateTriangles) }),
+    r.duplicateTriangles && t("mesh.duplicate", { count: r.duplicateTriangles, n: nf(r.duplicateTriangles) }),
+    r.loosePieces && t("mesh.loosePieces", { count: r.loosePieces, n: nf(r.loosePieces), tris: nf(r.looseTriangles) }),
+  ].filter((x): x is string => Boolean(x));
+  bind("repairOut", !st.repair && !r.loosePieces ? t("mesh.notRepaired") : fixes.length ? t("mesh.fixed", { list: fixes.join(", ") }) : t("mesh.clean"));
+  bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
+  bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
 
   // Filament changes, with what the last change did.
   bind("swaps", nf(s.estimate.swaps));
+  bind("swapsWord", t("swaps.word", { count: s.estimate.swaps }));
   const delta = previousSwaps === null ? 0 : s.estimate.swaps - previousSwaps;
   const deltaEl = document.querySelector<HTMLElement>('[data-bind="swapsDelta"]')!;
-  deltaEl.textContent = delta === 0 ? "" : `(${delta < 0 ? "−" : "+"}${nf(Math.abs(delta))} con el último ajuste)`;
+  deltaEl.textContent = delta === 0 ? "" : t("swaps.delta", { sign: delta < 0 ? "−" : "+", n: nf(Math.abs(delta)) });
   deltaEl.classList.toggle("is-better", delta < 0);
-  bind("swapsDetail", `${nf(s.estimate.purgeGrams)} g de purga; ${nf(s.estimate.multicolorLayers)} de ${nf(s.estimate.layers)} capas llevan más de un color. Estimado a ${mm(st.layerMm)} mm por capa.`);
+  bind("swapsDetail", t("swaps.detail", { multi: nf(s.estimate.multicolorLayers), layers: nf(s.estimate.layers), layer: mm(st.layerMm) }));
 
+  renderWaste(s);
   renderSlots(s);
   const mats = $<HTMLDListElement>("#materials");
   mats.replaceChildren(...s.materials.flatMap((m) => {
     const dt = document.createElement("dt");
     dt.textContent = m.name;
     const dd = document.createElement("dd");
-    dd.textContent = `${m.detail}, ${nf(m.faces)} caras`;
+    dd.textContent = `${tKey(`material.${m.kind}`, { detail: m.detail }, m.detail)}, ${t("material.faces", { count: m.faces, n: nf(m.faces) })}`;
     return [dt, dd];
   }));
 
   const undoBtn = $<HTMLButtonElement>("#undo");
   undoBtn.disabled = !s.canUndo;
-  undoBtn.title = s.undoLabel ? `Deshacer ${s.undoLabel} (Ctrl+Z)` : "Nada que deshacer";
+  undoBtn.title = s.undoLabel ? t("undo.title", { what: t(`undo.${s.undoLabel}`) }) : t("undo.nothing");
+  bind("exportLabel", t("export.label"));
   viewer.setPalette(s.slots.map((x) => x.hex));
   syncBrush();
+  if (wasteDialog.open) fillFlushTable(s);
 }
 
 /** Only overwrite a field the user is not editing. */
@@ -217,12 +320,373 @@ function setIfIdle(sel: string, value: string) {
 }
 
 function syncOutputs() {
-  bind("keepOut", `${$<HTMLInputElement>("#keep").value} %`);
+  bind("keepOut", `${$<HTMLInputElement>("#keep").value} %`);
   const d = Number($<HTMLInputElement>("#detail").value);
-  bind("detailOut", d === 0 ? "sin subdividir" : `nivel ${d}`);
+  bind("detailOut", d === 0 ? t("colour.detailOff") : t("colour.detailLevel", { n: d }));
   const i = Number($<HTMLInputElement>("#island").value);
-  bind("islandOut", i === 0 ? "apagado" : `${i} mm²`);
+  bind("islandOut", i === 0 ? t("colour.islandsOff") : `${i} mm²`);
 }
+
+// ---- size ------------------------------------------------------------------------------
+
+const axisInputs = [0, 1, 2].map((i) => $<HTMLInputElement>(`#size-${"xyz"[i]}`));
+const lockBtn = $<HTMLButtonElement>("#lock");
+const scaleInput = $<HTMLInputElement>("#scale-pct");
+const SIZE_MIN = 1;
+const SIZE_MAX = 1000;
+let locked = true;
+
+// Sizes are kept to hundredths of a millimetre, so equal factors can differ by that much.
+const uniform = (k: number[]) => k.every((v) => Math.abs(v - k[0]) < 5e-4 * k[0]);
+
+/** The tool's shortcuts under the view; the whole line also as a tooltip, for when it is cut. */
+function setHint(text: string) {
+  bind("hint", text);
+  $(".stage__hint").title = text;
+}
+
+function syncLock() {
+  lockBtn.setAttribute("aria-pressed", String(locked));
+  viewer.proportional = locked;
+  bind("lockLabel", locked ? t("size.locked") : t("size.unlocked"));
+}
+
+function renderSize(s: Summary) {
+  const z = s.size;
+  axisInputs.forEach((el, i) => setIfIdle(`#${el.id}`, inputValue(z.targetMm[i])));
+  const even = uniform(z.axisScale);
+  setIfIdle("#scale-pct", even ? inputValue(z.axisScale[0] * 100, 2) : "");
+  scaleInput.placeholder = even ? "" : "—";
+  bind("scaleHelp", even
+    ? t("size.scaleHelp")
+    : t("size.stretched", { x: nf(z.axisScale[0] * 100, 1), y: nf(z.axisScale[1] * 100, 1), z: nf(z.axisScale[2] * 100, 1) }));
+  viewer.setSizeValues(z.targetMm, (n) => nf(n, 1));
+  viewer.setPlate(s.plate, z.previewScale);
+  bind("sizeOriginal", dims(z.originalMm, 2));
+  bind("sizeResult", dims(s.sizeMm, 2));
+  bind("dims", dims(s.sizeMm, 1));
+  $<HTMLButtonElement>("#size-undo").disabled = !z.canUndo;
+  const reset = z.targetMm.every((v, i) => Math.abs(v - z.originalMm[i]) < 1e-4);
+  $<HTMLButtonElement>("#size-reset").disabled = reset;
+
+  const problem = fitProblem(s);
+  bind("bedFit", problem ?? t("fit.ok", { plate: dims([s.bedMm[0], s.bedMm[1]], 0), max: nf(s.maxHeightMm) }));
+  bind("fitBanner", problem ?? "");
+  $<HTMLDivElement>("#fit-banner").hidden = problem === null;
+  app.classList.toggle("is-oversize", problem !== null);
+}
+
+/** Sends a new size after checking every axis is in range. */
+function requestSize(next: number[], field?: HTMLInputElement) {
+  const ok = next.every((v) => Number.isFinite(v) && v >= SIZE_MIN && v <= SIZE_MAX);
+  field?.setAttribute("aria-invalid", String(!ok));
+  if (!ok) return toast(t("error.sizeRange", { min: nf(SIZE_MIN), max: nf(SIZE_MAX) }), "error");
+  void apply(() => api.setSize(next.map((v) => Math.round(v * 100) / 100) as Vec3));
+}
+
+/** One axis typed in the panel or on the view; locked, the other two follow. */
+function resizeAxis(axis: number, v: number, field?: HTMLInputElement) {
+  if (!summary) return;
+  const now = summary.size.targetMm;
+  if (!(v > 0)) return requestSize([NaN, NaN, NaN], field);
+  requestSize(locked ? now.map((x) => (x * v) / now[axis]) : now.map((x, i) => (i === axis ? v : x)), field);
+}
+axisInputs.forEach((el, axis) => el.addEventListener("change", () => resizeAxis(axis, Number(el.value), el)));
+
+function toggleLock() {
+  locked = !locked;
+  syncLock();
+  if (app.dataset.tool === "size") setHint(t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }));
+}
+lockBtn.addEventListener("click", toggleLock);
+
+/** A uniform scale against the original: it brings back the original proportions. */
+function scaleTo(pct: number) {
+  if (!summary) return;
+  if (!(pct > 0)) return requestSize([NaN, NaN, NaN], scaleInput);
+  requestSize(summary.size.originalMm.map((v) => (v * pct) / 100), scaleInput);
+}
+scaleInput.addEventListener("change", () => scaleTo(Number(scaleInput.value)));
+const nudge = (by: number) => {
+  if (!summary) return;
+  const k = summary.size.axisScale;
+  scaleTo(Math.round((uniform(k) ? k[0] : k[2]) * 100 + by));
+};
+$("#scale-down").addEventListener("click", () => nudge(-1));
+$("#scale-up").addEventListener("click", () => nudge(1));
+
+const fit = () => {
+  if (!summary) return;
+  void apply(() => api.fitToPlate(), () => toast(t("size.fitted", { size: dims(summary!.size.targetMm, 1) })));
+};
+$("#fit").addEventListener("click", fit);
+$("#fit-side").addEventListener("click", fit);
+$("#size-reset").addEventListener("click", () => void apply(() => api.resetSize()));
+$("#size-undo").addEventListener("click", () => void apply(() => api.undoSize()));
+
+// ---- plate and tower --------------------------------------------------------------------
+
+const plateSvg = $<SVGSVGElement & HTMLElement>("#plate-view");
+
+function renderPlate(s: Summary) {
+  const p = s.plate;
+  const a = p.area;
+  const pad = Math.max(a.x1 - a.x0, a.y1 - a.y0) * 0.03;
+  const [w, h] = [a.x1 - a.x0, a.y1 - a.y0];
+  plateSvg.setAttribute("viewBox", `${a.x0 - pad} ${-a.y1 - pad} ${w + 2 * pad} ${h + 2 * pad}`);
+  // Plate Y grows to the back; the SVG draws it upwards.
+  const rect = (r: { x0: number; y0: number; x1: number; y1: number }, cls: string) =>
+    `<rect class="${cls}" x="${r.x0}" y="${-r.y1}" width="${Math.max(0, r.x1 - r.x0)}" height="${Math.max(0, r.y1 - r.y0)}"/>`;
+  const gap = p.prefs.towerGapMm;
+  const tower = p.tower;
+  plateSvg.innerHTML = [
+    rect(a, "plate__area"),
+    rect(p.usable, "plate__usable"),
+    ...p.excluded.map((e) => rect(e, "plate__excl")),
+    tower ? rect({ x0: tower.x0 - gap, y0: tower.y0 - gap, x1: tower.x1 + gap, y1: tower.y1 + gap }, "plate__keep") : "",
+    tower ? rect(tower, "plate__tower") : "",
+    rect(p.model, `plate__model${p.fits ? "" : " is-bad"}`),
+  ].join("");
+
+  const issues: string[] = [];
+  if (p.offPlate) issues.push(t("plate.issueOff"));
+  else if (p.inMargin) issues.push(t("plate.issueMargin", { margin: mm(p.prefs.marginMm) }));
+  if (p.onExcluded) issues.push(t("plate.issueExcluded"));
+  if (p.onTower) issues.push(t("plate.issueTower"));
+  if (p.towerOffPlate) issues.push(t("plate.issueTowerOff"));
+  if (p.prefs.tower && p.needsTower && p.fitFactor < 1 && p.fits === false) {
+    issues.push(t("plate.issueFit", { pct: nf(p.fitFactor * 100) }));
+  }
+  $("#plate-issues").replaceChildren(...issues.map((text) => Object.assign(document.createElement("li"), { textContent: text })));
+  bind("plateSum", p.fits ? t("plate.sumOk") : t("plate.sumBad", { count: issues.length, n: issues.length }));
+  bind("plateDesc", [
+    t("plate.desc", { plate: dims([w, h], 0), model: dims([p.model.x1 - p.model.x0, p.model.y1 - p.model.y0], 0) }),
+    tower ? t("plate.descTower", { size: dims(p.towerMm, 0) }) : "",
+    ...issues,
+  ].join(" "));
+
+  $<HTMLInputElement>("#tower-on").checked = p.prefs.tower;
+  setIfIdle("#tower-depth", p.prefs.towerDepthMm === null ? "" : inputValue(p.prefs.towerDepthMm, 1));
+  $<HTMLInputElement>("#tower-depth").placeholder = nf(p.towerMm[1] - 6, 0);
+  setIfIdle("#tower-gap", inputValue(p.prefs.towerGapMm, 1));
+  setIfIdle("#margin", inputValue(p.prefs.marginMm, 1));
+  bind("towerDepthHelp", p.towerEstimated
+    ? t("plate.depthEstimated", { depth: nf(p.towerMm[1] - 6) })
+    : t("plate.depthSet"));
+  bind("towerNote", !p.needsTower
+    ? t("plate.noTower")
+    : tower
+      ? t("plate.towerNote", { x: nf(tower.x0), y: nf(tower.y0), size: dims(p.towerMm, 0) })
+      : t("plate.towerOff"));
+}
+
+/** The plate form as settings; null with the offending field marked. */
+function readPlate(): PlatePrefs | null {
+  const depthEl = $<HTMLInputElement>("#tower-depth");
+  const fields: [HTMLInputElement, number, number][] = [
+    [$<HTMLInputElement>("#tower-gap"), 0, 50],
+    [$<HTMLInputElement>("#margin"), 0, 50],
+  ];
+  const depth = depthEl.value.trim() === "" ? null : Number(depthEl.value);
+  for (const [el, lo, hi] of [...fields, ...(depth === null ? [] : [[depthEl, 5, 250] as [HTMLInputElement, number, number]])]) {
+    const v = Number(el.value);
+    const ok = el.value.trim() !== "" && v >= lo && v <= hi;
+    el.setAttribute("aria-invalid", String(!ok));
+    if (!ok) {
+      toast(t("error.rangeField", { field: document.querySelector(`label[for="${el.id}"]`)?.textContent ?? "", min: nf(lo), max: nf(hi) }), "error");
+      return null;
+    }
+  }
+  return { tower: $<HTMLInputElement>("#tower-on").checked, towerDepthMm: depth, towerGapMm: Number(fields[0][0].value), marginMm: Number(fields[1][0].value) };
+}
+
+async function savePlate(next: PlatePrefs | null) {
+  if (!next) return;
+  await apply(async () => {
+    const s = await api.setPlate(next);
+    if (prefs) prefs.plate = next;
+    return s;
+  });
+}
+["#tower-on", "#tower-depth", "#tower-gap", "#margin"].forEach((sel) => $(sel).addEventListener("change", () => void savePlate(readPlate())));
+$("#plate-reset").addEventListener("click", () => {
+  if (prefs) void savePlate(prefs.plateDefaults);
+});
+
+// ---- waste ----------------------------------------------------------------------------
+
+function renderWaste(s: Summary) {
+  const w = s.waste;
+  const g = (mm3: number) => mass((mm3 * w.prefs.densityGCm3) / 1000);
+  bind("wasteTotal", mass(w.totalG));
+  bind("wasteTotalDetail", t("waste.totalDetail", { length: length(w.totalM), volume: volume(w.totalMm3) }));
+  const rows: [string, string, string?][] = [
+    [t("waste.flush"), g(w.flushMm3), t("waste.flushNote", { count: w.swaps, n: nf(w.swaps) })],
+    [t("waste.start"), g(w.startMm3)],
+    [t("waste.tower"), g(w.towerMm3), w.towerMm3 > 0 ? t("waste.towerNote", { h: w.towerHeightMm < 1000 ? `${nf(w.towerHeightMm, 1)} mm` : length(w.towerHeightMm / 1000) }) : t("waste.noTower")],
+  ];
+  if (w.reusedMm3 > 0) rows.push([t("waste.reused"), g(w.reusedMm3), t("waste.reusedNote")]);
+  $("#waste-breakdown").replaceChildren(...rows.flatMap(([label, value, note]) => {
+    const dt = Object.assign(document.createElement("dt"), { textContent: label });
+    const dd = document.createElement("dd");
+    dd.append(Object.assign(document.createElement("span"), { className: "num", textContent: value }));
+    if (note) dd.append(Object.assign(document.createElement("small"), { textContent: note }));
+    return [dt, dd];
+  }));
+  bind("wasteAssumes", [
+    fitProblem(s) ? t("waste.oversize") : "",
+    t("waste.assumes", {
+      layer: mm(w.layerMm),
+      nozzle: mm(w.nozzleMm),
+      diameter: mm(w.prefs.filamentDiameterMm),
+      density: mm(w.prefs.densityGCm3),
+      k: mm(w.prefs.flushMultiplier),
+    }),
+    w.purgeChute ? t("waste.chute") : t("waste.intoTower"),
+    t("waste.limits"),
+  ].filter(Boolean).join(" "));
+}
+
+const wasteDialog = $<HTMLDialogElement>("#waste-dialog");
+const wasteForm = $<HTMLFormElement>("#waste-form");
+const wasteError = $<HTMLParagraphElement>("#waste-error");
+const wf = {
+  layer: $<HTMLInputElement>("#w-layer"),
+  material: $<HTMLSelectElement>("#w-material"),
+  density: $<HTMLInputElement>("#w-density"),
+  diameter: $<HTMLInputElement>("#w-diameter"),
+  multiplier: $<HTMLInputElement>("#w-multiplier"),
+  start: $<HTMLInputElement>("#w-start"),
+  prime: $<HTMLInputElement>("#w-prime"),
+  reuse: $<HTMLInputElement>("#w-reuse"),
+};
+/** Typical densities, g/cm³. */
+const MATERIALS: [string, number][] = [["PLA", 1.24], ["PETG", 1.27], ["ABS", 1.04], ["ASA", 1.07], ["TPU", 1.21], ["PLA-CF", 1.3]];
+
+function fillMaterials() {
+  wf.material.replaceChildren(
+    ...MATERIALS.map(([name, d]) => new Option(`${name} (${mm(d)} g/cm³)`, String(d))),
+    new Option(t("wasteForm.other"), ""),
+  );
+  syncMaterial();
+}
+function syncMaterial() {
+  const d = Number(wf.density.value);
+  wf.material.value = MATERIALS.find(([, v]) => Math.abs(v - d) < 1e-6)?.[1].toString() ?? "";
+}
+wf.material.addEventListener("change", () => {
+  if (wf.material.value) wf.density.value = wf.material.value;
+});
+wf.density.addEventListener("input", syncMaterial);
+
+function fillWasteForm(p: WastePrefs) {
+  wf.layer.value = p.layerMm === null ? "" : inputValue(p.layerMm, 3);
+  wf.density.value = inputValue(p.densityGCm3, 3);
+  wf.diameter.value = inputValue(p.filamentDiameterMm, 2);
+  wf.multiplier.value = inputValue(p.flushMultiplier, 2);
+  wf.start.value = inputValue(p.startPurgeMm3, 0);
+  wf.prime.value = inputValue(p.primeMm3, 0);
+  wf.reuse.value = inputValue(p.flushReuse * 100, 0);
+  for (const el of Object.values(wf)) el.removeAttribute("aria-invalid");
+  wasteError.hidden = true;
+  syncMaterial();
+  const nozzle = summary?.waste.nozzleMm ?? printers?.nozzleMm ?? 0.4;
+  wf.layer.max = String(Math.round(nozzle * 80) / 100);
+  bind("wasteNozzle", `${mm(nozzle)} mm`);
+  bind("layerHelp", t("wasteForm.layerHelp", { max: mm(Number(wf.layer.max)) }));
+}
+
+function readWasteForm(): WastePrefs {
+  return {
+    layerMm: wf.layer.value.trim() === "" ? null : Number(wf.layer.value),
+    densityGCm3: Number(wf.density.value),
+    filamentDiameterMm: Number(wf.diameter.value),
+    flushMultiplier: Number(wf.multiplier.value),
+    startPurgeMm3: Number(wf.start.value),
+    primeMm3: Number(wf.prime.value),
+    flushReuse: Number(wf.reuse.value) / 100,
+  };
+}
+
+/** Which field each range error points at. */
+const WASTE_FIELDS: Record<string, HTMLInputElement> = {
+  "error.layerRange": wf.layer,
+  "error.densityRange": wf.density,
+  "error.filamentRange": wf.diameter,
+  "error.multiplierRange": wf.multiplier,
+  "error.startPurgeRange": wf.start,
+  "error.primeRange": wf.prime,
+  "error.reuseRange": wf.reuse,
+};
+
+async function saveWaste(next: WastePrefs, done: string) {
+  for (const el of Object.values(wf)) el.removeAttribute("aria-invalid");
+  wasteError.hidden = true;
+  try {
+    previousSwaps = summary?.estimate.swaps ?? null;
+    const s = await api.setWaste(next);
+    if (prefs) prefs.waste = next;
+    if (s) {
+      render(s);
+      await reloadMesh();
+    }
+    toast(done);
+  } catch (e) {
+    wasteError.textContent = isAppError(e) && e.key === "error.reuseRange" ? t("error.reusePct") : errText(e);
+    wasteError.hidden = false;
+    const field = isAppError(e) ? WASTE_FIELDS[e.key] : undefined;
+    field?.setAttribute("aria-invalid", "true");
+    field?.focus();
+  }
+}
+
+wasteForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  void saveWaste(readWasteForm(), t("wasteForm.saved"));
+});
+$("#waste-defaults").addEventListener("click", () => {
+  if (!prefs) return;
+  fillWasteForm(prefs.wasteDefaults);
+  void saveWaste(prefs.wasteDefaults, t("wasteForm.reset"));
+});
+$("#waste-close").addEventListener("click", () => wasteDialog.close());
+$("#open-waste").addEventListener("click", async () => {
+  if (app.dataset.state !== "ready" || !summary) return;
+  prefs = await api.prefs();
+  fillMaterials();
+  fillWasteForm(prefs.waste);
+  fillFlushTable(summary);
+  wasteDialog.showModal();
+});
+
+/** The flush from each slot (rows) to each other slot (columns). */
+function fillFlushTable(s: Summary) {
+  const n = s.slots.length;
+  const w = s.waste;
+  bind("flushHelp", n < 2 ? t("wasteForm.flushOne") : t("wasteForm.flushHelp", { k: mm(w.prefs.flushMultiplier) }));
+  $<HTMLButtonElement>("#flush-reset").hidden = !w.flushSet.some(Boolean);
+  const table = document.createElement("table");
+  if (n >= 2) {
+    const swatch = (i: number) => `<span class="flush__slot" style="--t:${s.slots[i].hex}">${i + 1}</span>`;
+    table.innerHTML = `<caption class="visually-hidden">${t("wasteForm.flushCaption")}</caption>
+      <thead><tr><th scope="col"><span class="visually-hidden">${t("wasteForm.flushFromTo")}</span></th>${s.slots.map((_, j) => `<th scope="col" title="${t("slot.name", { n: j + 1 })}">${swatch(j)}</th>`).join("")}</tr></thead>
+      <tbody>${s.slots.map((_, i) => `<tr><th scope="row" title="${t("slot.name", { n: i + 1 })}">${swatch(i)}</th>${s.slots.map((_, j) => (i === j
+        ? `<td class="flush__self" aria-hidden="true">—</td>`
+        : `<td><input class="input flush__cell${w.flushSet[i * n + j] ? " is-set" : ""}" type="number" inputmode="numeric" min="0" max="2000" step="10"
+            style="--heat:${Math.min(1, Math.max(0, (w.flushMm3Matrix[i * n + j] - 107) / 693)).toFixed(2)}"
+            data-from="${i}" data-to="${j}" value="${Math.round(w.flushMm3Matrix[i * n + j])}"
+            aria-label="${t("wasteForm.flushCell", { from: i + 1, to: j + 1 })}"></td>`)).join("")}</tr>`).join("")}</tbody>`;
+  }
+  $("#flush-table").replaceChildren(table);
+  table.querySelectorAll<HTMLInputElement>("input").forEach((el) => el.addEventListener("change", () => {
+    const v = el.value.trim() === "" ? null : Number(el.value);
+    const ok = v === null || (v >= 0 && v <= 2000);
+    el.setAttribute("aria-invalid", String(!ok));
+    if (!ok) return toast(t("error.flushRange", { min: "0", max: nf(2000) }), "error");
+    void apply(() => api.setFlush(Number(el.dataset.from), Number(el.dataset.to), v));
+  }));
+}
+$("#flush-reset").addEventListener("click", () => void apply(() => api.setFlush(null, null, null)));
 
 const CLOSE_DELTA_E = 15;
 
@@ -235,20 +699,21 @@ function renderSlots(s: Summary) {
     li.style.setProperty("--t", slot.hex);
     const near = slot.nearest;
     const close = near !== null && near[1] < CLOSE_DELTA_E;
+    const n = i + 1;
     li.innerHTML = `
-      <label class="slot__edit" title="Cambiar el color de la ranura ${i + 1}"><span class="visually-hidden">Color de la ranura ${i + 1}</span><input type="color" value="${slot.hex.toLowerCase()}"></label>
-      <button class="slot__pick" type="button" aria-pressed="${i === brushSlot}" title="Pintar con la ranura ${i + 1}">
-        <span class="slot__no"><span>Ranura ${i + 1}</span><span class="slot__brush">${i === brushSlot ? "Pincel" : "Pintar con esta"}</span></span>
+      <label class="slot__edit" title="${t("slot.changeColour", { n })}"><span class="visually-hidden">${t("slot.colourOf", { n })}</span><input type="color" value="${slot.hex.toLowerCase()}"></label>
+      <button class="slot__pick" type="button" aria-pressed="${i === brushSlot}" title="${t("slot.paintWith", { n })}">
+        <span class="slot__no"><span>${t("slot.name", { n })}</span><span class="slot__brush">${i === brushSlot ? t("slot.brush") : t("slot.useBrush")}</span></span>
         <strong class="mono">${slot.hex}</strong>
-        <span class="slot__count">${nf(slot.triangles)} triángulos</span>
-        <span class="slot__near${close ? " is-close" : ""}">${near ? `Parecida a R${near[0] + 1} (ΔE ${nf(near[1])})` : "Única ranura"}</span>
+        <span class="slot__count">${t("slot.triangles", { count: slot.triangles, n: nf(slot.triangles) })}</span>
+        <span class="slot__near${close ? " is-close" : ""}">${near ? t("slot.near", { n: near[0] + 1, de: nf(near[1]) }) : t("slot.only")}</span>
       </button>
       <div class="slot__actions">${s.slots.length < 2 ? "" : `
-        ${close ? `<button class="btn btn--quiet btn--sm slot__join" type="button">Unir con R${near![0] + 1}</button>` : ""}
-        <label class="visually-hidden" for="merge-${i}">Unir la ranura ${i + 1} a otra</label>
+        ${close ? `<button class="btn btn--quiet btn--sm slot__join" type="button">${t("slot.joinWith", { n: near![0] + 1 })}</button>` : ""}
+        <label class="visually-hidden" for="merge-${i}">${t("slot.mergeLabel", { n })}</label>
         <select class="slot__merge" id="merge-${i}">
-          <option value="">Unir a…</option>
-          ${s.slots.map((_, j) => (j === i ? "" : `<option value="${j}">Ranura ${j + 1}</option>`)).join("")}
+          <option value="">${t("slot.mergeInto")}</option>
+          ${s.slots.map((_, j) => (j === i ? "" : `<option value="${j}">${t("slot.name", { n: j + 1 })}</option>`)).join("")}
         </select>`}
       </div>`;
 
@@ -262,14 +727,14 @@ function renderSlots(s: Summary) {
       brushSlot = i;
       list.querySelectorAll(".slot__pick").forEach((b, j) => {
         b.setAttribute("aria-pressed", String(j === i));
-        b.querySelector(".slot__brush")!.textContent = j === i ? "Pincel" : "Pintar con esta";
+        b.querySelector(".slot__brush")!.textContent = j === i ? t("slot.brush") : t("slot.useBrush");
       });
       setTool("brush");
       syncBrush();
     });
     const merge = (into: number) =>
       void apply(() => api.mergeSlots(i, into), () =>
-        toast(`Ranura ${i + 1} unida a la ranura ${into + 1}.`, "ok", { label: "Deshacer", run: () => void undo() }));
+        toast(t("slot.merged", { from: i + 1, into: into + 1 }), "ok", { label: t("undo.label"), run: () => void undo() }));
     li.querySelector(".slot__join")?.addEventListener("click", () => merge(near![0]));
     li.querySelector<HTMLSelectElement>(".slot__merge")?.addEventListener("change", (e) => {
       const v = (e.target as HTMLSelectElement).value;
@@ -286,23 +751,27 @@ let unlistenProgress: (() => void) | null = null;
 async function openFile(path: string) {
   const lower = path.toLowerCase();
   const name = path.split(/[\\/]/).pop() ?? path;
-  if (/\.blend\d+$/.test(lower)) return setState("error", `${name} es una copia de seguridad de Blender. Ábrela y guárdala como .blend para convertirla.`);
-  if (!lower.endsWith(".blend")) return setState("error", `${name} no es un archivo .blend. BlendParser necesita el .blend para leer sus materiales y texturas.`);
-  setState("converting", "Abriendo Blender");
-  toastEl.hidden = true;
+  if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
+  if (!lower.endsWith(".blend")) return setState("error", { key: "error.notBlend", params: { name } });
+  step = { key: "blender", name: "" };
+  setState("converting");
+  hideToast();
   unlistenProgress?.();
-  unlistenProgress = await listen<string>("progress", (e) => bind("step", e.payload));
+  unlistenProgress = await listen<Progress>("progress", (e) => {
+    step = e.payload;
+    bind("step", tKey(`progress.${step.key}`, { name: step.name }, step.name));
+  });
   try {
     previousSwaps = null;
+    measured = [];
     render(await api.openBlend(path));
     await reloadMesh(true);
     setState("ready");
     // Start both panels at the top once layout has settled.
     requestAnimationFrame(() => setTimeout(() => document.querySelectorAll<HTMLElement>(".side, .ams").forEach((el) => el.scrollTo({ top: 0 })), 60));
   } catch (e) {
-    const msg = String(e);
-    $<HTMLButtonElement>("#find-blender").hidden = !msg.includes("Blender");
-    setState("error", msg);
+    $<HTMLButtonElement>("#find-blender").hidden = !(isAppError(e) && e.key.startsWith("error.blender"));
+    setState("error", e);
   } finally {
     unlistenProgress?.();
     unlistenProgress = null;
@@ -315,15 +784,15 @@ $("#choose").addEventListener("click", async () => {
 });
 
 $("#find-blender").addEventListener("click", async () => {
-  const path = await open({ multiple: false, directory: false, title: "Busca blender.exe" });
+  const path = await open({ multiple: false, directory: false, title: t("tray.findBlenderTitle") });
   if (typeof path !== "string") return;
   try {
     await api.setBlenderPath(path);
     $<HTMLButtonElement>("#find-blender").hidden = true;
     setState("empty");
-    toast(`Usaré Blender desde ${path}.`);
+    toast(t("tray.blenderSet", { path }));
   } catch (e) {
-    setState("error", String(e));
+    setState("error", e);
   }
 });
 
@@ -337,16 +806,13 @@ void getCurrentWebview().onDragDropEvent((e) => {
 // ---- export ------------------------------------------------------------------------------
 
 async function confirmOversize(): Promise<boolean> {
-  if (!summary || (summary.fitsBed && summary.fitsHeight)) return true;
-  const [x, y, z] = summary.sizeMm;
-  const why = !summary.fitsBed
-    ? `El modelo mide ${nf(x)} × ${nf(y)} mm y no cabe en la placa de ${nf(summary.bedMm[0])} × ${nf(summary.bedMm[1])} mm.`
-    : `El modelo mide ${nf(z)} mm de alto y la impresora llega a ${nf(summary.maxHeightMm)} mm.`;
-  return ask(`${why} ¿Exportar de todos modos?`, {
-    title: "No cabe en la impresora",
+  const why = summary && fitProblem(summary);
+  if (!why) return true;
+  return ask(t("export.confirmOversize", { why }), {
+    title: t("export.oversizeTitle"),
     kind: "warning",
-    okLabel: "Exportar igual",
-    cancelLabel: "Cancelar",
+    okLabel: t("export.anyway"),
+    cancelLabel: t("common.cancel"),
   });
 }
 
@@ -358,16 +824,16 @@ $("#export").addEventListener("click", async () => {
   if (!path) return;
   btn.setAttribute("aria-busy", "true");
   btn.setAttribute("aria-disabled", "true");
-  bind("exportLabel", "Exportando…");
+  bind("exportLabel", t("export.busy"));
   try {
     await api.export3mf(path);
-    toast(`3MF guardado en ${path}`);
+    toast(t("export.saved", { path }));
   } catch (e) {
-    toast(String(e), "error");
+    toast(errText(e), "error");
   } finally {
     btn.removeAttribute("aria-busy");
     btn.setAttribute("aria-disabled", "false");
-    bind("exportLabel", "Exportar .3mf");
+    bind("exportLabel", t("export.label"));
   }
 });
 
@@ -378,8 +844,8 @@ $("#open-zip").addEventListener("click", () => {
 $("#export-zip").addEventListener("click", async () => {
   if (!summary) return;
   const shell = $<HTMLInputElement>("#shell");
-  const mm = Number(shell.value);
-  const ok = mm >= 0.2 && mm <= 20;
+  const thickness = Number(shell.value);
+  const ok = thickness >= 0.2 && thickness <= 20;
   shell.setAttribute("aria-invalid", String(!ok));
   if (!ok) {
     shell.focus();
@@ -387,11 +853,12 @@ $("#export-zip").addEventListener("click", async () => {
   }
   zipDialog.close();
   if (!(await confirmOversize())) return;
-  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, "_colores.zip"), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
+  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
   await work(async () => {
-    const n = await api.exportColorZip(path, mm, $<HTMLInputElement>("#main-solid").checked);
-    toast(`${n} colores guardados en ${path}`);
+    const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());
+    toast(t("zip.saved", { count: n, n, path }));
   });
 });
 
@@ -400,24 +867,6 @@ $("#export-zip").addEventListener("click", async () => {
 const form = $<HTMLFormElement>("#settings");
 form.addEventListener("submit", (e) => e.preventDefault());
 form.addEventListener("input", syncOutputs);
-
-$("#height").addEventListener("change", (e) => {
-  const el = e.target as HTMLInputElement;
-  const mm = Number(el.value);
-  const ok = mm >= 1 && mm <= 1000;
-  el.setAttribute("aria-invalid", String(!ok));
-  if (ok) void apply(() => api.setHeight(mm));
-  else toast("La altura debe estar entre 1 y 1000 mm.", "error");
-});
-
-// Largest height whose footprint fits 90% of the plate and that the printer reaches.
-$("#fit").addEventListener("click", () => {
-  if (!summary) return;
-  const [x, y] = summary.sizeMm;
-  const k = Math.min((summary.bedMm[0] * 0.9) / x, (summary.bedMm[1] * 0.9) / y);
-  const h = Math.floor(Math.min(summary.settings.heightMm * k, summary.maxHeightMm) * 10) / 10;
-  void apply(() => api.setHeight(h), () => toast(`Altura ajustada a ${nf(h, 1)} mm para que quepa en la impresora.`));
-});
 
 const meshOps = () => void apply(() => api.setMeshOps(
   Number($<HTMLInputElement>("#keep").value) / 100,
@@ -430,10 +879,10 @@ const meshOps = () => void apply(() => api.setMeshOps(
 // Flattening applies with its button or Enter, so the effect is never a surprise.
 const flatten = () => {
   const el = $<HTMLInputElement>("#flatten");
-  const mm = Number(el.value);
-  const ok = mm >= 0 && mm <= 50;
+  const v = Number(el.value);
+  const ok = v >= 0 && v <= 50;
   el.setAttribute("aria-invalid", String(!ok));
-  if (!ok) return toast("Aplanar base: escribe entre 0 y 50 mm (0 lo desactiva).", "error");
+  if (!ok) return toast(t("error.flattenRange"), "error");
   meshOps();
 };
 $("#flatten-apply").addEventListener("click", flatten);
@@ -451,11 +900,11 @@ $("#island").addEventListener("change", colorOps);
 /** Re-detecting colours throws away hand painting: ask first. */
 async function confirmRepaint(): Promise<boolean> {
   if (!summary?.paintedTriangles) return true;
-  return ask(`Volver a detectar los colores borra lo que pintaste a mano (${nf(summary.paintedTriangles)} triángulos). Para conservarlo, usa «Unir los más parecidos».`, {
-    title: "Se perderá lo pintado",
+  return ask(t("colour.confirmRepaint", { count: summary.paintedTriangles, n: nf(summary.paintedTriangles) }), {
+    title: t("colour.repaintTitle"),
     kind: "warning",
-    okLabel: "Detectar de nuevo",
-    cancelLabel: "Cancelar",
+    okLabel: t("colour.repaintOk"),
+    cancelLabel: t("common.cancel"),
   });
 }
 
@@ -480,12 +929,12 @@ $("#reduce").addEventListener("click", () => {
   const ok = summary !== null && n >= 1 && n <= max;
   input.setAttribute("aria-invalid", String(!ok));
   if (!ok) {
-    toast(max < 1 ? "Solo queda un color: no hay nada que unir." : `Escribe un número entre 1 y ${max}: ahora hay ${max + 1} colores.`, "error");
+    toast(max < 1 ? t("colour.onlyOne") : t("colour.reduceRange", { max, now: max + 1 }), "error");
     input.focus();
     return;
   }
   void apply(() => api.reducePalette(n), () =>
-    toast(`Colores unidos: ahora hay ${n}.`, "ok", { label: "Deshacer", run: () => void undo() }));
+    toast(t("colour.reduced", { count: n, n }), "ok", { label: t("undo.label"), run: () => void undo() }));
 });
 
 $("#detail-fix").addEventListener("click", () => {
@@ -501,13 +950,10 @@ $("#detail-fix").addEventListener("click", () => {
 const nozzleSelect = $<HTMLSelectElement>("#nozzle");
 const profileOf = (id: string) => printers?.profiles.find((p) => p.id === id);
 const closest = (list: number[], n: number) => list.reduce((a, b) => (Math.abs(b - n) < Math.abs(a - n) ? b : a), list[0]);
-const volumeText = (p: PrinterProfile) => `${mm(p.volumeMm[0])} × ${mm(p.volumeMm[1])} × ${mm(p.volumeMm[2])} mm`;
+const volumeText = (p: PrinterProfile) => `${mm(p.volumeMm[0])} × ${mm(p.volumeMm[1])} × ${mm(p.volumeMm[2])} mm`;
 /** "Bambu Lab A1" reads as "A1" under its Bambu Lab heading. */
 const shortName = (p: PrinterProfile) => (p.vendor && p.name.startsWith(`${p.vendor} `) ? p.name.slice(p.vendor.length + 1) : p.name);
-const nozzleList = (ns: number[]) => {
-  const t = ns.map(mm);
-  return `${t.length > 1 ? `${t.slice(0, -1).join(", ")} o ${t[t.length - 1]}` : t[0]} mm`;
-};
+const nozzleList = (ns: number[]) => `${list(ns.map(mm))} mm`;
 
 /** Every printer as a picker item: the user's first, then by brand as the catalogue orders them. */
 function printerItems(): PickerItem[] {
@@ -515,18 +961,24 @@ function printerItems(): PickerItem[] {
   return [...all.filter((p) => p.custom), ...all.filter((p) => !p.custom)].map((p) => ({
     value: p.id,
     label: shortName(p),
-    group: p.custom ? "Mis impresoras" : p.vendor,
-    detail: `${volumeText(p)}, boquilla de ${nozzleList(p.nozzles)}`,
+    group: p.custom ? t("printers.mine") : p.vendor,
+    detail: t("printers.detail", { volume: volumeText(p), nozzles: nozzleList(p.nozzles) }),
     keywords: p.name,
     full: p.name,
   }));
 }
 
+const printerTexts = (): PickerTexts => ({
+  label: t("printers.picker"),
+  placeholder: t("printers.search"),
+  searchLabel: t("printers.searchLabel"),
+  none: t("printers.none"),
+  empty: (q) => t("printers.noMatch", { q }),
+  emptyAction: { label: t("printers.createOwn"), run: (q) => openPrinterDialog(q) },
+});
+
 const printerPicker = new Picker($("#printer-picker"), {
-  label: "Impresora",
-  placeholder: "Buscar impresora o marca",
-  empty: (q) => `Ninguna impresora coincide con «${q}».`,
-  emptyAction: { label: "Crear una impresora propia", run: (q) => openPrinterDialog(q) },
+  ...printerTexts(),
   onPick: (id) => void choosePrinter(id, Number(nozzleSelect.value)),
 });
 
@@ -538,7 +990,7 @@ function renderPrinterPick(id: string, nozzle: number) {
   printerPicker.setItems(printerItems());
   printerPicker.setValue(id);
   const profile = profileOf(id);
-  nozzleSelect.replaceChildren(...(profile?.nozzles ?? [nozzle]).map((n) => new Option(`${mm(n)} mm`, String(n))));
+  nozzleSelect.replaceChildren(...(profile?.nozzles ?? [nozzle]).map((n) => new Option(`${mm(n)} mm`, String(n))));
   nozzleSelect.value = String(nozzle);
   nozzleSelect.disabled = (profile?.nozzles.length ?? 1) < 2;
 }
@@ -573,11 +1025,17 @@ const pf = {
 };
 let editing = "";
 
+const baseTexts = (): PickerTexts => ({
+  label: t("printers.base"),
+  placeholder: t("printers.search"),
+  searchLabel: t("printers.baseSearchLabel"),
+  none: t("printers.none"),
+  empty: (q) => t("printers.baseNoMatch", { q }),
+});
+
 // The Bambu Studio profile a custom printer borrows; picking one fills in its volume when still empty.
 const basePicker = new Picker($("#pf-base"), {
-  label: "Perfil de Bambu Studio",
-  placeholder: "Buscar impresora o marca",
-  empty: (q) => `Bambu Studio no trae ninguna impresora que coincida con «${q}». Déjala genérica.`,
+  ...baseTexts(),
   onPick: (id) => {
     const base = profileOf(id);
     if (!base) return;
@@ -590,8 +1048,8 @@ const basePicker = new Picker($("#pf-base"), {
 basePicker.button.setAttribute("aria-describedby", "pf-base-help");
 
 function baseItems(): PickerItem[] {
-  const generic: PickerItem = { value: "", label: "Ninguno: impresora genérica", group: "", detail: "El 3MF lleva solo el volumen y la boquilla" };
-  return [generic, ...printerItems().filter((i) => i.group !== "Mis impresoras")];
+  const generic: PickerItem = { value: "", label: t("printers.generic"), group: "", detail: t("printers.genericDetail") };
+  return [generic, ...printerItems().filter((i) => i.group !== t("printers.mine"))];
 }
 
 function renderPrinterList() {
@@ -610,19 +1068,24 @@ function renderPrinterList() {
         <strong></strong>
         <span class="help"></span>
       </div>
-      <button class="btn btn--quiet btn--sm" type="button" data-act="edit">Editar</button>
-      <button class="btn btn--quiet btn--sm" type="button" data-act="delete">Borrar</button>`;
+      <button class="btn btn--quiet btn--sm" type="button" data-act="edit">${t("printers.edit")}</button>
+      <button class="btn btn--quiet btn--sm" type="button" data-act="delete">${t("printers.delete")}</button>`;
     li.querySelector("strong")!.textContent = p.name;
-    li.querySelector(".help")!.textContent = `${volumeText(p)}, boquilla de ${nozzleList(p.nozzles)}. ${base ? `Perfil de ${base}.` : "Genérica."}`;
+    li.querySelector(".help")!.textContent = `${t("printers.detail", { volume: volumeText(p), nozzles: nozzleList(p.nozzles) })}. ${base ? t("printers.profileOf", { base }) : t("printers.genericShort")}`;
     li.querySelector('[data-act="edit"]')!.addEventListener("click", () => fillPrinterForm(p));
     li.querySelector('[data-act="delete"]')!.addEventListener("click", () => void deletePrinter(p));
     return li;
   }));
 }
 
+function printerFormTitle() {
+  const p = printers?.profiles.find((x) => x.id === editing);
+  $("#h-printer-form").textContent = p ? t("printers.editTitle", { name: p.name }) : t("printers.newTitle");
+}
+
 function fillPrinterForm(p: PrinterProfile | null) {
   editing = p?.id ?? "";
-  $("#h-printer-form").textContent = p ? `Editar ${p.name}` : "Nueva impresora";
+  printerFormTitle();
   $<HTMLButtonElement>("#printer-new").hidden = !p;
   pf.name.value = p?.name ?? "";
   [pf.w.value, pf.d.value, pf.h.value] = (p?.volumeMm ?? ["", "", ""]).map(String);
@@ -639,7 +1102,7 @@ function openPrinterDialog(name = "") {
   if (!printers) return;
   basePicker.setItems(baseItems());
   $("#pf-nozzles").replaceChildren(
-    Object.assign(document.createElement("legend"), { textContent: "Boquillas que admite, en mm" }),
+    Object.assign(document.createElement("legend"), { textContent: t("printers.nozzles") }),
     ...printers.nozzles.flatMap((n) => {
       const input = Object.assign(document.createElement("input"), { type: "checkbox", id: `pf-n${n}`, value: String(n), name: "pf-nozzle" });
       const label = Object.assign(document.createElement("label"), { htmlFor: input.id, textContent: mm(n) });
@@ -661,20 +1124,20 @@ function printerFormError(message: string, field?: HTMLElement) {
 
 printerForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const save = $<HTMLButtonElement>("#printer-save");
-  if (save.getAttribute("aria-busy") === "true") return;
+  const saveBtn = $<HTMLButtonElement>("#printer-save");
+  if (saveBtn.getAttribute("aria-busy") === "true") return;
   for (const el of [pf.name, pf.w, pf.d, pf.h]) el.removeAttribute("aria-invalid");
   printerError.hidden = true;
   const name = pf.name.value.trim();
-  if (!name) return printerFormError("Ponle un nombre a la impresora.", pf.name);
+  if (!name) return printerFormError(t("printers.needName"), pf.name);
   const volume = [pf.w, pf.d, pf.h].map((el) => Number(el.value));
   const bad = [pf.w, pf.d, pf.h].find((el, i) => !el.value || !(volume[i] >= 20 && volume[i] <= 2000));
-  if (bad) return printerFormError("Ancho, fondo y alto van entre 20 y 2000 mm.", bad);
+  if (bad) return printerFormError(t("error.printerVolume"), bad);
   const nozzles = [...document.querySelectorAll<HTMLInputElement>("#pf-nozzles input:checked")].map((i) => Number(i.value));
-  if (!nozzles.length) return printerFormError("Marca al menos una boquilla.", document.querySelector<HTMLInputElement>("#pf-nozzles input") ?? undefined);
+  if (!nozzles.length) return printerFormError(t("printers.needNozzle"), document.querySelector<HTMLInputElement>("#pf-nozzles input") ?? undefined);
   const profile: PrinterProfile = { id: editing, name, volumeMm: volume as [number, number, number], nozzles, base: basePicker.value || null, vendor: "", custom: true };
-  save.setAttribute("aria-busy", "true");
-  save.textContent = "Guardando…";
+  saveBtn.setAttribute("aria-busy", "true");
+  saveBtn.textContent = t("printers.saving");
   try {
     const nozzle = closest(nozzles, printers?.nozzleMm ?? 0.4);
     printers = await api.savePrinter(profile, nozzle);
@@ -690,21 +1153,21 @@ printerForm.addEventListener("submit", async (e) => {
     renderPrinterPick(printers.selected, printers.nozzleMm);
     const saved = printers.profiles.find((p) => p.id === printers!.selected) ?? null;
     fillPrinterForm(saved);
-    toast(`${name} guardada y elegida. Seguirá aquí la próxima vez que abras BlendParser.`);
+    toast(t("printers.saved", { name }));
   } catch (err) {
-    printerFormError(String(err));
+    printerFormError(errText(err));
   } finally {
-    save.removeAttribute("aria-busy");
-    save.textContent = "Guardar impresora";
+    saveBtn.removeAttribute("aria-busy");
+    saveBtn.textContent = t("printers.save");
   }
 });
 
 async function deletePrinter(p: PrinterProfile) {
-  const ok = await ask(`Se borrará ${p.name} de tus impresoras. Los 3MF que ya exportaste no cambian.`, {
-    title: "Borrar impresora",
+  const ok = await ask(t("printers.confirmDelete", { name: p.name }), {
+    title: t("printers.deleteTitle"),
     kind: "warning",
-    okLabel: "Borrar",
-    cancelLabel: "Cancelar",
+    okLabel: t("printers.delete"),
+    cancelLabel: t("common.cancel"),
   });
   if (!ok) return;
   try {
@@ -720,13 +1183,12 @@ async function deletePrinter(p: PrinterProfile) {
     renderPrinterPick(printers.selected, printers.nozzleMm);
     if (editing === p.id) fillPrinterForm(null);
     else renderPrinterList();
-    toast(`${p.name} borrada.`);
+    toast(t("printers.deleted", { name: p.name }));
   } catch (err) {
-    printerFormError(String(err));
+    printerFormError(errText(err));
   }
 }
 
-$("#open-printers").addEventListener("click", () => openPrinterDialog());
 $("#printer-new").addEventListener("click", () => {
   fillPrinterForm(null);
   pf.name.focus();
@@ -752,36 +1214,90 @@ function setView(v: View) {
   viewer.setView(v);
 }
 
-function setTool(t: Tool) {
-  app.dataset.tool = t;
-  document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === t)));
-  radiusInput.disabled = t !== "brush";
-  viewer.setTool(t);
-  bind("hint", t === "brush"
-    ? "Arrastra para pintar, botón derecho para orbitar, [ y ] cambian el radio."
-    : "Arrastra para orbitar, botón derecho para mover, rueda para acercar, F para encuadrar.");
+function setTool(tool: Tool) {
+  app.dataset.tool = tool;
+  document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
+  radiusInput.disabled = tool !== "brush";
+  viewer.setTool(tool);
+  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
+  syncMeasure();
 }
+
+// The plate in the view, remembered between sessions.
+const bedBtn = $<HTMLButtonElement>("#toggle-bed");
+const BED_KEY = "blendparser.bed";
+let bedOn = true;
+try {
+  bedOn = localStorage.getItem(BED_KEY) !== "0";
+} catch {
+  // Storage blocked: the plate shows.
+}
+function setBed(on: boolean) {
+  bedOn = on;
+  bedBtn.setAttribute("aria-pressed", String(on));
+  viewer.setBedVisible(on);
+  try {
+    localStorage.setItem(BED_KEY, on ? "1" : "0");
+  } catch {
+    // Not remembered; it still applies now.
+  }
+}
+bedBtn.addEventListener("click", () => setBed(!bedOn));
+setBed(bedOn);
+
+// The tool shelf shows icons; expanded, also their names. Remembered too.
+const toolbar = $<HTMLDivElement>("#toolbar");
+const expandBtn = $<HTMLButtonElement>("#toolbar-expand");
+const SHELF_KEY = "blendparser.toolNames";
+function setExpanded(on: boolean) {
+  toolbar.dataset.expanded = String(on);
+  expandBtn.setAttribute("aria-expanded", String(on));
+  const label = on ? t("stage.collapse") : t("stage.expand");
+  bind("toolbarExpand", label);
+  expandBtn.title = label;
+  expandBtn.setAttribute("aria-label", label);
+  try {
+    localStorage.setItem(SHELF_KEY, on ? "1" : "0");
+  } catch {
+    // Not remembered.
+  }
+}
+expandBtn.addEventListener("click", () => setExpanded(toolbar.dataset.expanded !== "true"));
+let shelfOpen = false;
+try {
+  shelfOpen = localStorage.getItem(SHELF_KEY) === "1";
+} catch {
+  // Collapsed by default.
+}
+setExpanded(shelfOpen);
 
 document.querySelectorAll<HTMLButtonElement>("button[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view as View)));
 document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.addEventListener("click", () => setTool(b.dataset.tool as Tool)));
 
 async function undo() {
   if (!summary?.canUndo) return;
-  const what = summary.undoLabel;
-  await apply(() => api.undo(), () => toast(`Deshecho: ${what ?? "último cambio"}.`));
+  const what = summary.undoLabel ? t(`undo.${summary.undoLabel}`) : t("undo.last");
+  await apply(() => api.undo(), () => toast(t("undo.done", { what })));
 }
 $("#undo").addEventListener("click", () => void undo());
 
 window.addEventListener("keydown", (e) => {
   const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement;
-  if (typing || app.dataset.state !== "ready" || zipDialog.open || printerDialog.open) return;
+  if (typing || app.dataset.state !== "ready" || document.querySelector("dialog[open]")) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
     e.preventDefault();
     void undo();
   } else if (e.key === "b") setTool("brush");
   else if (e.key === "o") setTool("orbit");
+  else if (e.key === "m") setTool("measure");
+  else if (e.key === "s") setTool("size");
+  else if (e.key === "p") setBed(!bedOn);
+  else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
-  else if (e.key === "[" || e.key === "]") {
+  else if (e.key === "Escape" && measured.length) {
+    measured = [];
+    syncMeasure();
+  } else if (e.key === "[" || e.key === "]") {
     radiusInput.stepUp(e.key === "]" ? 1 : -1);
     syncBrush();
   }
@@ -795,18 +1311,18 @@ let pendingUpdate: Update | null = null;
 /** Looks for a newer release. Quiet mode only speaks up when there is one. */
 async function checkForUpdates(quiet: boolean) {
   versionBtn.disabled = true;
-  if (!quiet) bind("version", "Buscando…");
+  if (!quiet) bind("version", t("update.searching"));
   try {
     pendingUpdate = await findUpdate();
     versionBtn.classList.toggle("has-update", pendingUpdate !== null);
     if (pendingUpdate) {
       const u = pendingUpdate;
-      toast(`Hay una versión nueva: ${u.version}.`, "ok", { label: `Actualizar a ${u.version}`, run: () => void applyUpdate(u) }, true);
+      toast(t("update.available", { v: u.version }), "ok", { label: t("update.install", { v: u.version }), run: () => void applyUpdate(u) }, true);
     } else if (!quiet) {
-      toast(`Tienes la versión más reciente (${await currentVersion()}).`);
+      toast(t("update.latest", { v: await currentVersion() }));
     }
   } catch (e) {
-    if (!quiet) toast(`No pude buscar actualizaciones: ${e}`, "error");
+    if (!quiet) toast(t("update.failed", { detail: String(e) }), "error");
   } finally {
     versionBtn.disabled = false;
     bind("version", `v${await currentVersion()}`);
@@ -815,22 +1331,22 @@ async function checkForUpdates(quiet: boolean) {
 
 async function applyUpdate(u: Update) {
   if (app.dataset.state === "ready") {
-    const ok = await ask(`BlendParser se cerrará para instalar la versión ${u.version}. Exporta antes lo que quieras conservar.`, {
-      title: "Actualizar BlendParser",
+    const ok = await ask(t("update.confirm", { v: u.version }), {
+      title: t("update.title"),
       kind: "info",
-      okLabel: "Actualizar y reiniciar",
-      cancelLabel: "Más tarde",
+      okLabel: t("update.restart"),
+      cancelLabel: t("update.later"),
     });
     if (!ok) return;
   }
   versionBtn.disabled = true;
-  toast(`Descargando la versión ${u.version}…`, "ok", undefined, true);
+  toast(t("update.downloading", { v: u.version }), "ok", undefined, true);
   try {
     await installUpdate(u, (f) =>
-      bind("toast", f === null ? `Descargando la versión ${u.version}…` : `Descargando la versión ${u.version}: ${Math.round(f * 100)} %`));
+      bind("toast", f === null ? t("update.downloading", { v: u.version }) : t("update.progress", { v: u.version, pct: Math.round(f * 100) })));
   } catch (e) {
     versionBtn.disabled = false;
-    toast(`No se pudo instalar la actualización: ${e}`, "error");
+    toast(t("update.installFailed", { detail: String(e) }), "error");
   }
 }
 
@@ -839,14 +1355,110 @@ versionBtn.addEventListener("click", () => {
   else void checkForUpdates(false);
 });
 
+// ---- language ----------------------------------------------------------------------------
+
+const langSelect = $<HTMLSelectElement>("#lang");
+langSelect.replaceChildren(...LANGS.map((l) => Object.assign(new Option(l.name, l.code), { lang: l.code })));
+langSelect.value = currentLang();
+langSelect.addEventListener("change", () => setLang(langSelect.value as Lang));
+const prefsDialog = $<HTMLDialogElement>("#prefs-dialog");
+function openPrefs() {
+  if (document.querySelector("dialog[open]")) return;
+  langSelect.value = currentLang();
+  prefsDialog.showModal();
+}
+
+// ---- menu bar ----------------------------------------------------------------------------
+
+const ready = () => app.dataset.state === "ready";
+const COMMANDS: Record<string, { run: () => void; enabled?: () => boolean }> = {
+  open: { run: () => $("#choose").click(), enabled: () => state !== "converting" },
+  export: { run: () => $("#export").click(), enabled: ready },
+  printers: { run: () => openPrinterDialog() },
+  undo: { run: () => void undo(), enabled: () => ready() && Boolean(summary?.canUndo) },
+  undoSize: { run: () => $("#size-undo").click(), enabled: () => ready() && Boolean(summary?.size.canUndo) },
+  waste: { run: () => $("#open-waste").click(), enabled: ready },
+  prefs: { run: openPrefs },
+  updates: { run: () => versionBtn.click() },
+  shortcuts: { run: () => toast(t("menu.shortcutList"), "ok", undefined, true) },
+};
+menubar($("#menubar"), {
+  run: (cmd) => COMMANDS[cmd]?.run(),
+  enabled: (cmd) => COMMANDS[cmd]?.enabled?.() ?? true,
+});
+
+// Menu shortcuts work in any state and outside text fields.
+window.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || document.querySelector("dialog[open]")) return;
+  const cmd = { o: "open", s: "export", ",": "prefs" }[e.key.toLowerCase()];
+  if (!cmd || !(COMMANDS[cmd].enabled?.() ?? true)) return;
+  e.preventDefault();
+  COMMANDS[cmd].run();
+});
+
+/** Everything drawn from code, worded again. */
+onLangChange(() => {
+  langSelect.value = currentLang();
+  printerPicker.relabel(printerTexts());
+  basePicker.relabel(baseTexts());
+  if (printers) renderPrinterPick(printers.selected, printers.nozzleMm);
+  if (printerDialog.open) {
+    basePicker.setItems(baseItems());
+    printerFormTitle();
+    renderPrinterList();
+    $("#pf-nozzles legend").textContent = t("printers.nozzles");
+  }
+  if (wasteDialog.open) {
+    const keep = readWasteForm();
+    fillMaterials();
+    fillWasteForm(keep);
+  }
+  setState(state);
+  setTool((app.dataset.tool as Tool) ?? "orbit");
+  setExpanded(toolbar.dataset.expanded === "true");
+  syncLock();
+  syncOutputs();
+  bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
+  if (summary) render(summary);
+  syncBrush();
+  if (toastEl.dataset.kind !== "error") hideToast();
+});
+
+// A notice shown inside a dialog goes back home when the dialog closes, still showing.
+document.querySelectorAll("dialog").forEach((d) => d.addEventListener("close", () => {
+  if (toastEl.parentElement !== d) return;
+  const open = toastEl.matches(":popover-open");
+  toastHome.append(toastEl);
+  if (open) toastEl.showPopover();
+}));
+
+// A click outside a dialog's box closes it, like Esc. The press has to start
+// outside too, so dragging a selection out of a field does not close it.
+document.querySelectorAll("dialog").forEach((d) => {
+  let fromOutside = false;
+  const outside = (e: MouseEvent) => {
+    const r = d.getBoundingClientRect();
+    return e.target === d && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom);
+  };
+  d.addEventListener("pointerdown", (e) => (fromOutside = outside(e)));
+  d.addEventListener("click", (e) => {
+    if (fromOutside && outside(e)) d.close();
+    fromOutside = false;
+  });
+});
+
 // ---- start -------------------------------------------------------------------------------
 
+applyStatic();
+bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
+syncLock();
 setState("empty");
 setTool("orbit");
 void api.printers().then((p) => {
   printers = p;
   renderPrinterPick(p.selected, p.nozzleMm);
 });
+void api.prefs().then((p) => (prefs = p));
 void currentVersion().then((v) => bind("version", `v${v}`));
 // Check quietly once the window has settled; only a newer version is announced.
 window.setTimeout(() => void checkForUpdates(true), 4000);
@@ -855,7 +1467,7 @@ syncBrush();
 void api.blenderStatus().then(async (path) => {
   if (!path) {
     $<HTMLButtonElement>("#find-blender").hidden = false;
-    setState("error", "No encontré Blender en este equipo. BlendParser lo usa para leer el .blend; indícame dónde está blender.exe.");
+    setState("error", { key: "error.blenderMissing", params: {} });
     return;
   }
   const file = await api.initialFile();
