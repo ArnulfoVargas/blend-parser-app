@@ -24,7 +24,68 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check:i18n
+      - run: node --test scripts/auto-release.test.mjs scripts/publish-signed-windows.test.mjs
       - run: npm run build
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  prepare-release:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Comprobar que el commit viene de una PR fusionada
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+              ...context.repo, commit_sha: context.sha,
+            });
+            const pr = prs.find(pr => pr.merged_at && pr.base.ref === 'main' && pr.merge_commit_sha === context.sha);
+            core.setOutput('merged', Boolean(pr));
+            const labels = pr?.labels.map(label => label.name) ?? [];
+            core.setOutput('bump', labels.includes('release:major') ? 'major' : labels.includes('release:minor') ? 'minor' : 'patch');
+      - uses: actions/checkout@v4
+        if: steps.pr.outputs.merged == 'true'
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        if: steps.pr.outputs.merged == 'true'
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.pr.outputs.merged == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.pr.outputs.merged == 'true'
+      - name: Preparar dependencias para actualizar Cargo.lock sin cambiar dependencias
+        if: steps.pr.outputs.merged == 'true'
+        run: cargo fetch --locked
+      - name: Reservar versión y tag (sin escribir en main)
+        if: steps.pr.outputs.merged == 'true'
+        id: version
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          VERSION_BUMP: ${{ steps.pr.outputs.bump }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          node scripts/auto-release.mjs
+
+  release:
+    needs: prepare-release
+    if: needs.prepare-release.outputs.tag != ''
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.prepare-release.outputs.tag }}
+    secrets: inherit
