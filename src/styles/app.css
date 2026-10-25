@@ -506,3 +506,9 @@ details.group[open] .group__sum { visibility: hidden; }
 .size-chip.is-x .size-chip__axis, .tape-label.is-x { background: var(--axis-x); color: var(--glint); }
 .size-chip.is-y .size-chip__axis, .tape-label.is-y { background: var(--axis-y); color: var(--glint); }
 .size-chip.is-z .size-chip__axis, .tape-label.is-z { background: var(--axis-z); color: var(--glint); }
+.printability__params { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; margin-block: 0.75rem; }
+.printability__params .input { width: 100%; }
+.printability__check { border-inline-start: 2px solid var(--color-line); padding-inline-start: 0.65rem; margin-block: 1rem; }
+.printability__check[data-severity="error"] { border-color: #ce5039; }
+.printability__check[data-severity="warning"] { border-color: #bb8520; }
+#printability-dialog { max-width: min(42rem, 95vw); max-height: 90vh; overflow: auto; padding: 1.5rem; }

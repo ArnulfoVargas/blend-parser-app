@@ -11,6 +11,7 @@ pub mod mesh;
 pub mod optimize;
 pub mod paint;
 pub mod palette;
+pub mod printability;
 pub mod project;
 pub mod scene;
 pub mod split;

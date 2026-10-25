@@ -236,3 +236,83 @@ con Blender unos 2,5 s.
   detectados a 5 bajó los cambios estimados de 1 472 a 641.
 - **Aplanar base**: corta la base en un plano (la malla sigue cerrada) para dar más
   contacto con la placa y evitar soportes o despegues.
+
+### Diagnóstico local de viabilidad FDM (alcance inicial de #7)
+
+En **Viabilidad de impresión**, pulsa **Analizar modelo** después de elegir el tamaño final,
+la impresora, boquilla y altura de capa. El análisis usa la geometría de trabajo actual,
+con su escala por eje, simplificación y base aplanada; no la escena sin transformar.
+El informe registra dimensiones, impresora, boquilla, capa y todos los umbrales usados.
+No hay una puntuación de éxito: cada comprobación distingue **comprobado**, **estimado**
+y **no evaluado**. Cualquier cambio de documento, geometría, tamaño, perfil o umbral
+invalida el informe; hay que ejecutarlo de nuevo. El idioma no lo invalida.
+
+- **Comprobado:** bordes abiertos (no un conteo de agujeros), aristas con más de dos caras,
+  continuidad del abanico de caras de cada vértice, caras duplicadas y degeneradas,
+  orientación entre caras, signo del volumen por componente cerrado y límites de la
+  impresora con margen y reserva de torre del panel Placa. La topología se comprueba
+  por objeto después de soldar posiciones mediante una cuadrícula de tolerancia en mm;
+  posiciones muy próximas a lados distintos de una celda pueden seguir separadas.
+- **Estimado:** componentes separados o pequeños, detalle fino por la menor dimensión de
+  cada componente, componentes sin contacto con la placa, voladizos y área de contacto.
+  Las piezas separadas pueden ser intencionales; nunca se eliminan automáticamente por
+  un hallazgo. Convención angular: **0° = pared vertical; 90° = cara inferior horizontal**.
+  El contacto es el área de caras inferiores dentro de la tolerancia del mínimo Z.
+- **Espesor muestreado:** rayos desde centroides hacia dentro de la malla, en mm finales;
+  sólo se calcula con superficies cerradas, orientadas y sin los defectos topológicos
+  detectados. El umbral efectivo es el mayor entre pared mínima y ancho de extrusión
+  por perímetros objetivo. El mapa usa rojo para muestras finas, cian para muestras sobre
+  el umbral y gris cuando el rayo no encuentra una pared. No constituye un mapa continuo:
+  puede omitir paredes o detalles locales, acertar otra envolvente o ser engañoso ante
+  intersecciones. Ausencia de muestras finas no significa aprobación de toda la superficie.
+
+Los valores iniciales son editables y restaurables: ancho de extrusión = 1,1 veces la
+boquilla, pared = dos anchos, ángulo = 45°, contacto = 4 mm² y componente = 2 mm de
+**diagonal de caja**. Son puntos de partida para calibración FDM, no límites universales
+ni umbrales de un proveedor externo. La tolerancia admite 0,00001–0,1 mm, la calidad
+16–4096 muestras, el ancho 0,05–3 mm, pared/detalle 0,05–20 mm y 1–20 perímetros.
+La tecnología inicial es FDM; el análisis no modela un material ni los ajustes del laminador.
+
+Cada hallazgo ofrece **Localizar** con hasta 32 marcadores sobre el modelo. Las mediciones
+usan las unidades indicadas en el título: aristas/caras/componentes, mm, mm² o grados.
+En modelos grandes, las comprobaciones topológicas recorren vértices y caras y el BVH
+cuesta aproximadamente O(T log T); los rayos se limitan por la calidad elegida. No hay
+comparación de todos los pares de triángulos. Una referencia de 24.000 triángulos en los
+tests comprueba que las muestras y marcadores siguen acotados; no es un benchmark de
+rendimiento ni una garantía de memoria para modelos arbitrarios. El análisis se ejecuta
+bajo demanda en un trabajador del backend; la limpieza reversible conserva una copia
+completa del proyecto y puede consumir memoria adicional en modelos grandes.
+
+**Previsualizar limpieza reversible** compara conteos y dimensiones antes/después sin
+alterar el documento. Sólo activa la limpieza determinista ya existente: soldar vértices
+y eliminar caras degeneradas/duplicadas. Aplicar vuelve a analizar; **Deshacer** restaura
+geometría, ajustes, materiales, paleta y pintura previos. El diálogo avisa antes de aplicar
+que el recalculado conserva colores/materiales fuente pero vuelve a detectar la pintura
+manual. Cancelar deja el original intacto. Si la limpieza ya está activa, el botón queda
+inactivo; se puede desactivar en Malla para comparar la geometría sin limpiar.
+
+**Pendiente / no evaluado:** autointersecciones robustas (incluidas caras coplanares),
+puentes, inicios locales de capas sin apoyo, distancias entre piezas y fragilidad mecánica.
+No se ofrecen cierre automático de agujeros, reorientación automática, engrosado local,
+remallado ni búsqueda automática de orientación; requieren un algoritmo fiable y una
+previsualización de su impacto en materiales. El diagnóstico tampoco mide la desviación
+respecto a la geometría anterior a simplificar: vuelve a revisar la geometría resultante,
+pero no certifica que todos los detalles originales sobrevivan.
+
+Pruebas de referencia cubren caja cerrada, agujero, cara invertida, volumen invertido,
+caras degeneradas/duplicadas, aristas no manifold, vértice que une dos envolventes,
+pared fina, componente pequeño/aislado, geometría elevada sin contacto y dos cajas
+intersectadas. Este último caso comprueba expresamente que **autointersecciones** aparece
+como **no evaluado**, nunca como aprobado. También se verifica la coherencia al cambiar
+escala/boquilla/umbrales y la restauración del color al deshacer la limpieza.
+
+La comparación antes/después en Bambu Studio u otro laminador **no está automatizada ni
+verificada en esta entrega**: exporta ambos 3MF, selecciona el mismo proceso/material y
+compara continuidad de capas, detalles, soportes y adhesión en la vista laminada antes de
+imprimir. La ausencia de hallazgos no garantiza que la pieza se imprima sin defectos.
+
+El volumen y espesor de modelos con envolventes de signos mixtos quedan **no evaluados**:
+una envolvente interior invertida puede ser una cavidad correcta y este alcance no
+implementa una prueba robusta de anidamiento. Una envolvente aislada invertida sigue
+siendo un error. Deshacer la limpieza conserva la altura de capa activa; cambiar la
+boquilla reconstruye la pintura e invalida ese historial, como los otros cambios de malla.

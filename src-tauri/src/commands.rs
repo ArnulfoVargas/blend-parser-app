@@ -483,3 +483,55 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
     })
     .await
 }
+
+fn printability_for_doc(
+    d: &mut Document,
+    prefs: &Prefs,
+    params: bp_core::printability::Params,
+    preview_cleanup: bool,
+) -> bp_core::printability::Report {
+    let candidate;
+    let project = if preview_cleanup {
+        candidate = d.project.cleanup_candidate();
+        &candidate
+    } else {
+        &d.project
+    };
+    let mut report = project.printability(params);
+    report.printer = Some(d.printer.profile.id.clone());
+    let stats = project.stats();
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
+    let fits = plate.fits && stats.size_mm[2] <= d.printer.max_height_mm();
+    report.checks.push(bp_core::printability::Check::new(
+        "buildVolume",
+        "checked",
+        usize::from(!fits),
+        "error",
+        Some(report.size_mm[2]),
+        Some(d.printer.max_height_mm()),
+        vec![[0.0; 3]],
+    ));
+    report
+}
+
+/// Runs only on request; large reports never slow down every painting summary.
+#[tauri::command]
+pub async fn analyze_printability(
+    app: AppHandle,
+    params: bp_core::printability::Params,
+    preview_cleanup: bool,
+) -> CmdResult<bp_core::printability::Report> {
+    if !params.valid() {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, prefs| Ok(printability_for_doc(d, prefs, params, preview_cleanup))).await
+}
+
+#[tauri::command]
+pub async fn apply_cleanup(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, |d, prefs| {
+        d.project.cleanup();
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}

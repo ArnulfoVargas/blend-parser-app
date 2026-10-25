@@ -222,6 +222,20 @@
             </div>
           </div>
         </details>
+        <details class="group" id="printability">
+          <summary><h2 data-i18n="printability.title">Viabilidad de impresion</h2></summary>
+          <div class="group__body">
+            <p class="help" data-i18n="printability.intro"></p>
+            <details><summary data-i18n="printability.parameters"></summary><div class="printability__params"></div>
+              <button class="link" type="button" id="printability-reset" data-i18n="printability.reset"></button>
+              <p class="help" data-i18n="printability.defaults"></p>
+            </details>
+            <button class="btn btn--quiet" type="button" id="printability-run" data-i18n="printability.run" disabled></button>
+            <p class="help printability__status" role="status" aria-live="polite"></p>
+            <div class="printability__results"></div>
+            <button class="link" type="button" id="printability-cleanup" data-i18n="printability.cleanup" disabled></button>
+          </div>
+        </details>
       </form>
     </aside>
 
@@ -469,5 +483,15 @@
   <div class="drop-veil" aria-hidden="true"><p data-i18n="tray.veil">Suelta el .blend para convertirlo</p></div>
   <p class="visually-hidden" aria-live="polite" id="live"></p>
 </div>
+  <dialog id="printability-dialog" class="dialog">
+    <form method="dialog" class="dialog__body">
+      <h2 data-i18n="printability.preview"></h2>
+      <p data-i18n="printability.cleanupHelp"></p>
+      <p class="help" data-i18n="printability.colorWarning"></p>
+      <div class="printability__comparison"></div>
+      <button class="btn btn--quiet" value="cancel" data-i18n="printability.cancel"></button>
+      <button class="btn" value="apply" data-i18n="printability.apply"></button>
+    </form>
+  </dialog>
 </body>
 </html>

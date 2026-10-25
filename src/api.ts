@@ -110,7 +110,7 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | null;
+  undoLabel: "stroke" | "merge" | "cleanup" | null;
   paintedTriangles: number;
 }
 
@@ -141,6 +141,8 @@ export function decodePreview(buf: ArrayBuffer): PreviewMesh {
 }
 
 export const api = {
+  analyzePrintability: (params: PrintabilityParams, previewCleanup = false) => invoke<PrintabilityReport>("analyze_printability", { params, previewCleanup }),
+  applyCleanup: () => invoke<Summary>("apply_cleanup"),
   blenderStatus: () => invoke<string | null>("blender_status"),
   initialFile: () => invoke<string | null>("initial_file"),
   setBlenderPath: (path: string) => invoke<string>("set_blender_path", { path }),
@@ -176,3 +178,18 @@ export const api = {
   exportColorZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
     invoke<number>("export_color_zip", { path, thicknessMm, mainSolid, lang }),
 };
+
+export interface PrintabilityParams {
+  extrusionMm: number; perimeters: number; wallMm: number; detailMm: number;
+  componentMm: number; overhangDeg: number; contactMm2: number; toleranceMm: number; samples: number;
+}
+export interface PrintabilityCheck {
+  code: string; evidence: "checked" | "estimated" | "notEvaluated";
+  severity: "pass" | "warning" | "error" | "incomplete"; count: number;
+  measurement: number | null; threshold: number | null; locations: Vec3[];
+}
+export interface PrintabilityReport {
+  params: PrintabilityParams; checks: PrintabilityCheck[]; triangles: number; sizeMm: Vec3;
+  printer: string | null; nozzleMm: number | null; layerMm: number | null;
+  thickness: { point: Vec3; mm: number | null }[];
+}

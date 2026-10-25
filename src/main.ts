@@ -27,6 +27,7 @@ import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, o
 import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
+import { setupPrintability } from "./printability";
 import { Viewer, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
@@ -240,7 +241,9 @@ function fitProblem(s: Summary): string | null {
 }
 
 function render(s: Summary) {
+  const changed = summary !== s;
   summary = s;
+  if (changed) printability.invalidate();
   bind("fileName", s.fileName);
   bind("fileMeta", t("file.meta", { mb: nf(s.fileSize / 1048576, 1), count: s.materials.length, n: s.materials.length }));
 
@@ -1445,6 +1448,13 @@ document.querySelectorAll("dialog").forEach((d) => {
     if (fromOutside && outside(e)) d.close();
     fromOutside = false;
   });
+});
+
+const printability = setupPrintability({
+  summary: () => summary,
+  locate: (points, values, threshold) => viewer.setFindings(points.map(p => p.map(v => v / (summary?.size.previewScale ?? 1)) as Vec3), values, threshold),
+  apply: () => apply(() => api.applyCleanup()),
+  error: e => toast(errText(e), "error"),
 });
 
 // ---- start -------------------------------------------------------------------------------

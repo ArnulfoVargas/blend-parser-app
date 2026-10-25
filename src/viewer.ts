@@ -62,6 +62,7 @@ export class Viewer {
   private cursorFill: THREE.MeshBasicMaterial;
   private plate: THREE.Mesh;
   private tape = new THREE.Group();
+  private findings = new THREE.Group();
   private tapePoints: Vec3[] = [];
   /** Where the pointer is on the model while measuring. */
   private hover: Vec3 | null = null;
@@ -102,6 +103,7 @@ export class Viewer {
     this.controls.dampingFactor = 0.12;
     this.controls.addEventListener("change", () => this.requestRender());
 
+    this.scene.add(this.findings);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f86, 1.6));
     const key = new THREE.DirectionalLight(0xffffff, 1.6);
     key.position.set(0.6, -1, 1.4);
@@ -709,6 +711,23 @@ export class Viewer {
       new THREE.Vector3(near(0), near(1), c.z),
     ];
     this.sizeChips.forEach((chip, i) => put(chip, screen(edges[i])));
+  }
+
+  /** Bounded diagnostic markers; final-to-preview scaling is supplied by the caller. */
+  setFindings(points: Vec3[], values?: (number | null)[], threshold = 0) {
+    for (const child of this.findings.children) {
+      if (child instanceof THREE.Points) { child.geometry.dispose(); (child.material as THREE.Material).dispose(); }
+    }
+    this.findings.clear();
+    if (points.length) {
+      const geometry = new THREE.BufferGeometry().setFromPoints(points.map(p => new THREE.Vector3(...p)));
+      const colors = points.flatMap((_, i) => values ? values[i] === null ? [0.6, 0.6, 0.6] : values[i]! < threshold ? [1, 0.15, 0.05] : [0.05, 0.75, 0.9] : [1, 0.3, 0.05]);
+      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      const markers = new THREE.Points(geometry, new THREE.PointsMaterial({ size: 8, sizeAttenuation: false, vertexColors: true, depthTest: false }));
+      markers.renderOrder = 30; this.findings.add(markers);
+      if (!values) this.controls.target.set(...points[0]);
+    }
+    this.requestRender();
   }
 
   /** Shows the measured points (preview units) and the line between them. */
