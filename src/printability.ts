@@ -36,6 +36,8 @@ interface Fix {
   mm?(s: Summary, r: PrintabilityReport): number;
   /** Makes the change; null when it found nothing to change. */
   apply(s: Summary, r: PrintabilityReport): Promise<Undo | null>;
+  /** Mesh operations it turns on, so several can share one rebuild. */
+  patch?(s: Summary, r: PrintabilityReport): MeshFix;
 }
 /** What each fix asks of the app; each call applies and re-renders. */
 interface FixOps {
@@ -57,14 +59,16 @@ const SETTING: Record<keyof MeshFix, keyof Summary["settings"]> = {
   repair: "repair", orient: "orient", fillHoles: "fillHoles", splitVertices: "splitVertices",
   dropFloating: "dropFloating", minPieceMm: "minPieceMm", flattenMm: "flattenMm", deepClean: "deepClean",
 };
+/** Key of what "Corregir todo" applied, beside the single fixes in `applied`. */
+const ALL = "all";
 const same = (a: number[] | number[][], b: number[] | number[][]) =>
   a.flat().every((v, i) => Math.abs(v - b.flat()[i]) < 1e-5);
 const base = (s: Summary) => Math.max(0.4, Math.round(s.settings.layerMm * 2 * 100) / 100);
 
-function makeFixes(ops: FixOps): Record<string, Fix> {
-  /** Turns mesh operations on; reverting puts back the values they had. */
-  const mesh = (available: Fix["available"], patch: (s: Summary, r: PrintabilityReport) => MeshFix, mm?: Fix["mm"]): Fix => ({
-    available, mm, repaints: true,
+/** Turns mesh operations on; reverting puts back the values they had. */
+function meshFix(ops: FixOps, available: Fix["available"], patch: NonNullable<Fix["patch"]>, mm?: Fix["mm"]): Fix {
+  return {
+    available, mm, patch, repaints: true,
     async apply(s, r) {
       const set = patch(s, r);
       const keys = Object.keys(set) as (keyof MeshFix)[];
@@ -74,7 +78,11 @@ function makeFixes(ops: FixOps): Record<string, Fix> {
       const now = ops.summary();
       return now && holds(now) ? { revert: () => ops.fix(previous), holds } : null;
     },
-  });
+  };
+}
+
+function makeFixes(ops: FixOps): Record<string, Fix> {
+  const mesh = (available: Fix["available"], patch: NonNullable<Fix["patch"]>, mm?: Fix["mm"]) => meshFix(ops, available, patch, mm);
   /** A change read back from the summary: `value` before and after tells whether it happened. */
   const measured = <T extends number[] | number[][]>(value: (s: Summary) => T, run: (r: PrintabilityReport) => Promise<unknown>, back: (v: T, s: Summary) => Promise<unknown>): Fix => ({
     available: () => true, repaints: false,
@@ -149,7 +157,7 @@ export function setupPrintability(options: {
   const hide = panel.querySelector<HTMLButtonElement>("#printability-hide")!;
   const inputs = new Map<keyof PrintabilityParams, HTMLInputElement>();
   /** Fixes applied from this panel: how to take each back, and the counts before it. */
-  const applied = new Map<string, Undo & { before: Map<string, number> }>();
+  const applied = new Map<string, Undo & { before: Map<string, number>; ids?: Set<string> }>();
   /** Fixes that found nothing to change in this revision; their card says so instead of offering them again. */
   const fruitless = new Set<string>();
   let report: PrintabilityReport | null = null;
@@ -284,6 +292,7 @@ export function setupPrintability(options: {
     const own = FIX_OF[c.code];
     if (own && applied.has(own)) return own;
     if (c.severity !== "pass") return undefined;
+    if (own && applied.get(ALL)?.ids?.has(own)) return ALL;
     for (const [id, a] of applied) if ((a.before.get(c.code) ?? 0) > 0) return id;
     return undefined;
   }
@@ -306,14 +315,17 @@ export function setupPrintability(options: {
       row.append(el("p", "help", tKey(`printability.help.${c.code}`)));
     }
     const open = id && s && !done && c.severity !== "pass";
-    const fixable = open && !fruitless.has(id) && FIXES[id].available(s, r);
+    const byAll = !!id && !!applied.get(ALL)?.ids?.has(id);
+    const fixable = open && !byAll && !fruitless.has(id) && FIXES[id].available(s, r);
     if (fixable) row.append(el("p", "pa-check__fix", fixText(id, s, r)));
     // The outcome shows where it was asked for: the status line is above the cards, often out of view.
+    else if (open && byAll) row.append(el("p", "pa-check__note", t("printability.fixAllLeft")));
     else if (open && fruitless.has(id)) row.append(el("p", "pa-check__note", noneText(id)));
     else if (open) row.append(el("p", "pa-check__note", t("printability.fixSpent")));
 
     const actions = el("div", "pa-check__actions");
-    if (done || fixable) {
+    // What "Corregir todo" fixed comes back with "Revertir todo", all together.
+    if ((done && by !== ALL) || fixable) {
       const button = el("button", "btn btn--sm", t(done ? "printability.revert" : "printability.fix"));
       button.type = "button";
       button.dataset.fix = id;
@@ -358,6 +370,27 @@ export function setupPrintability(options: {
     }));
   }
 
+  /** A "Corregir todo" or "Revertir todo" button; it shares the fix buttons' busy state. */
+  function button(text: string, click: () => void) {
+    const b = el("button", "btn btn--sm", text);
+    b.type = "button";
+    b.dataset.fix = ALL;
+    b.disabled = busy;
+    b.addEventListener("click", click);
+    return b;
+  }
+
+  /** Fixes that would act on a problem `r` shows and have not been tried on it. */
+  function pending(r: PrintabilityReport, s: Summary): string[] {
+    const ids = new Set<string>();
+    for (const c of r.checks) {
+      const id = FIX_OF[c.code];
+      if ((c.severity === "error" || c.severity === "warning") && id && !applied.has(id)
+        && !applied.get(ALL)?.ids?.has(id) && !fruitless.has(id) && FIXES[id].available(s, r)) ids.add(id);
+    }
+    return [...ids];
+  }
+
   function show(r: PrintabilityReport, message = "", tone: Tone = "ok") {
     report = r;
     outdated = false;
@@ -386,7 +419,10 @@ export function setupPrintability(options: {
       size: size(r.sizeMm, 1),
       triangles: num(r.triangles, 0),
     }));
-    output.replaceChildren(top, context, ...cards.map((c) => card(c, r, s)));
+    const bulk = el("div", "pa-check__actions");
+    if (s && pending(r, s).length) bulk.append(button(t("printability.fixAll"), () => void fixAll()));
+    if (applied.has(ALL)) bulk.append(button(t("printability.revertAll"), () => void revert(ALL)));
+    output.replaceChildren(top, context, ...(bulk.childElementCount ? [bulk] : []), ...cards.map((c) => card(c, r, s)));
 
     if (r.thickness.length) {
       const threshold = Math.max(r.params.wallMm, r.params.extrusionMm * r.params.perimeters);
@@ -457,6 +493,67 @@ export function setupPrintability(options: {
       if (undo) applied.set(id, { ...undo, before });
       else fruitless.add(id);
     }, () => applied.has(id) ? [t("printability.fixDone"), "ok"] : [noneText(id), "warn"]);
+  }
+
+  /** Applies every fix the report asks for, looking again after each round:
+   *  turning goes alone first, since it changes what rests on the plate (and so
+   *  whether the base needs flattening); then all mesh fixes share one rebuild,
+   *  and fitting the plate goes last, at the final size. */
+  async function fixAll() {
+    const s = options.summary();
+    const params = read();
+    if (!s || !report || !params || busy) return;
+    const first = pending(report, s);
+    if (!first.length) return;
+    const names = [...new Set(report.checks
+      .filter((c) => c.severity !== "pass" && first.includes(FIX_OF[c.code]))
+      .map((c) => tKey(`printability.check.${c.code}`)))].join(", ");
+    const paint = s.paintedTriangles > 0 ? ` ${t("printability.fixPaint")}` : "";
+    if (!(await options.confirm(t("printability.fixAllConfirm", { list: names }) + paint))) return;
+    const r0 = report;
+    const before = new Map(r0.checks.map((c) => [c.code, c.count]));
+    const undos: Undo[] = [];
+    const ids = new Set<string>();
+    const none: string[] = [];
+    await step(ALL, t("printability.fixing"), async () => {
+      let r = r0;
+      for (let round = 0; round < 4; round++) {
+        const now = options.summary();
+        const wanted = now ? pending(r, now).filter((id) => !ids.has(id) && !none.includes(id)) : [];
+        if (!now || !wanted.length) break;
+        const batch = wanted.includes("rotate") ? ["rotate"] : wanted;
+        const mesh = batch.filter((id) => FIXES[id].patch);
+        if (mesh.length) {
+          const merged = meshFix(options, () => true, (x, y) => Object.assign({}, ...mesh.map((id) => FIXES[id].patch!(x, y))));
+          const undo = await merged.apply(now, r);
+          if (undo) undos.push(undo);
+          mesh.forEach((id) => (undo ? ids.add(id) : none.push(id)));
+        }
+        for (const id of batch.filter((x) => !FIXES[x].patch)) {
+          const at = options.summary();
+          const undo = at && (await FIXES[id].apply(at, r));
+          if (undo) {
+            undos.push(undo);
+            ids.add(id);
+          } else none.push(id);
+        }
+        r = await api.analyzePrintability(params);
+      }
+      // Tried and found nothing: the cards say so instead of offering it again.
+      none.forEach((id) => fruitless.add(id));
+      if (!undos.length) return;
+      applied.set(ALL, {
+        before, ids,
+        holds: (x) => undos.some((u) => u.holds(x)),
+        // Newest first; anything already undone by hand stays as it is.
+        async revert() {
+          for (const u of [...undos].reverse()) {
+            const now = options.summary();
+            if (now && u.holds(now)) await u.revert();
+          }
+        },
+      });
+    }, () => applied.has(ALL) ? [t("printability.fixAllDone"), "ok"] : [t("printability.fixNone.any"), "warn"]);
   }
 
   async function revert(id: string) {
