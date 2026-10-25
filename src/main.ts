@@ -20,6 +20,7 @@ import {
   type Prefs,
   type Progress,
   type Summary,
+  type TurnResult,
   type Vec3,
   type WastePrefs,
 } from "./api";
@@ -27,7 +28,7 @@ import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, o
 import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
-import { Viewer, type Tool, type View } from "./viewer";
+import { Viewer, type Axis, type Section, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -178,6 +179,15 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     }
     return (await apply(() => api.setSize(next as Vec3))) !== undefined;
   },
+  // Moving changes no geometry: the plate is checked again, the mesh stays.
+  move: async (mm) => {
+    previousSwaps = summary?.estimate.swaps ?? null;
+    const s = summary ? await work(() => api.setOffset(mm)) : undefined;
+    if (s) render(s);
+    return s !== undefined;
+  },
+  rotate: async (axis, degrees) => (summary ? turn(() => api.rotate(axis, degrees)) : false),
+  section: (s) => syncSection(s),
 });
 
 /** Points in preview units for the current size. */
@@ -202,6 +212,81 @@ $("#measure-clear").addEventListener("click", () => {
   measured = [];
   syncMeasure();
 });
+
+// ---- placing on the plate, turning and the section cut -----------------------------
+
+function renderPlace(s: Summary) {
+  const [x, y] = s.plate.offsetMm;
+  bind("placeOffset", t("place.offset", { x: nf(x, 1), y: nf(y, 1) }));
+  $<HTMLButtonElement>("#place-centre").disabled = x === 0 && y === 0;
+  $<HTMLButtonElement>("#rotate-reset").disabled = !s.plate.rotated;
+  $<HTMLButtonElement>("#cut-undo").disabled = !s.plate.canUndoCut;
+}
+$("#place-centre").addEventListener("click", () => void work(() => api.setOffset([0, 0])).then((s) => s && render(s)));
+
+/**
+ * A turn. When the whole model turned as it is, the preview is moved where it
+ * stands rather than fetched again. The measured points belong to the old orientation.
+ */
+async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
+  measured = [];
+  previousSwaps = summary?.estimate.swaps ?? null;
+  const done = await work(async () => {
+    const r = await call();
+    render(r.summary);
+    if (r.rigid) {
+      viewer.moveMesh(r.rigid.matrix, r.rigid.shift);
+      syncBrush();
+      syncMeasure();
+    } else {
+      await reloadMesh();
+    }
+    return true;
+  });
+  return done === true;
+}
+document.querySelectorAll<HTMLButtonElement>("button[data-turn]").forEach((b) => b.addEventListener("click", () => void turn(() => api.rotate(Number(b.dataset.turn), 90))));
+$("#rotate-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
+
+const cutPos = $<HTMLInputElement>("#cut-pos");
+/** The cut's controls under the view, and the mark on its tool while it is on. */
+function syncSection(s: Section | null) {
+  $<HTMLButtonElement>('button[data-tool="section"]').dataset.on = String(s !== null);
+  document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) => b.setAttribute("aria-pressed", String(s !== null && Number(b.dataset.cutAxis) === s.axis)));
+  if (s) cutPos.value = String(Math.round(s.t * 1000) / 10);
+  $<HTMLButtonElement>("#cut-flip").setAttribute("aria-pressed", String(s?.flip ?? false));
+}
+function setSection(s: Section | null) {
+  viewer.setSection(s);
+  syncSection(s);
+}
+const currentCut = (): Section => viewer.getSection() ?? { axis: 2, t: 0.5, flip: false };
+cutPos.addEventListener("input", () => setSection({ ...currentCut(), t: Number(cutPos.value) / 100 }));
+document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) =>
+  b.addEventListener("click", () => setSection({ ...currentCut(), axis: Number(b.dataset.cutAxis) as Axis })));
+$("#cut-flip").addEventListener("click", () => setSection({ ...currentCut(), flip: !currentCut().flip }));
+$("#cut-off").addEventListener("click", () => {
+  setSection(null);
+  setTool("orbit");
+});
+// Cutting for real keeps the side the view shows.
+const keepOther = $<HTMLInputElement>("#cut-keep-other");
+$("#cut-apply").addEventListener("click", () => {
+  const s = viewer.getSection();
+  if (!s || !summary) return;
+  const both = keepOther.checked;
+  measured = [];
+  void apply(() => api.cutModel(s.axis, s.t, !s.flip, both), () => {
+    setSection(null);
+    setTool("orbit");
+    toast(t(both ? "cut.doneBoth" : "cut.doneKept"), "ok", { label: t("cut.undo"), run: undoCut });
+  });
+});
+function undoCut() {
+  measured = [];
+  void apply(() => api.undoCut(), () => toast(t("cut.undone")));
+}
+$("#cut-undo").addEventListener("click", undoCut);
 
 const radiusInput = $<HTMLInputElement>("#radius");
 const radiusMm = () => Number(radiusInput.value);
@@ -246,6 +331,7 @@ function render(s: Summary) {
 
   renderSize(s);
   renderPlate(s);
+  renderPlace(s);
 
   // Settings.
   const st = s.settings;
@@ -766,6 +852,7 @@ async function openFile(path: string) {
     previousSwaps = null;
     measured = [];
     render(await api.openBlend(path));
+    setSection(null);
     await reloadMesh(true);
     setState("ready");
     // Start both panels at the top once layout has settled.
@@ -1220,6 +1307,8 @@ function setTool(tool: Tool) {
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
+  // Picking the cut's tool turns the cut on.
+  syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
   syncMeasure();
 }
@@ -1292,6 +1381,9 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "o") setTool("orbit");
   else if (e.key === "m") setTool("measure");
   else if (e.key === "s") setTool("size");
+  else if (e.key === "g") setTool("move");
+  else if (e.key === "r") setTool("rotate");
+  else if (e.key === "c") setTool("section");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();

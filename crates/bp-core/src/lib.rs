@@ -3,6 +3,7 @@
 
 pub mod bvh;
 pub mod color;
+pub mod cut;
 pub mod encode;
 pub mod estimate;
 pub mod field;
@@ -17,7 +18,7 @@ pub mod split;
 pub mod waste;
 
 pub use mesh::{MeshOps, RepairReport};
-pub use project::{ColorOps, ExportPart, Preview, PrintOps, Project, Stats};
+pub use project::{ColorOps, ExportPart, Mat3, Preview, PrintOps, Project, Stats};
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;
 pub use waste::{Waste, WasteParams};

@@ -77,7 +77,14 @@ export interface Plate {
   needsTower: boolean;
   towerMm: [number, number];
   towerEstimated: boolean;
+  offsetMm: [number, number]; // model centre from the plate centre
+  rotated: boolean; // turned from the file's orientation
+  canUndoCut: boolean;
+  objects: number; // the model and the pieces cut off it that were kept
 }
+
+/** A turn; `rigid` says how the preview moved when it could follow as it is: p' = matrix · p + shift. */
+export interface TurnResult { summary: Summary; rigid: { matrix: number[][]; shift: Vec3 } | null }
 
 /** What a failed command sends: a catalogue key and the values it names. */
 export interface AppError { key: string; params: Record<string, string | number> }
@@ -151,6 +158,13 @@ export const api = {
   undoSize: () => invoke<Summary>("undo_size"),
   resetSize: () => invoke<Summary>("reset_size"),
   fitToPlate: () => invoke<Summary>("fit_to_plate"),
+  setOffset: (mm: [number, number]) => invoke<Summary>("set_offset", { mm }),
+  /** Turns the model about X (0), Y (1) or Z (2); it lands back on the plate. */
+  rotate: (axis: number, degrees: number) => invoke<TurnResult>("rotate", { axis, degrees }),
+  resetRotation: () => invoke<TurnResult>("reset_rotation"),
+  /** Cuts `t` of the way along `axis`, keeping the low or high side, and the other as its own object if asked. */
+  cutModel: (axis: number, t: number, keepLow: boolean, keepOther: boolean) => invoke<Summary>("cut_model", { axis, t, keepLow, keepOther }),
+  undoCut: () => invoke<Summary>("undo_cut"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),
   setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number) =>

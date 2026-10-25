@@ -9,7 +9,7 @@ use serde_json::json;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::dto::{self, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary};
+use crate::dto::{self, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary, TurnDto};
 use crate::error::{in_range, AppError, CmdResult};
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::profiles::Store;
@@ -122,6 +122,7 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
             file_size: size,
             printer,
             flush: Default::default(),
+            offset_mm: [0.0; 2],
         };
         let summary = dto::summary(&doc, &prefs);
         *state.doc.lock()? = Some(doc);
@@ -188,10 +189,13 @@ pub async fn reset_size(app: AppHandle) -> CmdResult<Summary> {
 }
 
 /// The largest uniform size that fits the plate, its margin and the tower's
-/// reserved space, and that the printer reaches in height.
+/// reserved space, and that the printer reaches in height. The model goes back
+/// to the plate's centre first: that is where it has the most room to grow.
 #[tauri::command]
 pub async fn fit_to_plate(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {
+        let moved = d.offset_mm;
+        d.offset_mm = [0.0; 2];
         let s = dto::summary(d, prefs);
         let flat = s.size.target_mm[2] - s.size_mm[2];
         let by_height = (d.printer.max_height_mm() + flat) / s.size.target_mm[2];
@@ -199,9 +203,65 @@ pub async fn fit_to_plate(app: AppHandle) -> CmdResult<Summary> {
         // A hair under the limit, so the footprint does not touch the edge it was fitted to.
         let size = s.size.target_mm.map(|v| (v * k * 0.999 * 100.0).floor() / 100.0);
         if k.is_nan() || k <= 0.0 || size.iter().any(|v| !SIZE_RANGE.contains(v)) {
+            d.offset_mm = moved;
             return Err(AppError::new("error.noRoom"));
         }
         d.project.set_size_mm(size);
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Moves the model's centre to `mm` from the plate's centre.
+#[tauri::command]
+pub async fn set_offset(app: AppHandle, mm: [f32; 2]) -> CmdResult<Summary> {
+    let mm = mm.map(|v| if v.is_finite() { v.clamp(-1000.0, 1000.0) } else { 0.0 });
+    with_doc(app, move |d, prefs| {
+        d.offset_mm = mm;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Turns the model `degrees` about X (0), Y (1) or Z (2); it lands back on the
+/// plate. When the turn moved the preview as it is, says how, so the UI moves
+/// it instead of fetching it again.
+#[tauri::command]
+pub async fn rotate(app: AppHandle, axis: usize, degrees: f32) -> CmdResult<TurnDto> {
+    with_doc(app, move |d, prefs| {
+        let rigid = d.project.rotate(axis, degrees);
+        Ok(dto::turn(d, prefs, rigid))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn reset_rotation(app: AppHandle) -> CmdResult<TurnDto> {
+    with_doc(app, |d, prefs| {
+        let rigid = d.project.reset_rotation();
+        Ok(dto::turn(d, prefs, rigid))
+    })
+    .await
+}
+
+/// Cuts the model `t` of the way along `axis` (0 to 1 over the preview) and
+/// keeps the low or the high side; with `keep_other`, the other side too, as an
+/// object of its own beside it.
+#[tauri::command]
+pub async fn cut_model(app: AppHandle, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        if !d.project.cut(axis, t, keep_low, keep_other) {
+            return Err(AppError::new("error.cutMisses"));
+        }
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, |d, prefs| {
+        d.project.undo_cut();
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -465,7 +525,13 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
             name: &name,
             parts: parts
                 .iter()
-                .map(|p| bp_3mf::Part { name: &p.name, positions: &p.positions, tris: &p.tris, paint: &p.paint })
+                .map(|p| bp_3mf::Part {
+                    name: &p.name,
+                    positions: &p.positions,
+                    tris: &p.tris,
+                    paint: &p.paint,
+                    object: p.object,
+                })
                 .collect(),
             filaments,
             printer: d.printer.clone(),
@@ -476,6 +542,7 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
                 prime_mm3: prefs.waste.prime_mm3,
             },
             layer_mm: prefs.waste.layer_mm,
+            offset_mm: d.offset_mm,
         };
         let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
         bp_3mf::write(std::io::BufWriter::new(file), &model)
