@@ -261,7 +261,6 @@ function render(s: Summary) {
 
   // Colour patches the nozzle cannot draw.
   const fixTo = Math.ceil(s.minDetailMm2);
-  $<HTMLDivElement>("#detail-note").hidden = s.smallIslands === 0;
   bind("detailNote", t("colour.smallIslands", { count: s.smallIslands, n: nf(s.smallIslands), area: mm(s.minDetailMm2), nozzle: mm(st.nozzleMm) }));
   bind("detailFix", t("colour.fixIslands", { area: nf(fixTo) }));
   document.querySelectorAll<HTMLInputElement>("#count input").forEach((i) => (i.checked = Number(i.value) === s.slots.length));
@@ -325,6 +324,8 @@ function syncOutputs() {
   bind("detailOut", d === 0 ? t("colour.detailOff") : t("colour.detailLevel", { n: d }));
   const i = Number($<HTMLInputElement>("#island").value);
   bind("islandOut", i === 0 ? t("colour.islandsOff") : `${i} mm²`);
+  // The warning stays until islands are cleaned at the recommended size or more.
+  $<HTMLDivElement>("#detail-note").classList.toggle("is-gone", !summary || summary.smallIslands === 0 || i >= Math.ceil(summary.minDetailMm2));
 }
 
 // ---- size ------------------------------------------------------------------------------

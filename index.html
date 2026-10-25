@@ -199,9 +199,11 @@
               <input class="range" id="island" name="island" type="range" min="0" max="50" step="1" value="0">
               <p class="help" data-i18n="colour.islandsHelp">Las manchas pequeñas toman el color vecino: menos cambios de filamento.</p>
             </div>
-            <div class="note" id="detail-note" role="status" hidden>
-              <p data-bind="detailNote"></p>
-              <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix"></button>
+            <div class="reveal is-gone" id="detail-note">
+              <div><div class="note" role="status">
+                <p data-bind="detailNote"></p>
+                <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix"></button>
+              </div></div>
             </div>
           </div>
         </details>
