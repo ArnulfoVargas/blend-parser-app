@@ -20,10 +20,22 @@ export interface BrushHandlers {
   endStroke(): void;
   /** A click on the model with the measuring tool. */
   measure(point: Vec3): void;
-  /** How the tape reads the distance between two preview points. */
-  distance(a: Vec3, b: Vec3): string;
-  /** A size typed on one of the handles, in final millimetres. */
-  resize(axis: Axis, mm: number): void;
+  /** How the tape reads two preview points: along any line, the model's height, or one axis. */
+  distance(a: Vec3, b: Vec3, kind: "free" | "height" | Axis): string;
+  /** Scale factors dragged with the size handles; false when they were refused. */
+  resize(factors: Vec3): Promise<boolean>;
+}
+
+/** A size handle: one axis, or all three from the corner. */
+type Grip = Axis | "all";
+
+/** Blender's axis colours: X red, Y green, Z blue. */
+const AXIS_COLOURS = ["--axis-x", "--axis-y", "--axis-z"];
+
+/** The one axis two points differ on, if they differ on exactly one. */
+function axisOf(a: Vec3, b: Vec3): Axis | null {
+  const moved = [0, 1, 2].filter((i) => Math.abs(a[i] - b[i]) > 1e-6);
+  return moved.length === 1 ? (moved[0] as Axis) : null;
 }
 
 /** Resolves a CSS colour token (oklch included) through a 1×1 canvas. */
@@ -57,6 +69,15 @@ export class Viewer {
   private rubber: THREE.Line;
   private sizeBox: THREE.LineSegments;
   private sizeValues: number[] | null = null;
+  /** Shift held: the second measuring point stays on one axis from the first. */
+  private shift = false;
+  private heightLine: THREE.Line;
+  private heightLabel: HTMLDivElement;
+  private grips = new THREE.Group();
+  private hoverGrip: Grip | null = null;
+  private drag: { grip: Grip; pivot: THREE.Vector3; dir: THREE.Vector3; reach: number; factors: THREE.Vector3 } | null = null;
+  /** Dragging one axis scales all three, as the size panel's lock does. */
+  proportional = true;
   private bed = new THREE.Group();
   private bedPlate: { plate: Plate; scale: number } | null = null;
   private showBed = false;
@@ -130,8 +151,29 @@ export class Viewer {
     this.rubber.renderOrder = 22;
     this.rubber.visible = false;
     this.scene.add(this.rubber);
+    // With nothing measured yet, the tape shows the model's height.
+    this.heightLine = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineBasicMaterial({ color: cssColor("--axis-z"), depthTest: false, transparent: true }),
+    );
+    this.heightLine.renderOrder = 22;
+    this.heightLine.visible = false;
+    this.scene.add(this.heightLine);
 
-    // Size handles: the model's box, with an input per axis over it.
+    // Size grips: a cube past each face, coloured by axis, and one on a top corner for all three.
+    [0, 1, 2, 3].forEach((i) => {
+      const grip = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshBasicMaterial({ color: cssColor(i < 3 ? AXIS_COLOURS[i] : "--color-ink"), depthTest: false, transparent: true }),
+      );
+      grip.userData.grip = i < 3 ? i : "all";
+      grip.renderOrder = 25;
+      this.grips.add(grip);
+    });
+    this.grips.visible = false;
+    this.scene.add(this.grips);
+
+    // The model's box while sizing.
     this.sizeBox = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
       new THREE.LineBasicMaterial({ color: cssColor("--color-accent-deep"), depthTest: false, transparent: true, opacity: 0.7 }),
@@ -144,29 +186,29 @@ export class Viewer {
 
     this.overlay = Object.assign(document.createElement("div"), { className: "overlay" });
     canvas.after(this.overlay);
+    this.overlay.setAttribute("aria-hidden", "true");
     this.tapeLabel = Object.assign(document.createElement("div"), { className: "tape-label", hidden: true });
-    this.tapeLabel.setAttribute("aria-hidden", "true");
+    this.heightLabel = Object.assign(document.createElement("div"), { className: "tape-label is-z", hidden: true });
     this.sizeChips = ([0, 1, 2] as Axis[]).map((axis) => {
-      const chip = Object.assign(document.createElement("label"), { className: "size-chip", hidden: true });
-      chip.innerHTML = `<span class="size-chip__axis">${"XYZ"[axis]}</span><input type="number" inputmode="decimal" min="1" max="1000" step="0.1"><span class="size-chip__unit">mm</span>`;
-      const input = chip.querySelector("input")!;
-      input.addEventListener("change", () => {
-        const v = Number(input.value);
-        if (v > 0) this.handlers.resize(axis, v);
-      });
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && this.sizeValues) {
-          input.value = String(Math.round(this.sizeValues[axis] * 100) / 100);
-          input.blur();
-        } else if (e.key === "Enter") input.blur();
-      });
+      const chip = Object.assign(document.createElement("label"), { className: `size-chip is-${"xyz"[axis]}`, hidden: true });
+      chip.innerHTML = `<span class="size-chip__axis">${"XYZ"[axis]}</span><span class="size-chip__value"></span><span class="size-chip__unit">mm</span>`;
       return chip;
     });
-    this.overlay.append(this.tapeLabel, ...this.sizeChips);
+    this.overlay.append(this.tapeLabel, this.heightLabel, ...this.sizeChips);
+
+    // Shift changes the tape while the pointer rests, so listen to the key itself too.
+    const onShift = (e: KeyboardEvent) => {
+      if (e.key !== "Shift" || this.shift === e.shiftKey) return;
+      this.shift = e.shiftKey;
+      if (this.tool === "measure") this.setHover(this.hover);
+    };
+    window.addEventListener("keydown", onShift);
+    window.addEventListener("keyup", onShift);
 
     new ResizeObserver(() => this.resize()).observe(canvas);
     canvas.addEventListener("pointermove", (e) => this.onMove(e));
     canvas.addEventListener("pointerdown", (e) => this.onDown(e));
+    canvas.addEventListener("pointerdown", (e) => this.grab(e), { capture: true });
     window.addEventListener("pointerup", (e) => this.onUp(e));
     canvas.addEventListener("pointerleave", () => {
       this.cursor.visible = false;
@@ -221,9 +263,10 @@ export class Viewer {
     const sphere = geo.boundingSphere!;
     this.plate.position.set(sphere.center.x, sphere.center.y, box.min.z - 0.01);
     this.plate.scale.setScalar(Math.max(box.max.x - box.min.x, box.max.y - box.min.y) * 0.75);
-    this.sizeBox.position.copy(box.getCenter(new THREE.Vector3()));
-    this.sizeBox.scale.copy(box.getSize(new THREE.Vector3()));
+    this.drag = null;
+    this.placeGrips();
     this.sizeBox.visible = this.tool === "size";
+    this.grips.visible = this.tool === "size";
     this.buildBed();
     if (frame) this.frameAll();
     this.requestRender();
@@ -274,6 +317,8 @@ export class Viewer {
     }
     if (t !== "measure") this.setHover(null);
     this.sizeBox.visible = t === "size" && this.mesh !== null;
+    this.grips.visible = this.sizeBox.visible;
+    this.heightLine.visible = false;
     this.requestRender();
   }
 
@@ -346,7 +391,14 @@ export class Viewer {
   }
 
   private async onMove(e: PointerEvent) {
+    if (this.drag) return this.dragTo(e);
+    if (this.tool === "size" && e.buttons === 0) {
+      this.hoverGrip = this.gripAt(e);
+      this.canvas.style.cursor = this.hoverGrip === null ? "" : "grab";
+      return;
+    }
     // Measuring: the point under the pointer, and the tape stretched to it.
+    this.shift = e.shiftKey;
     if (this.tool === "measure" && this.mesh && !this.pending && e.buttons === 0) {
       this.pending = true;
       const [o, d] = this.rayFrom(e);
@@ -373,19 +425,126 @@ export class Viewer {
     }
   }
 
-  /** Final sizes the handles show, in millimetres; null hides them. */
-  setSizeValues(mm: number[] | null) {
+  /** Final sizes the labels show, in millimetres; `fmt` writes them in the interface's numbers. */
+  setSizeValues(mm: number[] | null, fmt: (n: number) => string = String) {
     this.sizeValues = mm;
+    this.sizeFmt = fmt;
+    this.showSizes(new THREE.Vector3(1, 1, 1));
+  }
+  private sizeFmt: (n: number) => string = String;
+
+  private showSizes(f: THREE.Vector3) {
     this.sizeChips.forEach((chip, i) => {
-      const input = chip.querySelector("input")!;
-      if (mm && document.activeElement !== input) input.value = String(Math.round(mm[i] * 100) / 100);
+      chip.querySelector(".size-chip__value")!.textContent = this.sizeValues ? this.sizeFmt(this.sizeValues[i] * f.getComponent(i)) : "";
     });
     this.requestRender();
   }
 
-  /** Accessible names of the size inputs, in the interface language. */
-  setSizeLabels(labels: string[]) {
-    this.sizeChips.forEach((chip, i) => chip.querySelector("input")!.setAttribute("aria-label", labels[i]));
+  // ---- size grips -------------------------------------------------------------
+
+  /** The model's box as the preview shows it now, drag included. */
+  private liveBox(): THREE.Box3 | null {
+    const b = this.mesh?.geometry.boundingBox;
+    return b ? b.clone().applyMatrix4(this.mesh!.matrixWorld) : null;
+  }
+
+  private placeGrips() {
+    this.mesh?.updateMatrixWorld();
+    const box = this.liveBox();
+    if (!box) return;
+    const c = box.getCenter(new THREE.Vector3());
+    this.sizeBox.position.copy(c);
+    this.sizeBox.scale.copy(box.getSize(new THREE.Vector3()));
+    const r = this.markerSize();
+    const gap = r * 4;
+    const cam = this.camera.position;
+    const spots = [
+      new THREE.Vector3(box.max.x + gap, c.y, c.z),
+      new THREE.Vector3(c.x, box.max.y + gap, c.z),
+      new THREE.Vector3(c.x, c.y, box.max.z + gap),
+      // The top corner nearest the camera.
+      new THREE.Vector3(cam.x < c.x ? box.min.x : box.max.x, cam.y < c.y ? box.min.y : box.max.y, box.max.z),
+    ];
+    this.grips.children.forEach((g, i) => {
+      g.position.copy(spots[i]);
+      g.scale.setScalar(r * (g.userData.grip === this.hoverGrip || g.userData.grip === this.drag?.grip ? 3.2 : 2.4));
+    });
+  }
+
+  private gripAt(e: PointerEvent): Grip | null {
+    if (!this.grips.visible) return null;
+    this.rayFrom(e);
+    const hit = this.ray.intersectObjects(this.grips.children, false)[0];
+    return hit ? (hit.object.userData.grip as Grip) : null;
+  }
+
+  /** Starts dragging a grip; the model scales about its base centre, as the size does. */
+  private grab(e: PointerEvent) {
+    if (this.tool !== "size" || e.button !== 0 || !this.mesh) return;
+    const grip = this.gripAt(e);
+    if (grip === null) return;
+    // Ours, not an orbit.
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    const box = this.mesh.geometry.boundingBox!;
+    const c = box.getCenter(new THREE.Vector3());
+    this.rayFrom(e);
+    const pivot = new THREE.Vector3(c.x, c.y, box.min.z);
+    const dir = grip === "all" ? this.grips.children[3].position.clone().sub(pivot).normalize() : new THREE.Vector3().setComponent(grip, 1);
+    // Where the pointer grabbed is a factor of 1: the model follows it from there.
+    const reach = this.along(pivot, dir);
+    if (reach === null || reach <= 1e-6) return;
+    this.drag = { grip, pivot, dir, reach, factors: new THREE.Vector3(1, 1, 1) };
+    this.controls.enabled = false;
+    this.canvas.setPointerCapture(e.pointerId);
+    this.canvas.style.cursor = "grabbing";
+  }
+
+  /** How far along the line from `pivot` in `dir` the last ray passes closest; null when they run parallel. */
+  private along(pivot: THREE.Vector3, dir: THREE.Vector3): number | null {
+    const { origin: o, direction: u } = this.ray.ray;
+    const w0 = pivot.clone().sub(o);
+    const b = dir.dot(u);
+    const denom = 1 - b * b;
+    return denom < 1e-4 ? null : (b * u.dot(w0) - dir.dot(w0)) / denom;
+  }
+
+  private dragTo(e: PointerEvent) {
+    const d = this.drag!;
+    this.rayFrom(e);
+    const t = this.along(d.pivot, d.dir);
+    if (t === null) return;
+    const k = THREE.MathUtils.clamp(t / d.reach, 0.05, 20);
+    const all = d.grip === "all" || this.proportional;
+    d.factors.set(1, 1, 1);
+    if (all) d.factors.setScalar(k);
+    else d.factors.setComponent(d.grip as Axis, k);
+    // Scale about the pivot: x' = p + (x - p) f.
+    const m = this.mesh!;
+    m.scale.copy(d.factors);
+    m.position.copy(d.pivot).multiply(new THREE.Vector3(1, 1, 1).sub(d.factors));
+    this.placeGrips();
+    this.showSizes(d.factors);
+  }
+
+  private async release() {
+    const d = this.drag;
+    if (!d) return;
+    this.controls.enabled = true;
+    this.canvas.style.cursor = "";
+    const f = d.factors.toArray() as Vec3;
+    if (f.every((v) => Math.abs(v - 1) < 1e-4)) {
+      this.drag = null;
+      return this.placeGrips();
+    }
+    if (!(await this.handlers.resize(f))) {
+      // Refused: back to the size the model has.
+      this.drag = null;
+      this.mesh?.scale.set(1, 1, 1);
+      this.mesh?.position.set(0, 0, 0);
+      this.placeGrips();
+      this.showSizes(new THREE.Vector3(1, 1, 1));
+    }
   }
 
   /** The printer's plate under the model; `scale` turns preview units into millimetres. */
@@ -445,20 +604,33 @@ export class Viewer {
     return (this.mesh?.geometry.boundingSphere?.radius ?? 50) * 0.012;
   }
 
+  /** The second point as it would be placed: with Shift, on the first point's axis it moves most along. */
+  private target(): Vec3 | null {
+    const p = this.hover;
+    const from = this.tapePoints.length === 1 ? this.tapePoints[0] : null;
+    if (!p || !from || !this.shift) return p;
+    const delta = p.map((v, i) => v - from[i]);
+    const axis = [0, 1, 2].reduce((a, i) => (Math.abs(delta[i]) > Math.abs(delta[a]) ? i : a), 0);
+    return from.map((v, i) => (i === axis ? p[i] : v)) as Vec3;
+  }
+
   private setHover(p: Vec3 | null) {
     this.hover = p;
-    this.hoverDot.visible = p !== null;
+    const at = this.target();
+    this.hoverDot.visible = at !== null;
     const r = this.markerSize();
-    if (p) {
-      this.hoverDot.position.set(...p);
+    if (at) {
+      this.hoverDot.position.set(...at);
       this.hoverDot.scale.setScalar(r);
     }
     // From the first point to the pointer while the second is still to come.
     const from = this.tapePoints.length === 1 ? this.tapePoints[0] : null;
-    this.rubber.visible = p !== null && from !== null;
-    if (p && from) {
-      this.rubber.geometry.setFromPoints([new THREE.Vector3(...from), new THREE.Vector3(...p)]);
+    this.rubber.visible = at !== null && from !== null;
+    if (at && from) {
+      this.rubber.geometry.setFromPoints([new THREE.Vector3(...from), new THREE.Vector3(...at)]);
       const mat = this.rubber.material as THREE.LineDashedMaterial;
+      const axis = axisOf(from, at);
+      mat.color.copy(cssColor(axis === null ? "--color-accent-deep" : AXIS_COLOURS[axis]));
       mat.dashSize = r * 2;
       mat.gapSize = r * 1.2;
       this.rubber.computeLineDistances();
@@ -480,19 +652,38 @@ export class Viewer {
     };
 
     const pts = this.tapePoints;
-    const pair = pts.length === 2 ? [pts[0], pts[1]] : pts.length === 1 && this.hover ? [pts[0], this.hover] : null;
+    const target = this.target();
+    const pair = pts.length === 2 ? [pts[0], pts[1]] : pts.length === 1 && target ? [pts[0], target] : null;
     if (pair) {
       const [a, b] = pair.map((p) => new THREE.Vector3(...p));
-      this.tapeLabel.textContent = this.handlers.distance(pair[0], pair[1]);
-      this.tapeLabel.classList.toggle("is-live", pts.length === 1);
+      const axis = axisOf(pair[0], pair[1]);
+      this.tapeLabel.textContent = this.handlers.distance(pair[0], pair[1], axis ?? "free");
+      this.tapeLabel.className = `tape-label${pts.length === 1 ? " is-live" : ""}${axis === null ? "" : ` is-${"xyz"[axis]}`}`;
       put(this.tapeLabel, screen(a.add(b).multiplyScalar(0.5)));
     } else put(this.tapeLabel, null);
 
-    const box = this.mesh?.geometry.boundingBox;
+    // Nothing measured yet: the height, on the vertical edge nearest the camera.
+    const mbox = this.mesh?.geometry.boundingBox;
+    const showHeight = this.tool === "measure" && pts.length === 0 && mbox !== null && mbox !== undefined;
+    this.heightLine.visible = showHeight;
+    if (showHeight) {
+      const cam = this.camera.position;
+      const c = mbox.getCenter(new THREE.Vector3());
+      const x = cam.x < c.x ? mbox.min.x : mbox.max.x;
+      const y = cam.y < c.y ? mbox.min.y : mbox.max.y;
+      const lo: Vec3 = [x, y, mbox.min.z];
+      const hi: Vec3 = [x, y, mbox.max.z];
+      this.heightLine.geometry.setFromPoints([new THREE.Vector3(...lo), new THREE.Vector3(...hi)]);
+      this.heightLabel.textContent = this.handlers.distance(lo, hi, "height");
+      put(this.heightLabel, screen(new THREE.Vector3(x, y, c.z)));
+    } else put(this.heightLabel, null);
+
+    const box = this.liveBox();
     if (this.tool !== "size" || !box || !this.sizeValues) {
       this.sizeChips.forEach((chip) => put(chip, null));
       return;
     }
+    if (!this.drag) this.placeGrips();
     // Each handle sits on the edge of its axis nearest the camera.
     const cam = this.camera.position;
     const near = (axis: number) =>
@@ -534,6 +725,7 @@ export class Viewer {
 
   private onDown(e: PointerEvent) {
     if (this.tool === "measure" && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
+    if (this.drag) return;
     if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
     this.painting = true;
     this.canvas.setPointerCapture(e.pointerId);
@@ -542,12 +734,19 @@ export class Viewer {
   }
 
   private onUp(e: PointerEvent) {
+    if (this.drag) return void this.release();
     // A click, not a drag to orbit, places a measuring point.
     const d = this.down;
     this.down = null;
     if (this.tool === "measure" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
-      const [o, dir] = this.rayFrom(e);
-      void this.handlers.pick(o, dir).then((hit) => hit && this.handlers.measure(hit.point));
+      this.shift = e.shiftKey;
+      // With Shift the point is where the tape shows it, on the axis; otherwise on the model.
+      const placed = this.shift && this.tapePoints.length === 1 ? this.target() : null;
+      if (placed) this.handlers.measure(placed);
+      else {
+        const [o, dir] = this.rayFrom(e);
+        void this.handlers.pick(o, dir).then((hit) => hit && this.handlers.measure(hit.point));
+      }
     }
     if (!this.painting) return;
     this.painting = false;

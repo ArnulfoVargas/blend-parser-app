@@ -566,7 +566,14 @@ impl Project {
             per_slot,
             size_mm: size,
             contact_mm2: self.work.contact_area(0.05 / self.scale) * self.scale * self.scale,
-            swaps: estimate::estimate(&self.work, &self.trees, self.scale, self.print_ops.layer_mm),
+            // A colour narrower than two lines on a layer is not printed as its own.
+            swaps: estimate::estimate(
+                &self.work,
+                &self.trees,
+                self.scale,
+                self.print_ops.layer_mm,
+                2.0 * self.print_ops.nozzle_mm * self.print_ops.layer_mm,
+            ),
             nearest: palette::nearest_others(&self.palette),
             repair: self.work.repair,
         }

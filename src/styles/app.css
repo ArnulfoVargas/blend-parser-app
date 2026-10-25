@@ -9,6 +9,7 @@
   --bar-h: 64px;
   --color-warn: oklch(82% 0.12 78); --color-warn-soft: oklch(95% 0.045 85); --color-warn-ink: oklch(30% 0.06 70);
   --color-error-soft: oklch(95% 0.03 27);
+  --axis-x: oklch(58% 0.19 25); --axis-y: oklch(58% 0.15 145); --axis-z: oklch(55% 0.16 255);
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.2 0 0 0 0 0.25 0 0 0 0 0.2 0 0 0 0.06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -470,12 +471,8 @@ details.group[open] .group__sum { visibility: hidden; }
 .overlay > [hidden] { display: none; }
 .tape-label { padding: var(--space-2xs) var(--space-xs); border-radius: var(--radius-pill); background: var(--color-ink); color: var(--color-paper); font: 500 var(--text-sm)/1 var(--font-outlier); font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 4px 10px -6px color-mix(in oklab, var(--color-ink) 60%, transparent); }
 .tape-label.is-live { background: var(--color-accent-deep); color: var(--color-accent-ink); }
-.size-chip { pointer-events: auto; display: inline-flex; align-items: center; gap: var(--space-2xs); padding: var(--space-3xs) var(--space-xs) var(--space-3xs) var(--space-3xs); border-radius: var(--radius-pill); background: var(--color-paper); box-shadow: 0 0 0 1px var(--color-accent-deep), 0 6px 14px -8px color-mix(in oklab, var(--color-ink) 50%, transparent); font-size: var(--text-xs); color: var(--color-muted); }
+.size-chip { pointer-events: none; display: inline-flex; align-items: center; gap: var(--space-2xs); padding: var(--space-3xs) var(--space-xs) var(--space-3xs) var(--space-3xs); border-radius: var(--radius-pill); background: var(--color-paper); box-shadow: 0 0 0 1px var(--color-accent-deep), 0 6px 14px -8px color-mix(in oklab, var(--color-ink) 50%, transparent); font-size: var(--text-xs); color: var(--color-muted); }
 .size-chip__axis { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--color-accent-deep); color: var(--color-accent-ink); font: 700 var(--text-xs)/1 var(--font-body); }
-.size-chip input { width: 5.5rem; height: 26px; padding: 0 var(--space-2xs); border: 0; border-radius: 6px; background: transparent; color: var(--color-ink); font: 500 var(--text-sm)/1 var(--font-outlier); text-align: right; }
-.size-chip input:hover { background: var(--color-paper-2); }
-.size-chip input:focus { outline: 2px solid var(--color-focus); outline-offset: 0; background: var(--color-paper); }
-.size-chip:focus-within { z-index: 1; }
 
 /* Diálogo en hoja: cabecera y acciones fijas, secciones y unidades dentro de los campos */
 .dialog--sheet { width: min(680px, calc(100% - 2 * var(--space-lg))); max-height: calc(100dvh - 2 * var(--space-lg)); overflow: hidden; }
@@ -502,3 +499,9 @@ details.group[open] .group__sum { visibility: hidden; }
 .flush__self { background: repeating-linear-gradient(135deg, var(--color-paper-2) 0 4px, var(--color-paper-3) 4px 8px); border-radius: var(--radius-input); color: transparent; }
 @media (max-width: 75rem) { .grid3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (prefers-reduced-motion: reduce) { .toolbar__btn, .toolbar__expand .toolbar__icon { transition: none; } }
+
+/* Colores de eje, como en Blender */
+.size-chip__value { min-width: 3.5rem; color: var(--color-ink); font: 500 var(--text-sm)/1 var(--font-outlier); text-align: right; font-variant-numeric: tabular-nums; }
+.size-chip.is-x .size-chip__axis, .tape-label.is-x { background: var(--axis-x); color: var(--glint); }
+.size-chip.is-y .size-chip__axis, .tape-label.is-y { background: var(--axis-y); color: var(--glint); }
+.size-chip.is-z .size-chip__axis, .tape-label.is-z { background: var(--axis-z); color: var(--glint); }

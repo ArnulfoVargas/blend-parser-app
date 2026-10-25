@@ -160,8 +160,19 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     measured.push(p.map((v, i) => v / st[i]) as Vec3);
     syncMeasure();
   },
-  distance: (a, b) => t("measure.short", { d: nf(Math.hypot(...a.map((v, i) => v - b[i])) * (summary?.size.previewScale ?? 1), 2) }),
-  resize: (axis, v) => resizeAxis(axis, v),
+  distance: (a, b, kind) => {
+    const d = nf(Math.hypot(...a.map((v, i) => v - b[i])) * (summary?.size.previewScale ?? 1), 2);
+    return kind === "free" ? t("measure.short", { d }) : kind === "height" ? t("measure.height", { d }) : t("measure.axis", { axis: "XYZ"[kind], d });
+  },
+  resize: async (f) => {
+    if (!summary) return false;
+    const next = summary.size.targetMm.map((v, i) => Math.round(v * f[i] * 10) / 10);
+    if (!next.every((v) => v >= SIZE_MIN && v <= SIZE_MAX)) {
+      toast(t("error.sizeRange", { min: nf(SIZE_MIN), max: nf(SIZE_MAX) }), "error");
+      return false;
+    }
+    return (await apply(() => api.setSize(next as Vec3))) !== undefined;
+  },
 });
 
 /** Points in preview units for the current size. */
@@ -325,6 +336,7 @@ const uniform = (k: number[]) => k.every((v) => Math.abs(v - k[0]) < 5e-4 * k[0]
 
 function syncLock() {
   lockBtn.setAttribute("aria-pressed", String(locked));
+  viewer.proportional = locked;
   bind("lockLabel", locked ? t("size.locked") : t("size.unlocked"));
 }
 
@@ -337,7 +349,7 @@ function renderSize(s: Summary) {
   bind("scaleHelp", even
     ? t("size.scaleHelp")
     : t("size.stretched", { x: nf(z.axisScale[0] * 100, 1), y: nf(z.axisScale[1] * 100, 1), z: nf(z.axisScale[2] * 100, 1) }));
-  viewer.setSizeValues(z.targetMm);
+  viewer.setSizeValues(z.targetMm, (n) => nf(n, 1));
   viewer.setPlate(s.plate, z.previewScale);
   bind("sizeOriginal", dims(z.originalMm, 2));
   bind("sizeResult", dims(s.sizeMm, 2));
@@ -498,7 +510,7 @@ function renderWaste(s: Summary) {
   bind("wasteTotal", mass(w.totalG));
   bind("wasteTotalDetail", t("waste.totalDetail", { length: length(w.totalM), volume: volume(w.totalMm3) }));
   const rows: [string, string, string?][] = [
-    [t("waste.flush"), g(w.flushMm3), t("waste.flushNote", { count: s.estimate.swaps, n: nf(s.estimate.swaps) })],
+    [t("waste.flush"), g(w.flushMm3), t("waste.flushNote", { count: w.swaps, n: nf(w.swaps) })],
     [t("waste.start"), g(w.startMm3)],
     [t("waste.tower"), g(w.towerMm3), w.towerMm3 > 0 ? t("waste.towerNote", { h: w.towerHeightMm < 1000 ? `${nf(w.towerHeightMm, 1)} mm` : length(w.towerHeightMm / 1000) }) : t("waste.noTower")],
   ];
@@ -1247,7 +1259,6 @@ try {
   // Collapsed by default.
 }
 setExpanded(shelfOpen);
-viewer.setSizeLabels(["X", "Y", "Z"].map((axis) => t("size.axisLabel", { axis })));
 
 document.querySelectorAll<HTMLButtonElement>("button[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view as View)));
 document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.addEventListener("click", () => setTool(b.dataset.tool as Tool)));
@@ -1394,7 +1405,6 @@ onLangChange(() => {
   setState(state);
   setTool((app.dataset.tool as Tool) ?? "orbit");
   setExpanded(toolbar.dataset.expanded === "true");
-  viewer.setSizeLabels(["X", "Y", "Z"].map((axis) => t("size.axisLabel", { axis })));
   syncLock();
   syncOutputs();
   bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));

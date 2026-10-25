@@ -42,6 +42,7 @@ export interface Size {
 }
 
 export interface Waste {
+  swaps: number; // in the order that flushes least
   flushMm3: number;
   reusedMm3: number;
   startMm3: number;

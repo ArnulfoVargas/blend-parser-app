@@ -73,6 +73,8 @@ pub struct SizeDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WasteDto {
+    /// Swaps in the order that flushes least.
+    pub swaps: u32,
     pub flush_mm3: f32,
     pub reused_mm3: f32,
     pub start_mm3: f32,
@@ -344,6 +346,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             can_undo: p.can_undo_size(),
         },
         waste: WasteDto {
+            swaps: waste.swaps,
             flush_mm3: waste.flush_mm3,
             reused_mm3: waste.reused_mm3,
             start_mm3: waste.start_mm3,

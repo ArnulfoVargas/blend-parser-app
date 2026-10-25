@@ -66,6 +66,11 @@ y aparta ese espacio, con la separación y el margen elegidos, al comprobar si e
 y al ajustarlo a la placa. El modelo sigue centrado. Las zonas excluidas (`bed_exclude_area`)
 salen del perfil de Bambu Studio.
 
+Los cambios se cuentan como el laminador los hace: un color solo cuenta en una capa si ocupa
+al menos dos líneas de la boquilla (las astillas de borde no provocan un cambio), y el orden de
+los colores se planifica en todas las capas para purgar lo mínimo: cada capa empieza con el
+filamento cargado y termina en el que conviene a la siguiente.
+
 El desperdicio suma tres partes, cada una una sola vez: purga en los cambios (a la basura;
 la parte aprovechada en relleno o soportes se muestra aparte y no suma), purga inicial y
 torre (paredes, relleno de capas sin cambios, borde y cebado por cambio). En las impresoras
@@ -76,7 +81,7 @@ Pendiente: comparar la estimación con lo que informa Bambu Studio al laminar. L
 Bambu Studio 2.x se cierra al laminar desde la línea de comandos en Windows, así que hay que
 hacerlo desde la interfaz: exportar el modelo de ejemplo a 75 mm con 4 colores y anotar la
 diferencia con «Filamento → Purgado» y «Torre» del resumen de laminado. Con ese modelo la app
-estima 469 cambios, 185,6 g de purga, 15,7 g de torre y 201,4 g en total.
+estima 430 cambios, 164,4 g de purga, 15,0 g de torre y 179,5 g en total.
 
 ## Idiomas
 

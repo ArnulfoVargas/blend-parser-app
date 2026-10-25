@@ -15,7 +15,7 @@
 //! compare settings and to reserve room on the plate.
 
 use crate::color::{srgb_to_lab, Rgb};
-use crate::estimate::SwapEstimate;
+use crate::estimate::{plan, SwapEstimate};
 use crate::palette::delta_e;
 
 /// Print settings the estimate depends on, in millimetres, mm³ and g/cm³.
@@ -82,6 +82,8 @@ pub fn default_flush(from: Rgb, to: Rgb) -> f32 {
 /// The volumes and what they weigh. Volumes in mm³.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Waste {
+    /// Swaps in the order that flushes least; can differ from the fewest swaps.
+    pub swaps: u32,
     /// Flushed at the swaps and thrown away.
     pub flush_mm3: f32,
     /// Flush that went into infill or supports: not waste, shown apart.
@@ -98,13 +100,15 @@ pub struct Waste {
     pub tower_height_mm: f32,
 }
 
-/// `flush(from, to)` gives the volume of one swap before the multiplier.
+/// `flush(from, to)` gives the volume of one swap before the multiplier. The
+/// colours are ordered, layer by layer, to flush as little as possible.
 pub fn waste(swaps: &SwapEstimate, params: &WasteParams, flush: impl Fn(u8, u8) -> f32) -> Waste {
     let p = params;
-    let mut w = Waste { start_mm3: p.start_purge_mm3.max(0.0), ..Default::default() };
+    let changes = plan(&swaps.layer_sets, |a, b| flush(a, b).max(0.0));
+    let mut w = Waste { swaps: changes.len() as u32, start_mm3: p.start_purge_mm3.max(0.0), ..Default::default() };
     let reuse = p.flush_reuse.clamp(0.0, 1.0);
     let mut busiest_layer = 0.0f32;
-    for layer in swaps.per_layer() {
+    for layer in changes.chunk_by(|a, b| a.0 == b.0) {
         let mut into_tower = 0.0;
         for &(_, from, to) in layer {
             let v = flush(from, to).max(0.0) * p.flush_multiplier.max(0.0);
@@ -114,7 +118,7 @@ pub fn waste(swaps: &SwapEstimate, params: &WasteParams, flush: impl Fn(u8, u8) 
         }
         busiest_layer = busiest_layer.max(into_tower);
     }
-    let tower_layers = swaps.tower_layers();
+    let tower_layers = changes.last().map_or(0, |c| c.0 + 1);
     if p.tower && tower_layers > 0 {
         let width = p.tower_width_mm.max(1.0);
         let layer = p.layer_mm.max(0.01);
@@ -125,11 +129,11 @@ pub fn waste(swaps: &SwapEstimate, params: &WasteParams, flush: impl Fn(u8, u8) 
         let height = tower_layers as f32 * layer;
         let walls = 2.0 * (width + depth) * line * height;
         // Layers without a swap get a sparse fill, about a tenth of the area.
-        let quiet = tower_layers.saturating_sub(swaps.per_layer().count() as u32) as f32;
+        let quiet = tower_layers.saturating_sub(changes.chunk_by(|a, b| a.0 == b.0).count() as u32) as f32;
         let sparse = quiet * width * depth * layer * 0.1;
         let brim = p.tower_brim_mm.max(0.0);
         let brim_vol = ((width + 2.0 * brim) * (depth + 2.0 * brim) - width * depth) * layer;
-        let priming = swaps.swaps as f32 * p.prime_mm3;
+        let priming = changes.len() as f32 * p.prime_mm3;
         w.tower_mm3 = walls + sparse + brim_vol + priming;
         w.tower_footprint_mm = [width + 2.0 * brim, depth + 2.0 * brim];
         w.tower_height_mm = height;
@@ -145,8 +149,9 @@ pub fn waste(swaps: &SwapEstimate, params: &WasteParams, flush: impl Fn(u8, u8) 
 mod tests {
     use super::*;
 
-    fn swaps(changes: Vec<(u32, u8, u8)>) -> SwapEstimate {
-        SwapEstimate { layers: 50, swaps: changes.len() as u32, changes, ..Default::default() }
+    /// Layers with these colours (slot bit masks).
+    fn swaps(layer_sets: Vec<(u32, u32)>) -> SwapEstimate {
+        SwapEstimate { layers: 50, layer_sets, ..Default::default() }
     }
 
     #[test]
@@ -162,9 +167,11 @@ mod tests {
 
     #[test]
     fn contributions_add_up_without_counting_twice() {
-        let s = swaps(vec![(3, 0, 1), (3, 1, 0), (9, 0, 1)]);
+        // Slot 0, then 0 and 1, then 0 alone, then both again: three swaps.
+        let s = swaps(vec![(0, 0b01), (3, 0b11), (6, 0b01), (9, 0b11)]);
         let p = WasteParams::default();
         let w = waste(&s, &p, |_, _| 200.0);
+        assert_eq!(w.swaps, 3);
         assert_eq!(w.flush_mm3, 600.0);
         assert_eq!(w.start_mm3, 120.0);
         assert!(w.tower_mm3 > 3.0 * p.prime_mm3);
@@ -188,7 +195,7 @@ mod tests {
 
     #[test]
     fn a_tower_without_a_chute_grows_deeper() {
-        let s = swaps(vec![(3, 0, 1), (3, 1, 2)]);
+        let s = swaps(vec![(0, 0b001), (3, 0b111)]);
         let chute = waste(&s, &WasteParams::default(), |_, _| 300.0);
         let tower = waste(&s, &WasteParams { purge_chute: false, ..Default::default() }, |_, _| 300.0);
         assert!(tower.tower_footprint_mm[1] > chute.tower_footprint_mm[1]);
@@ -199,14 +206,25 @@ mod tests {
 
     #[test]
     fn a_set_tower_depth_wins_over_the_estimate() {
-        let s = swaps(vec![(3, 0, 1)]);
+        let s = swaps(vec![(0, 0b01), (3, 0b11)]);
         let w = waste(&s, &WasteParams { tower_depth_mm: Some(60.0), ..Default::default() }, |_, _| 300.0);
         assert_eq!(w.tower_footprint_mm, [26.0, 66.0]);
     }
 
     #[test]
+    fn colours_go_in_the_order_that_flushes_least() {
+        // Two colours on every layer; going to slot 1 costs five times more.
+        let s = swaps((0..4).map(|l| (l, 0b11)).collect());
+        let w =
+            waste(&s, &WasteParams { tower: false, ..Default::default() }, |_, b| if b == 1 { 500.0 } else { 100.0 });
+        // Four swaps that alternate: start on 1 and the dear one happens only twice.
+        assert_eq!(w.swaps, 4);
+        assert_eq!(w.flush_mm3, 1200.0);
+    }
+
+    #[test]
     fn no_swaps_no_tower() {
-        let w = waste(&swaps(vec![]), &WasteParams::default(), |_, _| 300.0);
+        let w = waste(&swaps(vec![(0, 0b01), (1, 0b01)]), &WasteParams::default(), |_, _| 300.0);
         assert_eq!((w.flush_mm3, w.tower_mm3, w.total_mm3), (0.0, 0.0, 120.0));
     }
 }
