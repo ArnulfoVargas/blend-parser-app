@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/bp-core", "crates/bp-blend", "crates/bp-3mf", "src-tauri"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.7"
 edition = "2021"
 license = "MIT"
 authors = ["Arnulfo Vargas Mejia"]

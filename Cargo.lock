@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "blend-parser-app"
-version = "0.0.2"
+version = "0.0.7"
 dependencies = [
  "bp-3mf",
  "bp-blend",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "bp-3mf"
-version = "0.0.2"
+version = "0.0.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "bp-blend"
-version = "0.0.2"
+version = "0.0.7"
 dependencies = [
  "bp-3mf",
  "bp-core",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "bp-core"
-version = "0.0.2"
+version = "0.0.7"
 dependencies = [
  "meshopt",
  "rayon",
