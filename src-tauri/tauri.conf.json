@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "BlendParser",
   "version": "0.0.1",
-  "identifier": "com.blendparser.app",
+  "identifier": "com.arnulfovargas.blendparser",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -28,6 +28,24 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUxMjE0ODA0MjlFNEREOTYKUldTVzNlUXBCRWdoVWQ4bVo5b0hZYlNxSlFBR3ZHTFQ2Z0FZejRCSWF4QmJyMlpJaytGTHljUjUK",
+      "endpoints": [
+        "https://github.com/ArnulfoVargas/blend-parser-app/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

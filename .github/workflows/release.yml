@@ -1,10 +1,11 @@
 name: Release
 
-# Un tag como alpha-0.0.1 o v0.1.0 compila Windows y Linux y publica un Release.
+# Un tag como alpha-0.0.2 o v0.1.0 compila Windows y Linux, firma los paquetes para
+# el actualizador y publica un Release con latest.json. Crea el tag con
+# `npm run release -- <versión>` para que tag y versión coincidan.
 on:
   push:
     tags: ["alpha-*", "beta-*", "v*"]
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,6 +21,12 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+      - name: El tag coincide con la versión de la app
+        shell: bash
+        run: |
+          app=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          tag="${GITHUB_REF_NAME#*-}"; tag="${tag#v}"
+          if [ "$app" != "$tag" ]; then echo "El tag $GITHUB_REF_NAME no coincide con la versión $app"; exit 1; fi
       - name: Dependencias de sistema (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -35,6 +42,8 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "BlendParser ${{ github.ref_name }}"
@@ -46,6 +55,10 @@ jobs:
             - Windows: `BlendParser_*_x64-setup.exe` (instalador) o `.msi`.
             - Linux: `.AppImage` (portable) o `.deb` (Debian/Ubuntu).
 
-            Los binarios no están firmados: Windows SmartScreen puede pedir "Más información > Ejecutar de todas formas".
+            Si ya tienes BlendParser 0.0.2 o posterior, se actualiza solo al abrirlo (en Linux, con el AppImage).
+
+            Los instaladores no llevan firma de código: Windows SmartScreen puede pedir "Más información > Ejecutar de todas formas".
           releaseDraft: false
-          prerelease: ${{ startsWith(github.ref_name, 'alpha-') || startsWith(github.ref_name, 'beta-') }}
+          # Publicado como versión normal: el actualizador lee releases/latest, que ignora los prereleases.
+          prerelease: false
+          updaterJsonPreferNsis: true

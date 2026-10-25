@@ -58,16 +58,29 @@ Prueba con un modelo real y Blender instalado:
 BP_SAMPLE_BLEND=ruta/al/modelo.blend cargo test --release -p bp-blend -- --ignored --nocapture
 ```
 
+## Actualizaciones automáticas
+
+Desde la 0.0.2, BlendParser busca una versión nueva al arrancar (y al pulsar la versión en
+la barra superior). Lee `latest.json` del último Release de GitHub, comprueba la firma con la
+clave pública de `tauri.conf.json`, instala y se reinicia. En Linux se actualiza el AppImage;
+`.deb` y `.rpm` se actualizan a mano.
+
+La clave privada de firma está fuera del repositorio, en `~/.tauri/blendparser.key` (con su
+contraseña en `~/.tauri/blendparser.key.password`), y en los secretos del repositorio
+`TAURI_SIGNING_PRIVATE_KEY` y `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. **Guarda una copia de
+seguridad**: sin ella, las instalaciones existentes no aceptarán actualizaciones nuevas.
+
 ## Publicar una versión
 
-Subir un tag `alpha-*`, `beta-*` o `v*` lanza `.github/workflows/release.yml`, que compila
-Windows y Linux en GitHub Actions y publica un Release con los instaladores
-(`alpha-` y `beta-` salen marcados como prerelease):
-
 ```sh
-git tag alpha-0.0.1
-git push origin alpha-0.0.1
+npm run release -- 0.0.3 --push
 ```
+
+El script sube la versión en `package.json`, `Cargo.toml` y `tauri.conf.json`, hace commit,
+crea el tag `alpha-0.0.3` y lo sube. El tag lanza `.github/workflows/release.yml`, que comprueba
+que tag y versión coinciden, compila y firma Windows y Linux y publica el Release con
+`latest.json`. Las versiones usan tres números (`mayor.menor.parche`). Usa `--channel beta` o
+`--channel v` para otros prefijos de tag.
 
 El icono se genera desde `src-tauri/icons/source/app-icon.svg` con `npx tauri icon <png de 1024 px>`.
 

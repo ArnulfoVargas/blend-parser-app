@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { api, type Summary } from "./api";
+import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { Viewer, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
@@ -45,7 +46,7 @@ let toastTimer = 0;
 let onToastAction: (() => void) | null = null;
 
 /** A visible notice on the stage. Errors stay until closed; the rest fade after 8 s. */
-function toast(message: string, kind: "ok" | "error" = "ok", action?: { label: string; run: () => void }) {
+function toast(message: string, kind: "ok" | "error" = "ok", action?: { label: string; run: () => void }, sticky = false) {
   window.clearTimeout(toastTimer);
   bind("toast", message);
   toastEl.dataset.kind = kind;
@@ -54,7 +55,7 @@ function toast(message: string, kind: "ok" | "error" = "ok", action?: { label: s
   onToastAction = action?.run ?? null;
   toastAction.hidden = !action;
   if (action) toastAction.textContent = action.label;
-  if (kind !== "error") toastTimer = window.setTimeout(() => (toastEl.hidden = true), 8000);
+  if (kind !== "error" && !sticky) toastTimer = window.setTimeout(() => (toastEl.hidden = true), 8000);
 }
 $("#toast-close").addEventListener("click", () => (toastEl.hidden = true));
 toastAction.addEventListener("click", () => {
@@ -526,10 +527,65 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
+// ---- updates -----------------------------------------------------------------------------
+
+const versionBtn = $<HTMLButtonElement>("#version");
+let pendingUpdate: Update | null = null;
+
+/** Looks for a newer release. Quiet mode only speaks up when there is one. */
+async function checkForUpdates(quiet: boolean) {
+  versionBtn.disabled = true;
+  if (!quiet) bind("version", "Buscando…");
+  try {
+    pendingUpdate = await findUpdate();
+    versionBtn.classList.toggle("has-update", pendingUpdate !== null);
+    if (pendingUpdate) {
+      const u = pendingUpdate;
+      toast(`Hay una versión nueva: ${u.version}.`, "ok", { label: `Actualizar a ${u.version}`, run: () => void applyUpdate(u) }, true);
+    } else if (!quiet) {
+      toast(`Tienes la versión más reciente (${await currentVersion()}).`);
+    }
+  } catch (e) {
+    if (!quiet) toast(`No pude buscar actualizaciones: ${e}`, "error");
+  } finally {
+    versionBtn.disabled = false;
+    bind("version", `v${await currentVersion()}`);
+  }
+}
+
+async function applyUpdate(u: Update) {
+  if (app.dataset.state === "ready") {
+    const ok = await ask(`BlendParser se cerrará para instalar la versión ${u.version}. Exporta antes lo que quieras conservar.`, {
+      title: "Actualizar BlendParser",
+      kind: "info",
+      okLabel: "Actualizar y reiniciar",
+      cancelLabel: "Más tarde",
+    });
+    if (!ok) return;
+  }
+  versionBtn.disabled = true;
+  toast(`Descargando la versión ${u.version}…`, "ok", undefined, true);
+  try {
+    await installUpdate(u, (f) =>
+      bind("toast", f === null ? `Descargando la versión ${u.version}…` : `Descargando la versión ${u.version}: ${Math.round(f * 100)} %`));
+  } catch (e) {
+    versionBtn.disabled = false;
+    toast(`No se pudo instalar la actualización: ${e}`, "error");
+  }
+}
+
+versionBtn.addEventListener("click", () => {
+  if (pendingUpdate) void applyUpdate(pendingUpdate);
+  else void checkForUpdates(false);
+});
+
 // ---- start -------------------------------------------------------------------------------
 
 setState("empty");
 setTool("orbit");
+void currentVersion().then((v) => bind("version", `v${v}`));
+// Check quietly once the window has settled; only a newer version is announced.
+window.setTimeout(() => void checkForUpdates(true), 4000);
 syncOutputs();
 syncBrush();
 void api.blenderStatus().then(async (path) => {
