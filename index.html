@@ -340,6 +340,22 @@
     </form>
   </dialog>
 
+  <dialog class="dialog" id="fix-all-dialog" aria-labelledby="h-fix-all">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-fix-all" data-i18n="printability.fixAll">Corregir todo</h2>
+      <p class="help" data-i18n="printability.fixAllIntro">Se intentará corregir:</p>
+      <ul class="fix-all__list" data-bind="problems"></ul>
+      <p class="help" data-i18n="printability.fixAllEffects">Para ello puede:</p>
+      <ul class="fix-all__list" data-bind="effects"></ul>
+      <p class="help fix-all__warn" data-bind="paint" data-i18n="printability.fixAllPaint" hidden>Reparar la malla quita la pintura manual; Revertir todo la recupera.</p>
+      <p class="help" data-i18n="printability.fixAllUndo">Revertir todo lo deshace todo a la vez.</p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="submit" value="ok" data-i18n="printability.fixAll">Corregir todo</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>

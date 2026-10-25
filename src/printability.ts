@@ -59,6 +59,9 @@ const SETTING: Record<keyof MeshFix, keyof Summary["settings"]> = {
   repair: "repair", orient: "orient", fillHoles: "fillHoles", splitVertices: "splitVertices",
   dropFloating: "dropFloating", minPieceMm: "minPieceMm", flattenMm: "flattenMm", deepClean: "deepClean",
 };
+/** What "Corregir todo" warns each fix may do to the model, in the order it lists them; other fixes are repairs. */
+const EFFECT: Record<string, string> = { rotate: "rotate", flattenBase: "flattenBase", removeSmall: "removeSmall", fitPlate: "fitPlate" };
+const EFFECTS = ["repair", "rotate", "flattenBase", "removeSmall", "fitPlate"];
 /** Key of what "Corregir todo" applied, beside the single fixes in `applied`. */
 const ALL = "all";
 const same = (a: number[] | number[][], b: number[] | number[][]) =>
@@ -495,6 +498,22 @@ export function setupPrintability(options: {
     }, () => applied.has(id) ? [t("printability.fixDone"), "ok"] : [noneText(id), "warn"]);
   }
 
+  /** Asks in the app's own dialog what "Corregir todo" is about to do. */
+  function askAll(problems: string[], ids: string[], painted: boolean): Promise<boolean> {
+    const dialog = document.querySelector<HTMLDialogElement>("#fix-all-dialog")!;
+    const list = (bind: string, items: string[]) =>
+      dialog.querySelector(`[data-bind="${bind}"]`)!.replaceChildren(...items.map((x) => el("li", "", x)));
+    list("problems", problems);
+    // Mesh repairs read as one effect; turning can lead to cutting the base in a later round.
+    const effects = new Set(ids.map((id) => EFFECT[id] ?? "repair"));
+    if (effects.has("rotate")) effects.add("flattenBase");
+    list("effects", [...EFFECTS].filter((e) => effects.has(e)).map((e) => tKey(`printability.effect.${e}`)));
+    dialog.querySelector<HTMLElement>('[data-bind="paint"]')!.hidden = !painted;
+    dialog.returnValue = "";
+    dialog.showModal();
+    return new Promise((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true }));
+  }
+
   /** Applies every fix the report asks for, looking again after each round:
    *  turning goes alone first, since it changes what rests on the plate (and so
    *  whether the base needs flattening); then all mesh fixes share one rebuild,
@@ -507,9 +526,8 @@ export function setupPrintability(options: {
     if (!first.length) return;
     const names = [...new Set(report.checks
       .filter((c) => c.severity !== "pass" && first.includes(FIX_OF[c.code]))
-      .map((c) => tKey(`printability.check.${c.code}`)))].join(", ");
-    const paint = s.paintedTriangles > 0 ? ` ${t("printability.fixPaint")}` : "";
-    if (!(await options.confirm(t("printability.fixAllConfirm", { list: names }) + paint))) return;
+      .map((c) => tKey(`printability.check.${c.code}`)))];
+    if (!(await askAll(names, first, s.paintedTriangles > 0))) return;
     const r0 = report;
     const before = new Map(r0.checks.map((c) => [c.code, c.count]));
     const undos: Undo[] = [];
