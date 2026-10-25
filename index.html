@@ -341,6 +341,23 @@
     </form>
   </dialog>
 
+  <dialog class="dialog dialog--wide" id="printability-dialog" aria-labelledby="h-printability-dialog">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-printability-dialog" data-i18n="printability.preview">Limpieza de malla: antes y después</h2>
+      <p data-i18n="printability.cleanupHelp"></p>
+      <table class="pa-compare">
+        <thead><tr><th scope="col" data-i18n="printability.compare.metric">Medida</th><th scope="col" data-i18n="printability.compare.before">Antes</th><th scope="col" data-i18n="printability.compare.after">Después</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="help" data-i18n="printability.compare.unchanged"></p>
+      <p class="note" data-i18n="printability.colorWarning"></p>
+      <div class="dialog__actions">
+        <button class="btn" type="submit" value="cancel" data-i18n="printability.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="submit" value="apply" data-i18n="printability.apply">Aplicar y analizar de nuevo</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>
@@ -483,23 +500,6 @@
         </div>
       </form>
     </div>
-  </dialog>
-
-  <dialog class="dialog dialog--wide" id="printability-dialog" aria-labelledby="h-printability-dialog">
-    <form method="dialog" class="dialog__body">
-      <h2 id="h-printability-dialog" data-i18n="printability.preview">Limpieza de malla: antes y después</h2>
-      <p data-i18n="printability.cleanupHelp"></p>
-      <table class="pa-compare">
-        <thead><tr><th scope="col" data-i18n="printability.compare.metric">Medida</th><th scope="col" data-i18n="printability.compare.before">Antes</th><th scope="col" data-i18n="printability.compare.after">Después</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <p class="help" data-i18n="printability.compare.unchanged"></p>
-      <p class="note" data-i18n="printability.colorWarning"></p>
-      <div class="dialog__actions">
-        <button class="btn" type="submit" value="cancel" data-i18n="printability.cancel">Cancelar</button>
-        <button class="btn btn--primary" type="submit" value="apply" data-i18n="printability.apply">Aplicar y analizar de nuevo</button>
-      </div>
-    </form>
   </dialog>
 
   <div class="drop-veil" aria-hidden="true"><p data-i18n="tray.veil">Suelta el .blend para convertirlo</p></div>
