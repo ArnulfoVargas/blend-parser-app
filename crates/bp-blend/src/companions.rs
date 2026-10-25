@@ -86,6 +86,12 @@ pub fn locate(name: &str, base: &Path, model_dir: &Path, extras: &[PathBuf]) -> 
 
 /// What `model` references, each once, materials before buffers before textures.
 pub fn inspect(model: &Path, extras: &[PathBuf]) -> Vec<Companion> {
+    inspect_with(model, extras, None)
+}
+
+/// As [`inspect`]; `library` is an OBJ material library the user chose to use
+/// instead of the ones the OBJ names.
+pub fn inspect_with(model: &Path, extras: &[PathBuf], library: Option<&Path>) -> Vec<Companion> {
     let extras = expand(extras);
     let dir = model.parent().unwrap_or(Path::new("."));
     let ext = model.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -100,7 +106,8 @@ pub fn inspect(model: &Path, extras: &[PathBuf]) -> Vec<Companion> {
         "obj" => {
             let (libraries, has_uv) = obj_scan(model);
             let mut unmapped = vec![];
-            for library in libraries {
+            let chosen = library.map(|l| l.display().to_string());
+            for library in chosen.map_or(libraries, |l| vec![l]) {
                 if let Some(mtl) = add(Kind::Materials, library, dir, false) {
                     let base = mtl.parent().unwrap_or(dir).to_path_buf();
                     for texture in mtl_textures(&mtl) {
@@ -358,6 +365,21 @@ mod tests {
         // Without UVs an image could not be placed, so nothing is offered.
         std::fs::write(&obj, "mtllib spider.mtl\nv 0 0 0\n").unwrap();
         assert!(inspect(&obj, &[]).iter().all(|c| c.kind != Kind::Unmapped));
+    }
+
+    #[test]
+    fn a_chosen_library_replaces_the_grey_one() {
+        let dir = temp("library");
+        let obj = dir.join("spider.obj");
+        std::fs::write(&obj, "mtllib spider.mtl\nvt 0 0\n").unwrap();
+        std::fs::write(dir.join("spider.mtl"), "newmtl Body\nKd 0.8 0.8 0.8\n").unwrap();
+        let other = temp("library-other");
+        let good = other.join("textured.mtl");
+        std::fs::write(&good, "newmtl Body\nmap_Kd body.png\n").unwrap();
+        std::fs::write(other.join("body.png"), b"png").unwrap();
+        assert!(inspect(&obj, &[]).iter().any(|c| c.kind == Kind::Unmapped));
+        let with = inspect_with(&obj, &[], Some(&good));
+        assert!(with.iter().all(|c| c.kind != Kind::Unmapped && c.found), "{with:?}");
     }
 
     #[test]

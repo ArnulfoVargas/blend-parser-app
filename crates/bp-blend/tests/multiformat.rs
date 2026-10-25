@@ -129,6 +129,34 @@ fn real_multicolor_imports_and_missing_resources() {
     assert!(blue, "added texture colour lost");
     eprintln!("obj: MTL and texture added from other folders, colours kept");
 
+    // A grey MTL (textures lost on export): the textures come from the .blend by material name.
+    let grey = dir.join("grey");
+    std::fs::create_dir_all(&grey).unwrap();
+    std::fs::copy(dir.join("colors.obj"), grey.join("colors.obj")).unwrap();
+    let mtl = std::fs::read_to_string(dir.join("colors.mtl")).unwrap();
+    let flat: String = mtl
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("map_"))
+        .map(|l| if l.trim_start().starts_with("Kd ") { "Kd 0.8 0.8 0.8" } else { l })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    std::fs::write(grey.join("colors.mtl"), flat).unwrap();
+    let unmapped = bp_blend::companions::inspect(&grey.join("colors.obj"), &[]);
+    assert!(unmapped.iter().any(|c| c.kind == Kind::Unmapped), "grey materials not offered: {unmapped:?}");
+    let added = bp_blend::Additions { blend: Some(dir.join("colors.blend")), ..Default::default() };
+    let imported = bp_blend::extract_with_files(&blender, &grey.join("colors.obj"), &added, &mut |_| {}).unwrap();
+    assert!(imported.warnings.iter().any(|w| w.code == "blendTextures"), "no report of .blend textures");
+    let scene = imported.scene;
+    assert!(
+        !scene.images.is_empty(),
+        "texture from the .blend not used: {:?}",
+        imported.warnings.iter().map(|w| (&w.code, &w.detail)).collect::<Vec<_>>()
+    );
+    eprintln!("obj: grey MTL, textures taken from the .blend");
+
     let gltf: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("colors.gltf")).unwrap()).unwrap();
     let buffer = dir.join(gltf["buffers"][0]["uri"].as_str().unwrap());

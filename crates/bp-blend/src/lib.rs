@@ -152,6 +152,10 @@ pub struct Additions {
     pub files: Vec<PathBuf>,
     /// An image for each named material whose texture the model does not name.
     pub textures: Vec<(String, PathBuf)>,
+    /// An OBJ material library to use instead of the ones the OBJ names.
+    pub library: Option<PathBuf>,
+    /// A .blend whose packed textures go to materials of the same name.
+    pub blend: Option<PathBuf>,
 }
 
 /// As [`extract_with_report`], with what the user added.
@@ -171,7 +175,9 @@ pub fn extract_with_files(
     let extras = companions::expand(&additions.files);
     let textures: serde_json::Map<String, serde_json::Value> =
         additions.textures.iter().map(|(m, p)| (m.clone(), p.display().to_string().into())).collect();
-    let result = std::fs::write(dir.join("textures.json"), serde_json::Value::Object(textures).to_string())
+    let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string());
+    let added = serde_json::json!({ "textures": textures, "library": path(&additions.library), "blend": path(&additions.blend) });
+    let result = std::fs::write(dir.join("additions.json"), added.to_string())
         .map_err(BlendError::from)
         .and_then(|_| run(blender, &source, &extras, &dir, progress))
         .and_then(|_| read_dump(&dir));

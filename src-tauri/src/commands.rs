@@ -83,10 +83,14 @@ pub fn blender_status(app: AppHandle) -> Option<String> {
 /// Files the model references and whether each is at hand, with `extras` the
 /// files and folders the user added. Reads the model only; Blender is not started.
 #[tauri::command]
-pub async fn inspect_model(path: String, extras: Vec<String>) -> CmdResult<Vec<bp_blend::companions::Companion>> {
+pub async fn inspect_model(
+    path: String,
+    extras: Vec<String>,
+    library: Option<String>,
+) -> CmdResult<Vec<bp_blend::companions::Companion>> {
     tauri::async_runtime::spawn_blocking(move || {
         let extras: Vec<PathBuf> = extras.into_iter().map(PathBuf::from).collect();
-        Ok(bp_blend::companions::inspect(Path::new(&path), &extras))
+        Ok(bp_blend::companions::inspect_with(Path::new(&path), &extras, library.as_deref().map(Path::new)))
     })
     .await
     .map_err(AppError::internal)?
@@ -114,6 +118,8 @@ pub async fn open_blend(
     path: String,
     extras: Option<Vec<String>>,
     textures: Option<Vec<(String, String)>>,
+    library: Option<String>,
+    blend: Option<String>,
 ) -> CmdResult<Summary> {
     let blender = blender_path(&app)?;
     let printer = with_store(&app, |s| Ok(s.printer()))?;
@@ -130,6 +136,8 @@ pub async fn open_blend(
         let additions = bp_blend::Additions {
             files: extras.unwrap_or_default().into_iter().map(PathBuf::from).collect(),
             textures: textures.unwrap_or_default().into_iter().map(|(m, p)| (m, PathBuf::from(p))).collect(),
+            library: library.map(PathBuf::from),
+            blend: blend.map(PathBuf::from),
         };
         let imported = bp_blend::extract_with_files(&blender, file, &additions, &mut |m| emit(m))?;
         emit("palette");

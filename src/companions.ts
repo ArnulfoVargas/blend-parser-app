@@ -17,6 +17,10 @@ export interface Added {
   files: string[];
   /** [material, image] for materials whose texture the model does not name. */
   textures: [string, string][];
+  /** An OBJ material library to use instead of the model's. */
+  library: string | null;
+  /** A .blend whose packed textures go to materials of the same name. */
+  blend: string | null;
 }
 
 /** A name stripped of the prefixes and suffixes exporters add, so that
@@ -57,7 +61,7 @@ const fileName = (p: string) => p.split(/[\\/]/).pop() || p;
 /** What the user added to convert with, or null when they cancel. Resolves at
  *  once, without a dialog, when the model needs nothing it cannot find. */
 export async function gatherCompanions(model: string, extras: string[] = []): Promise<Added | null> {
-  const plain: Added = { files: extras, textures: [] };
+  const plain: Added = { files: extras, textures: [], library: null, blend: null };
   if (!WITH_COMPANIONS.test(model)) return plain;
   let found: Companion[];
   try {
@@ -77,9 +81,19 @@ export async function gatherCompanions(model: string, extras: string[] = []): Pr
 
   const added = [...extras];
   const assigned = new Map<string, string>();
+  let library: string | null = null;
+  let blend: string | null = null;
   let unmatched = 0;
-  const has = (c: Companion) => c.kind === "unmapped" ? assigned.has(c.name) : c.found;
-  const result = (): Added => ({ files: added, textures: [...assigned] });
+  // With a .blend, every material may find its texture there by name.
+  const has = (c: Companion) => c.kind === "unmapped" ? assigned.has(c.name) || blend !== null : c.found;
+  const result = (): Added => ({ files: added, textures: [...assigned], library, blend });
+  const inspect = async () => {
+    try {
+      found = await api.inspectModel(model, added, library);
+    } catch {
+      // Keep what we had; the import will still use the files.
+    }
+  };
   // Steps stay once shown; adding an .mtl can reveal a textures step after it.
   let kinds: Kind[] = [];
   let at = 0;
@@ -96,13 +110,56 @@ export async function gatherCompanions(model: string, extras: string[] = []): Pr
     const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
     if (!paths.length) return;
     for (const p of paths) if (!added.includes(p)) added.push(p);
-    try {
-      found = await api.inspectModel(model, added);
-    } catch {
-      // Keep what we had; the import will still use the files.
-    }
+    await inspect();
     refresh();
     render();
+  }
+
+  /** Another .mtl or a .blend as where the textures come from; null clears it. */
+  async function source(which: "library" | "blend", clear = false) {
+    let path: string | null = null;
+    if (!clear) {
+      const picked = await open({ multiple: false, directory: false, filters: [which === "library"
+        ? { name: t("files.materials.filter"), extensions: ["mtl"] }
+        : { name: "Blender", extensions: ["blend"] }] });
+      if (typeof picked !== "string") return;
+      path = picked;
+    }
+    if (which === "library") {
+      library = path;
+      await inspect();
+      refresh();
+    } else {
+      blend = path;
+    }
+    render();
+  }
+
+  /** The three places textures can come from, as cards; a chosen one shows its file. */
+  function sources(): HTMLElement {
+    const box = el("div", "files__sources");
+    const card = (id: "images" | "library" | "blend", chosen: string | null, run: () => void, clear?: () => void) => {
+      const item = el("div", "files__source");
+      item.dataset.chosen = String(Boolean(chosen));
+      const button = el("button", "files__pick");
+      button.type = "button";
+      button.append(el("strong", "", t(`files.source.${id}`)), el("span", "", chosen ? fileName(chosen) : t(`files.source.${id}Help`)));
+      if (chosen) button.title = chosen;
+      button.addEventListener("click", run);
+      item.append(button);
+      if (chosen && clear) {
+        const x = el("button", "files__clear", "×");
+        x.type = "button";
+        x.title = x.ariaLabel = t("files.source.clear");
+        x.addEventListener("click", clear);
+        item.append(x);
+      }
+      box.append(item);
+    };
+    card("images", null, () => void assign());
+    card("library", library, () => void source("library"), () => void source("library", true));
+    card("blend", blend, () => void source("blend"), () => void source("blend", true));
+    return box;
   }
 
   /** Images for the materials: several at once are matched by name, one goes to `only`. */
@@ -122,29 +179,40 @@ export async function gatherCompanions(model: string, extras: string[] = []): Pr
     render();
   }
 
+  /** One cell per material: pick its image, see where its texture comes from. */
   function unmappedRows(items: Companion[]): HTMLElement {
-    const list = el("ul", "files__list files__list--assign");
+    const list = el("ul", "files__grid");
     for (const c of items) {
       const li = el("li");
       const image = assigned.get(c.name);
-      li.dataset.found = String(Boolean(image));
-      const target = el("span", "files__name", image ? fileName(image) : t("files.unmapped.none"));
-      if (image) target.title = image;
-      const choose = el("button", "link", t(image ? "files.unmapped.change" : "files.unmapped.choose"));
-      choose.type = "button";
-      choose.addEventListener("click", () => void assign(c.name));
-      li.append(el("span", "files__mark", image ? "✓" : "–"), el("span", "files__material mono", c.name), target, choose);
+      li.dataset.state = image ? "image" : blend ? "blend" : "none";
+      const cell = el("button", "files__cell");
+      cell.type = "button";
+      cell.title = image ?? t("files.unmapped.choose");
+      const status = image ? fileName(image) : blend ? t("files.unmapped.fromBlend") : t("files.unmapped.none");
+      cell.append(el("span", "files__dot-sm"), el("span", "files__material mono", c.name), el("span", "files__value", status));
+      cell.addEventListener("click", () => void assign(c.name));
+      li.append(cell);
       if (image) {
         const clear = el("button", "files__clear", "×");
         clear.type = "button";
-        clear.title = t("files.unmapped.clear");
-        clear.setAttribute("aria-label", t("files.unmapped.clear"));
+        clear.title = clear.ariaLabel = t("files.unmapped.clear");
         clear.addEventListener("click", () => { assigned.delete(c.name); render(); });
         li.append(clear);
       }
       list.append(li);
     }
     return list;
+  }
+
+  function progress(ready: number, total: number): HTMLElement {
+    const box = el("div", "files__progress");
+    const bar = el("div", "files__bar");
+    const fill = el("span");
+    fill.style.width = `${total ? (ready / total) * 100 : 100}%`;
+    bar.append(fill);
+    box.append(el("span", "files__count", t("files.unmapped.count", { found: ready, total })), bar);
+    return box;
   }
 
   function render() {
@@ -180,7 +248,7 @@ export async function gatherCompanions(model: string, extras: string[] = []): Pr
     const actions = el("div", "files__add");
     const pick = el("button", "btn btn--sm", t(`files.${kind}.add`));
     pick.type = "button";
-    pick.addEventListener("click", () => void (kind === "unmapped" ? assign() : add(kind, false)));
+    pick.addEventListener("click", () => void add(kind, false));
     actions.append(pick);
     if (kind === "textures") {
       const folder = el("button", "link", t("files.pickFolder"));
@@ -188,16 +256,25 @@ export async function gatherCompanions(model: string, extras: string[] = []): Pr
       folder.addEventListener("click", () => void add(kind, true));
       actions.append(folder);
     }
-    panel.replaceChildren(
-      head,
-      el("p", "help", t(`files.${kind}.help`)),
-      el("p", "files__count", t(kind === "unmapped" ? "files.unmapped.count" : "files.count", { found: ready, total: items.length })),
-      kind === "unmapped" ? unmappedRows(items) : list,
-      actions,
-    );
-    if (kind === "unmapped" && unmatched) panel.append(el("p", "help files__added", t("files.unmapped.unmatched", { count: unmatched })));
-    if (kind === "unmapped" && /\.obj$/i.test(model)) panel.append(el("p", "note files__tip", t("files.unmapped.blend")));
-    if (added.length) panel.append(el("p", "help files__added", t("files.added", { count: added.length })));
+    if (kind === "unmapped") {
+      panel.replaceChildren(head, el("p", "help", t("files.unmapped.help")), sources());
+      if (items.length) {
+        panel.append(progress(ready, items.length), unmappedRows(items));
+        if (blend) panel.append(el("p", "help files__added", t("files.unmapped.blendNote")));
+      } else {
+        panel.append(el("p", "files__done", t("files.unmapped.allMapped")));
+      }
+      if (unmatched) panel.append(el("p", "help files__added", t("files.unmapped.unmatched", { count: unmatched })));
+    } else {
+      panel.replaceChildren(
+        head,
+        el("p", "help", t(`files.${kind}.help`)),
+        el("p", "files__count", t("files.count", { found: ready, total: items.length })),
+        list,
+        actions,
+      );
+      if (added.length) panel.append(el("p", "help files__added", t("files.added", { count: added.length })));
+    }
 
     const last = at === kinds.length - 1;
     back.hidden = at === 0;

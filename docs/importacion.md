@@ -61,9 +61,17 @@ Un OBJ puede traer su `.mtl` y aun así haber perdido las texturas: si el origin
 tenía empaquetadas (por ejemplo, en un `.blend`), el exportador escribe materiales grises
 sin `map_Kd`. Cuando el OBJ tiene coordenadas UV y un material no tiene mapa y conserva el
 gris (0,8) o el blanco por defecto, el paso **Asignar texturas** permite darle una imagen.
-Si se eligen varias imágenes a la vez, se emparejan por nombre sin prefijos ni sufijos
-habituales (`proj_Leg_L1.png` → `pmat_Leg_L1`). El paso también recomienda abrir el `.blend`,
-que conserva las texturas empaquetadas.
+Las texturas pueden venir de tres fuentes:
+
+- **Imágenes**: varias a la vez se emparejan por nombre sin prefijos ni sufijos habituales
+  (`proj_Leg_L1.png` → `pmat_Leg_L1`); cada material también acepta una imagen a mano.
+- **Otro `.mtl`**: sustituye a todas las librerías que nombra el OBJ (se importa una copia
+  del modelo con él); sus texturas se buscan junto a ese `.mtl`.
+- **Archivo `.blend`**: al convertir, cada material sin textura toma la imagen del material
+  con el mismo nombre en el `.blend` (sin distinguir mayúsculas; espacio y guion bajo
+  cuentan igual, porque el exportador de OBJ los cambia). Las texturas empaquetadas sirven.
+
+Una imagen elegida a mano tiene prioridad sobre el `.blend`.
 
 Al importar, los archivos agregados se pasan al extractor. Si el `.mtl` o el `.bin` vienen
 de otra carpeta, se importa una copia del modelo desde una carpeta temporal que los tiene

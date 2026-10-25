@@ -243,12 +243,15 @@ function fitProblem(s: Summary): string | null {
   return null;
 }
 
+/** Notices that inform rather than warn: shown as a plain line under the warnings. */
+const IMPORT_INFO = new Set(["units", "blendTextures"]);
+
 /** Import notices grouped by kind, a few names each; units are information, not a warning. */
 function renderImportWarnings(s: Summary) {
   const box = $("#import-warnings");
-  const units = s.importWarnings.find((w) => w.code === "units");
+  const info = s.importWarnings.filter((w) => IMPORT_INFO.has(w.code));
   const groups = new Map<string, string[]>();
-  for (const w of s.importWarnings) if (w.code !== "units") groups.set(w.code, [...(groups.get(w.code) ?? []), w.detail]);
+  for (const w of s.importWarnings) if (!IMPORT_INFO.has(w.code)) groups.set(w.code, [...(groups.get(w.code) ?? []), w.detail]);
   const nodes: HTMLElement[] = [];
   const total = [...groups.values()].reduce((n, d) => n + d.length, 0);
   if (total) {
@@ -287,8 +290,8 @@ function renderImportWarnings(s: Summary) {
   box.hidden = !total;
   box.replaceChildren(...nodes);
   const unitNote = $("#import-units");
-  unitNote.hidden = !units;
-  unitNote.textContent = units ? t("import.units", { detail: units.detail }) : "";
+  unitNote.hidden = !info.length;
+  unitNote.textContent = info.map((w) => tKey(`import.${w.code}`, { detail: w.detail }, w.detail)).join(" ");
 }
 
 function render(s: Summary) {
@@ -820,7 +823,7 @@ async function openFile(path: string, extras: string[] = []) {
   try {
     previousSwaps = null;
     measured = [];
-    render(await api.openBlend(path, added.files, added.textures));
+    render(await api.openBlend(path, added));
     await reloadMesh(true);
     setState("ready");
     // Start both panels at the top once layout has settled.
