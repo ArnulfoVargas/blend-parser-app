@@ -37,6 +37,16 @@ function initial(): Lang {
 
 let lang: Lang = initial();
 let plurals = new Intl.PluralRules(lang);
+let numbers = numberLocale();
+
+/** Numbers follow the system's region when it speaks the interface language
+ *  (es-MX writes 1,234.5; es-ES 1.234,5), else the language's default. */
+function numberLocale(): string {
+  for (const tag of navigator.languages ?? [navigator.language]) {
+    if (tag.toLowerCase().split("-")[0] === lang) return tag;
+  }
+  return lang;
+}
 const listeners: (() => void)[] = [];
 
 export const currentLang = () => lang;
@@ -45,6 +55,7 @@ export function setLang(next: Lang) {
   if (!(next in CATALOGS) || next === lang) return;
   lang = next;
   plurals = new Intl.PluralRules(lang);
+  numbers = numberLocale();
   try {
     localStorage.setItem(STORAGE, lang);
   } catch {
@@ -87,8 +98,18 @@ export function tKey(key: string, params?: Params, fallback = ""): string {
 
 /** A number in the interface language, with `d` decimals at most (and at least, when `fixed`). */
 export function num(n: number, d = 0, fixed = true): string {
-  return n.toLocaleString(lang, { maximumFractionDigits: d, minimumFractionDigits: fixed ? d : 0 });
+  return n.toLocaleString(numbers, { maximumFractionDigits: d, minimumFractionDigits: fixed ? d : 0 });
 }
+
+/** Decimals that read well: two under 10, one under 100, none above. */
+const readable = (n: number) => num(n, n < 10 ? 2 : n < 100 ? 1 : 0);
+
+/** Grams, or kilograms past 1000 g. */
+export const mass = (g: number) => (g < 1000 ? `${readable(g)} g` : `${readable(g / 1000)} kg`);
+/** Metres, or kilometres past 1000 m. */
+export const length = (m: number) => (m < 1000 ? `${readable(m)} m` : `${readable(m / 1000)} km`);
+/** mm³, or cm³ past 10 000 mm³. */
+export const volume = (mm3: number) => (mm3 < 10000 ? `${num(mm3)} mm³` : `${readable(mm3 / 1000)} cm³`);
 
 /** A value for an `<input type="number">`, which always takes a dot: no grouping, at most `d` decimals. */
 export const inputValue = (n: number, d = 2) => String(Math.round(n * 10 ** d) / 10 ** d);

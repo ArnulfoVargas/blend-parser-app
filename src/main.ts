@@ -23,7 +23,7 @@ import {
   type Vec3,
   type WastePrefs,
 } from "./api";
-import { applyStatic, currentLang, inputValue, LANGS, list, num, onLangChange, setLang, t, tKey, type Key, type Lang } from "./i18n";
+import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, onLangChange, setLang, t, tKey, volume, type Key, type Lang } from "./i18n";
 import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
@@ -494,13 +494,13 @@ $("#plate-reset").addEventListener("click", () => {
 
 function renderWaste(s: Summary) {
   const w = s.waste;
-  const g = (mm3: number) => t("waste.grams", { g: nf((mm3 * w.prefs.densityGCm3) / 1000, 1) });
-  bind("wasteTotal", t("waste.grams", { g: nf(w.totalG, 1) }));
-  bind("wasteTotalDetail", t("waste.totalDetail", { m: nf(w.totalM, 2), mm3: nf(w.totalMm3) }));
+  const g = (mm3: number) => mass((mm3 * w.prefs.densityGCm3) / 1000);
+  bind("wasteTotal", mass(w.totalG));
+  bind("wasteTotalDetail", t("waste.totalDetail", { length: length(w.totalM), volume: volume(w.totalMm3) }));
   const rows: [string, string, string?][] = [
     [t("waste.flush"), g(w.flushMm3), t("waste.flushNote", { count: s.estimate.swaps, n: nf(s.estimate.swaps) })],
     [t("waste.start"), g(w.startMm3)],
-    [t("waste.tower"), g(w.towerMm3), w.towerMm3 > 0 ? t("waste.towerNote", { h: nf(w.towerHeightMm, 1) }) : t("waste.noTower")],
+    [t("waste.tower"), g(w.towerMm3), w.towerMm3 > 0 ? t("waste.towerNote", { h: w.towerHeightMm < 1000 ? `${nf(w.towerHeightMm, 1)} mm` : length(w.towerHeightMm / 1000) }) : t("waste.noTower")],
   ];
   if (w.reusedMm3 > 0) rows.push([t("waste.reused"), g(w.reusedMm3), t("waste.reusedNote")]);
   $("#waste-breakdown").replaceChildren(...rows.flatMap(([label, value, note]) => {
@@ -511,6 +511,7 @@ function renderWaste(s: Summary) {
     return [dt, dd];
   }));
   bind("wasteAssumes", [
+    fitProblem(s) ? t("waste.oversize") : "",
     t("waste.assumes", {
       layer: mm(w.layerMm),
       nozzle: mm(w.nozzleMm),
@@ -520,7 +521,7 @@ function renderWaste(s: Summary) {
     }),
     w.purgeChute ? t("waste.chute") : t("waste.intoTower"),
     t("waste.limits"),
-  ].join(" "));
+  ].filter(Boolean).join(" "));
 }
 
 const wasteDialog = $<HTMLDialogElement>("#waste-dialog");

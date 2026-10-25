@@ -411,7 +411,7 @@ details.group[open] .group__sum { visibility: hidden; }
 .waste { margin-top: var(--space-2xs); padding-top: var(--space-xs); border-top: 1px dashed var(--color-rule); font-size: var(--text-sm); color: var(--color-ink-2); }
 .waste > summary { display: flex; align-items: baseline; gap: var(--space-xs); min-height: 32px; list-style: none; cursor: pointer; border-radius: 6px; }
 .waste > summary::-webkit-details-marker { display: none; }
-.waste > summary b { font: 700 var(--text-lg)/1 var(--font-display); letter-spacing: var(--tracking-display); color: var(--color-ink); }
+.waste > summary b { white-space: nowrap; font: 700 var(--text-lg)/1 var(--font-display); letter-spacing: var(--tracking-display); color: var(--color-ink); }
 .waste > summary::after { content: ""; margin-left: auto; align-self: center; width: 7px; height: 7px; border-right: 2px solid var(--color-muted); border-bottom: 2px solid var(--color-muted); transform: rotate(-45deg); transition: transform var(--dur-short) var(--ease-out); }
 .waste[open] > summary::after { transform: rotate(45deg); }
 @media (hover: hover) { .waste > summary:hover { color: var(--color-accent-deep); } }
