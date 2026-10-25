@@ -2,6 +2,7 @@
 
 mod commands;
 mod dto;
+mod profiles;
 mod state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -11,6 +12,12 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     builder
         .manage(state::AppState::default())
+        .setup(|app| {
+            use tauri::Manager;
+            let path = app.path().app_config_dir()?.join("printers.json");
+            *app.state::<state::AppState>().printers.lock().expect("printer store") = profiles::Store::load(path);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::blender_status,
             commands::initial_file,
@@ -23,7 +30,10 @@ pub fn run() {
             commands::set_height,
             commands::set_mesh_ops,
             commands::set_color_ops,
+            commands::printers,
             commands::set_printer,
+            commands::save_printer,
+            commands::delete_printer,
             commands::preview_mesh,
             commands::pick,
             commands::paint,

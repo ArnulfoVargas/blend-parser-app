@@ -11,13 +11,31 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   a mano) y persisten aunque se recalcule.
 - Vista previa 3D: orbitar, mover y acercar; vista de filamentos o de textura original.
 - Pincel sobre la malla con los colores objetivo, con deshacer (`Ctrl+Z`).
-- Tamaño final, con aviso y ajuste a la placa de la impresora elegida.
+- Impresora y boquilla (0,2, 0,4, 0,6 y 0,8 mm): Bambu Lab A1, A1 mini, P1P, P1S, P2S, X1,
+  X1 Carbon, X1E y H2S, o una impresora propia con su volumen, sus boquillas y, si se quiere,
+  los perfiles de una Bambu Lab. Las propias y la última elección se guardan en
+  `printers.json`, en la carpeta de configuración de la app.
+- Tamaño final, con aviso y ajuste a la placa y a la altura de la impresora elegida.
+- La boquilla manda en la preparación: los bordes de color no se cortan más fino que media
+  boquilla, la estimación usa la altura de capa de su perfil y se avisa de las manchas de color
+  demasiado pequeñas para ella.
 - Optimizaciones para imprimir más rápido: limpiar islas de color, nivel de detalle de bordes,
   simplificar la malla y aplanar la base, con estimación de cambios de filamento y purga.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y un `colores.txt`.
+
+## Perfiles de impresora en el 3MF
+
+Para las Bambu Lab, el 3MF nombra la impresora, el proceso y el filamento (Bambu PLA Basic) que
+Bambu Studio trae para esa boquilla. Los nombres salen de `resources/profiles/BBL` de
+[BambuStudio](https://github.com/bambulab/BambuStudio) y están en
+`crates/bp-3mf/src/printer.rs`. Una impresora propia sin perfil de Bambu lleva en el 3MF su
+volumen (`printable_area`, `printable_height`), la boquilla y la altura de capa.
+
+Las H2D, H2D Pro y H2C quedan fuera por ahora: tienen dos extrusores y su 3MF necesita otra
+configuración de filamentos.
 
 ## Descarga
 

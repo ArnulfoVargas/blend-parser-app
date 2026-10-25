@@ -16,6 +16,6 @@ pub mod scene;
 pub mod split;
 
 pub use mesh::{MeshOps, RepairReport};
-pub use project::{ColorOps, ExportPart, Preview, Project, Stats};
+pub use project::{ColorOps, ExportPart, Preview, PrintOps, Project, Stats};
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;

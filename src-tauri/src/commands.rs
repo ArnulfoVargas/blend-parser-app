@@ -3,11 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use bp_core::{ColorOps, MeshOps};
+use bp_core::{ColorOps, MeshOps, PrintOps};
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::dto::{self, HitDto, PaintDto, Summary};
+use crate::dto::{self, HitDto, PaintDto, PrintersDto, Summary};
+use crate::profiles::Store;
 use crate::state::{AppState, Document};
 
 type CmdResult<T> = Result<T, String>;
@@ -25,6 +26,31 @@ async fn with_doc<R: Send + 'static>(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// What the core prepares for: the nozzle and the layer height it prints at.
+fn print_ops(p: &bp_3mf::Printer) -> PrintOps {
+    PrintOps { nozzle_mm: p.nozzle_mm, layer_mm: p.layer_mm() }
+}
+
+fn with_store<R>(app: &AppHandle, f: impl FnOnce(&mut Store) -> CmdResult<R>) -> CmdResult<R> {
+    let state = app.state::<AppState>();
+    let mut s = state.printers.lock().map_err(|e| e.to_string())?;
+    f(&mut s)
+}
+
+/// Applies the store's pick to the open document, if there is one.
+async fn apply_printer(app: AppHandle) -> CmdResult<Option<Summary>> {
+    let printer = with_store(&app, |s| Ok(s.printer()))?;
+    if app.state::<AppState>().doc.lock().map_err(|e| e.to_string())?.is_none() {
+        return Ok(None);
+    }
+    with_doc(app, move |d| {
+        d.project.set_print_ops(print_ops(&printer));
+        d.printer = printer;
+        Ok(Some(dto::summary(d)))
+    })
+    .await
 }
 
 fn blender_path(app: &AppHandle) -> CmdResult<PathBuf> {
@@ -60,6 +86,7 @@ pub fn set_blender_path(app: AppHandle, path: String) -> CmdResult<String> {
 #[tauri::command]
 pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
     let blender = blender_path(&app)?;
+    let printer = with_store(&app, |s| Ok(s.printer()))?;
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let file = Path::new(&path);
@@ -70,13 +97,13 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
         emit("Abriendo Blender");
         let scene = bp_blend::extract(&blender, file, &mut |m| emit(m)).map_err(|e| e.to_string())?;
         emit("Agrupando colores en filamentos");
-        let project = bp_core::Project::new(scene, 4);
+        let mut project = bp_core::Project::new(scene, 4);
+        project.set_print_ops(print_ops(&printer));
         let doc = Document {
             project,
             file_name: file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path.clone()),
             file_size: size,
-            printer: bp_3mf::Printer::A1,
-            printer_id: "A1".into(),
+            printer,
         };
         let summary = dto::summary(&doc);
         *handle.state::<AppState>().doc.lock().map_err(|e| e.to_string())? = Some(doc);
@@ -171,13 +198,43 @@ pub async fn set_color_ops(app: AppHandle, border_detail: u8, min_island_mm2: f3
 }
 
 #[tauri::command]
-pub async fn set_printer(app: AppHandle, id: String) -> CmdResult<Summary> {
-    with_doc(app, move |d| {
-        d.printer = bp_3mf::Printer::from_id(&id);
-        d.printer_id = id;
-        Ok(dto::summary(d))
-    })
-    .await
+pub fn printers(app: AppHandle) -> CmdResult<PrintersDto> {
+    with_store(&app, |s| Ok(dto::printers(s)))
+}
+
+/// Picks a printer and nozzle; it is remembered for the next file and session.
+/// Returns the new summary when a file is open.
+#[tauri::command]
+pub async fn set_printer(app: AppHandle, id: String, nozzle_mm: f32) -> CmdResult<Option<Summary>> {
+    with_store(&app, |s| {
+        s.select(&id, nozzle_mm)?;
+        s.save()
+    })?;
+    apply_printer(app).await
+}
+
+/// Saves a custom printer (a blank id makes a new one) and picks it.
+#[tauri::command]
+pub async fn save_printer(app: AppHandle, profile: bp_3mf::PrinterProfile, nozzle_mm: f32) -> CmdResult<PrintersDto> {
+    let dto = with_store(&app, |s| {
+        let saved = s.upsert(profile)?;
+        s.select(&saved.id, nozzle_mm)?;
+        s.save()?;
+        Ok(dto::printers(s))
+    })?;
+    apply_printer(app).await?;
+    Ok(dto)
+}
+
+#[tauri::command]
+pub async fn delete_printer(app: AppHandle, id: String) -> CmdResult<PrintersDto> {
+    let dto = with_store(&app, |s| {
+        s.remove(&id);
+        s.save()?;
+        Ok(dto::printers(s))
+    })?;
+    apply_printer(app).await?;
+    Ok(dto)
 }
 
 /// The paintable mesh as one binary blob:
@@ -283,7 +340,7 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
                 .map(|p| bp_3mf::Part { name: &p.name, positions: &p.positions, tris: &p.tris, paint: &p.paint })
                 .collect(),
             filaments,
-            printer: d.printer,
+            printer: d.printer.clone(),
         };
         let file = std::fs::File::create(&path).map_err(|e| format!("{path}: {e}"))?;
         bp_3mf::write(std::io::BufWriter::new(file), &model).map_err(|e| format!("No se pudo escribir el 3MF: {e}"))

@@ -29,6 +29,19 @@ impl Default for ColorOps {
     }
 }
 
+/// What the printer can draw, in millimetres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PrintOps {
+    pub nozzle_mm: f32,
+    pub layer_mm: f32,
+}
+
+impl Default for PrintOps {
+    fn default() -> Self {
+        Self { nozzle_mm: 0.4, layer_mm: 0.2 }
+    }
+}
+
 /// What the preview needs, flattened for transfer to the UI.
 pub struct Preview {
     /// xyz of each leaf triangle's three corners.
@@ -93,6 +106,7 @@ pub struct Project {
     scale: f32,
     mesh_ops: MeshOps,
     color_ops: ColorOps,
+    print_ops: PrintOps,
     palette: Vec<Rgb>,
     /// Colours that classify into each slot: the slot's own colour plus the
     /// colours of any slot merged into it.
@@ -100,6 +114,8 @@ pub struct Project {
     shape: Mesh,
     work: Mesh,
     trees: Vec<Vec<Node>>,
+    /// Triangle neighbours of each part of `work`.
+    adjacency: Vec<Vec<Vec<(u32, f32)>>>,
     /// Hand-painted label per triangle, NO_LABEL where the model's colour applies.
     painted: Vec<Vec<u8>>,
     picker: (Bvh, TriSoup),
@@ -118,11 +134,13 @@ impl Project {
             scale: 1.0,
             mesh_ops: MeshOps::default(),
             color_ops: ColorOps::default(),
+            print_ops: PrintOps::default(),
             palette: vec![],
             targets: vec![],
             shape: Mesh::default(),
             work: Mesh::default(),
             trees: vec![],
+            adjacency: vec![],
             painted: vec![],
             picker: (Bvh::default(), TriSoup::default()),
             tri_offsets: vec![],
@@ -155,6 +173,9 @@ impl Project {
     }
     pub fn color_ops(&self) -> ColorOps {
         self.color_ops
+    }
+    pub fn print_ops(&self) -> PrintOps {
+        self.print_ops
     }
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty() || !self.stroke.is_empty()
@@ -290,6 +311,16 @@ impl Project {
         self.rebuild_paint();
     }
 
+    /// A new nozzle changes how fine colour borders are cut; a new layer
+    /// height only changes the estimate.
+    pub fn set_print_ops(&mut self, ops: PrintOps) {
+        let nozzle_changes = (ops.nozzle_mm - self.print_ops.nozzle_mm).abs() > 1e-4;
+        self.print_ops = ops;
+        if nozzle_changes {
+            self.rebuild_paint();
+        }
+    }
+
     fn rebuild_geometry(&mut self) {
         self.rebuild_geometry_keep_paint();
         self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
@@ -299,6 +330,7 @@ impl Project {
         let (shape, work) = Mesh::build(&self.scene, self.mesh_ops, self.scale);
         self.shape = shape;
         self.work = work;
+        self.adjacency = self.work.parts.iter().map(optimize::adjacency).collect();
         let soup = self.work.soup();
         self.picker = (Bvh::build(&soup), soup);
         let mut acc = 0u32;
@@ -319,7 +351,9 @@ impl Project {
     fn rebuild_paint(&mut self) {
         let field = ColorField::new(&self.scene, &self.shape);
         let cls = Classifier::with_slots(&self.targets);
-        let params = PaintParams { max_depth: self.color_ops.border_detail, min_edge: 0.2 / self.scale };
+        // Borders are not cut finer than half a nozzle: the printer cannot draw them.
+        let min_edge = self.print_ops.nozzle_mm / 2.0 / self.scale;
+        let params = PaintParams { max_depth: self.color_ops.border_detail, min_edge };
         self.trees = paint::build(&field, &self.shape, &cls, params);
         for (nodes, painted) in self.trees.iter_mut().zip(&self.painted) {
             for (n, &l) in nodes.iter_mut().zip(painted) {
@@ -330,10 +364,10 @@ impl Project {
         }
         if self.color_ops.min_island_mm2 > 0.0 {
             let min_area = self.color_ops.min_island_mm2 / (self.scale * self.scale);
-            for ((part, nodes), painted) in self.work.parts.iter().zip(&mut self.trees).zip(&self.painted) {
-                let adj = optimize::adjacency(part);
+            let parts = self.work.parts.iter().zip(&self.adjacency);
+            for ((part, adj), (nodes, painted)) in parts.zip(self.trees.iter_mut().zip(&self.painted)) {
                 let locked: Vec<bool> = painted.iter().map(|&l| l != NO_LABEL).collect();
-                optimize::despeckle(part, &adj, nodes, &locked, min_area);
+                optimize::despeckle(part, adj, nodes, &locked, min_area);
             }
         }
         self.stroke.clear();
@@ -450,10 +484,22 @@ impl Project {
             per_slot,
             size_mm: size,
             contact_mm2: self.work.contact_area(0.05 / self.scale) * self.scale * self.scale,
-            swaps: estimate::estimate(&self.work, &self.trees, self.scale),
+            swaps: estimate::estimate(&self.work, &self.trees, self.scale, self.print_ops.layer_mm),
             nearest: palette::nearest_others(&self.palette),
             repair: self.work.repair,
         }
+    }
+
+    /// Colour islands smaller than `min_mm2`, the ones the nozzle cannot draw cleanly.
+    pub fn small_islands(&self, min_mm2: f32) -> usize {
+        let min_area = min_mm2 / (self.scale * self.scale);
+        self.work
+            .parts
+            .iter()
+            .zip(&self.adjacency)
+            .zip(&self.trees)
+            .map(|((part, adj), nodes)| optimize::small_islands(part, adj, nodes, min_area))
+            .sum()
     }
 
     /// One closed piece per colour in final millimetres: shells `thickness_mm`

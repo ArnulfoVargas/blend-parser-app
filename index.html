@@ -18,10 +18,12 @@
       <label class="visually-hidden" for="printer">Impresora</label>
       <select class="select" id="printer" name="printer">
         <option value="A1">Bambu Lab A1</option>
-        <option value="A1M">Bambu Lab A1 mini</option>
-        <option value="X1C">Bambu Lab X1 Carbon</option>
-        <option value="P1S">Bambu Lab P1S</option>
       </select>
+      <label class="visually-hidden" for="nozzle">Boquilla</label>
+      <select class="select" id="nozzle" name="nozzle" title="Diámetro de la boquilla">
+        <option value="0.4">0,4 mm</option>
+      </select>
+      <button class="btn btn--quiet" type="button" id="open-printers">Mis impresoras</button>
       <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true">Por color (.zip)</button>
       <button class="btn btn--primary" type="button" id="export" aria-disabled="true"><span class="btn__warn" aria-hidden="true"></span><span data-bind="exportLabel">Exportar .3mf</span></button>
     </div>
@@ -108,6 +110,10 @@
               <label for="island">Limpiar islas menores de <output for="island" data-bind="islandOut"></output></label>
               <input class="range" id="island" name="island" type="range" min="0" max="50" step="1" value="0">
               <p class="help">Las manchas pequeñas toman el color vecino: menos cambios de filamento.</p>
+            </div>
+            <div class="note" id="detail-note" role="status" hidden>
+              <p data-bind="detailNote"></p>
+              <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix">Limpiar islas</button>
             </div>
           </div>
         </details>
@@ -212,6 +218,53 @@
         <button class="btn btn--primary" type="button" id="export-zip">Exportar .zip</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog class="dialog dialog--wide" id="printer-dialog" aria-labelledby="h-printers">
+    <div class="dialog__body">
+      <h2 id="h-printers">Mis impresoras</h2>
+      <ul class="printers" id="printer-list"></ul>
+      <p class="help" id="printer-empty">Aún no tienes impresoras propias. Crea una si la tuya no está entre las de Bambu Lab; se guarda para las próximas sesiones.</p>
+
+      <form class="printer-form" id="printer-form" novalidate>
+        <div class="printer-form__head">
+          <h3 id="h-printer-form">Nueva impresora</h3>
+          <button class="link" type="button" id="printer-new" hidden>Crear otra</button>
+        </div>
+        <div class="field">
+          <label for="pf-name">Nombre</label>
+          <input class="input" id="pf-name" name="pf-name" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Por ejemplo, Prusa MK4">
+        </div>
+        <fieldset class="volume">
+          <legend>Volumen de impresión</legend>
+          <div class="field">
+            <label for="pf-w">Ancho</label>
+            <div class="field__unit"><input class="input" id="pf-w" name="pf-w" type="number" inputmode="decimal" min="20" max="2000" step="1"><span>mm</span></div>
+          </div>
+          <div class="field">
+            <label for="pf-d">Fondo</label>
+            <div class="field__unit"><input class="input" id="pf-d" name="pf-d" type="number" inputmode="decimal" min="20" max="2000" step="1"><span>mm</span></div>
+          </div>
+          <div class="field">
+            <label for="pf-h">Alto</label>
+            <div class="field__unit"><input class="input" id="pf-h" name="pf-h" type="number" inputmode="decimal" min="20" max="2000" step="1"><span>mm</span></div>
+          </div>
+        </fieldset>
+        <fieldset class="keys keys--wide" id="pf-nozzles">
+          <legend>Boquillas que admite, en mm</legend>
+        </fieldset>
+        <div class="field">
+          <label for="pf-base">Perfil de Bambu Studio</label>
+          <select class="select" id="pf-base" name="pf-base" aria-describedby="pf-base-help"></select>
+          <p class="help" id="pf-base-help">Con un perfil de Bambu Lab, el 3MF abre con esa impresora, su proceso y su filamento. Sin perfil, el 3MF lleva el volumen y la boquilla, y lo abre cualquier slicer compatible con 3MF de Bambu.</p>
+        </div>
+        <p class="form-error" id="printer-error" role="alert" hidden></p>
+        <div class="dialog__actions">
+          <button class="btn btn--quiet" type="button" id="printer-close">Cerrar</button>
+          <button class="btn btn--primary" type="submit" id="printer-save">Guardar impresora</button>
+        </div>
+      </form>
+    </div>
   </dialog>
 
   <div class="drop-veil" aria-hidden="true"><p>Suelta el .blend para convertirlo</p></div>

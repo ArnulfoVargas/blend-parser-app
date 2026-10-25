@@ -7,7 +7,17 @@ export interface Slot { hex: string; triangles: number; nearest: [number, number
 export interface Repair { weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number; purgeGrams: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; borderDetail: number; minIslandMm2: number; printer: string }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+
+export interface PrinterProfile {
+  id: string; // blank for a new custom printer
+  name: string;
+  volumeMm: Vec3; // width, depth, height
+  nozzles: number[];
+  base: string | null; // Bambu Lab printer whose presets the 3MF names
+  custom: boolean;
+}
+export interface Printers { profiles: PrinterProfile[]; selected: string; nozzleMm: number; nozzles: number[]; bases: { id: string; name: string }[] }
 
 export interface Summary {
   fileName: string;
@@ -21,6 +31,10 @@ export interface Summary {
   sizeMm: Vec3;
   bedMm: [number, number];
   fitsBed: boolean;
+  maxHeightMm: number;
+  fitsHeight: boolean;
+  smallIslands: number;
+  minDetailMm2: number;
   contactMm2: number;
   repair: Repair;
   estimate: Estimate;
@@ -69,7 +83,11 @@ export const api = {
   setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number) =>
     invoke<Summary>("set_mesh_ops", { keepRatio, flattenMm, repair, minPieceMm }),
   setColorOps: (borderDetail: number, minIslandMm2: number) => invoke<Summary>("set_color_ops", { borderDetail, minIslandMm2 }),
-  setPrinter: (id: string) => invoke<Summary>("set_printer", { id }),
+  printers: () => invoke<Printers>("printers"),
+  /** Null while no file is open; the pick is remembered either way. */
+  setPrinter: (id: string, nozzleMm: number) => invoke<Summary | null>("set_printer", { id, nozzleMm }),
+  savePrinter: (profile: PrinterProfile, nozzleMm: number) => invoke<Printers>("save_printer", { profile, nozzleMm }),
+  deletePrinter: (id: string) => invoke<Printers>("delete_printer", { id }),
   previewMesh: async () => decodePreview(await invoke<ArrayBuffer>("preview_mesh")),
   pick: (origin: Vec3, dir: Vec3) => invoke<Hit | null>("pick", { origin, dir }),
   paint: (origin: Vec3, dir: Vec3, radiusMm: number, slot: number) => invoke<PaintResult | null>("paint", { origin, dir, radiusMm, slot }),
