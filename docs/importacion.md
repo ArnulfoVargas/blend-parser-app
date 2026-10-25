@@ -43,6 +43,25 @@ color base por muestra; factores y mezclas del shader pueden requerir hornear pr
 una textura de color. La animación no se importa como una secuencia; se extrae el estado
 evaluado del modelo. NURBS y nubes de puntos sin caras no se convierten automáticamente.
 
+## Archivos que acompañan al modelo
+
+Antes de convertir un OBJ, glTF o FBX, la app lee el modelo (sin abrir Blender) y busca lo
+que referencia: el `.mtl` del OBJ y sus texturas, el `.bin` y las imágenes del glTF, y las
+texturas externas del FBX (las incrustadas no hacen falta). Una referencia se encuentra
+tal como está escrita junto al archivo que la nombra, junto al modelo, por nombre junto
+al modelo o entre los archivos que agregue el usuario (sin distinguir mayúsculas).
+
+Si falta algo, el diálogo **Archivos del modelo** muestra un paso por tipo: Materiales,
+Geometría y Texturas. Todos son opcionales salvo el `.bin`, sin el cual no hay malla.
+Agregar un `.mtl` vuelve a leerlo y puede descubrir las texturas que pide. En Texturas se
+puede elegir una carpeta (cuenta su contenido y el de sus subcarpetas directas). Soltar el
+modelo junto con sus archivos también los usa. Si no falta nada, no aparece el diálogo.
+
+Al importar, los archivos agregados se pasan al extractor. Si el `.mtl` o el `.bin` vienen
+de otra carpeta, se importa una copia del modelo desde una carpeta temporal que los tiene
+con el nombre que el modelo espera; las imágenes que no cargaron se vuelven a enlazar por
+nombre. `companions.rs` y `extract.py` siguen las mismas reglas.
+
 ## Otros formatos evaluados
 
 | Formato | Prioridad | Decisión / limitación |

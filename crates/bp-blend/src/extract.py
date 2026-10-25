@@ -2,19 +2,27 @@
 # evaluated with modifiers, in world millimetres, with what each material slot
 # takes its colour from. Output: scene.json plus little-endian binary arrays.
 #
-#   blender -b --factory-startup --disable-autoexec --python extract.py -- <out_dir> <model>
+#   blender -b --factory-startup --disable-autoexec --python extract.py -- <out_dir> <model> [added files…]
 import json
 import os
-import sys
 import shlex
+import shutil
+import sys
 
 import bpy
 import numpy as np
 
-OUT = sys.argv[sys.argv.index("--") + 1]
+ARGS = sys.argv[sys.argv.index("--") + 1:]
+OUT = ARGS[0]
 os.makedirs(OUT, exist_ok=True)
-SOURCE = os.path.abspath(sys.argv[sys.argv.index("--") + 2])
+ORIGINAL = os.path.abspath(ARGS[1])
+SOURCE = ORIGINAL
+MODEL_DIR = os.path.dirname(ORIGINAL)
+# Files the user added for what the model references, matched by name.
+EXTRAS = [os.path.abspath(p) for p in ARGS[2:]]
+BY_NAME = {os.path.basename(p).lower(): p for p in EXTRAS}
 EXT = os.path.splitext(SOURCE)[1].lower()
+STAGE = None
 warnings = []
 
 
@@ -56,32 +64,95 @@ def texture_name(value):
     return " ".join(tokens)
 
 
-def obj_resources():
-    """OBJ resources are relative to the OBJ/MTL, never the process directory."""
-    with open(SOURCE, encoding="utf-8-sig", errors="replace") as f:
+def locate(name, base):
+    """Where a referenced file is: as written beside `base` or the model, by name
+    beside the model, or among the added files. Same rules as companions.rs."""
+    name = name.strip().strip('"')
+    if not name:
+        return None
+    key = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for candidate in (os.path.join(base, name), os.path.join(MODEL_DIR, name), os.path.join(MODEL_DIR, key)):
+        if os.path.isfile(candidate):
+            return candidate
+    return BY_NAME.get(key)
+
+
+def mtl_libraries(obj):
+    names = []
+    with open(obj, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             key, value = directive(line)
             if key != "mtllib":
                 continue
-            whole = os.path.join(os.path.dirname(SOURCE), value.strip('"'))
-            names = [value.strip('"')] if os.path.isfile(whole) else path_tokens(value)
-            for name in names:
-                path = os.path.join(os.path.dirname(SOURCE), name)
-                if not os.path.isfile(path):
-                    warn("missingMaterial", path)
-                    continue
-                with open(path, encoding="utf-8-sig", errors="replace") as mtl:
-                    for row in mtl:
-                        key, value = directive(row)
-                        if key == "map_Kd":
-                            tex = os.path.join(os.path.dirname(path), value.strip('"'))
-                            # MTL texture options precede the filename.
-                            if not os.path.isfile(tex):
-                                tex = os.path.join(os.path.dirname(path), texture_name(value))
-                            if value.startswith("-"):
-                                warn("shaderApproximation", path)
-                            if not os.path.isfile(tex):
-                                warn("missingTexture", tex)
+            whole = os.path.join(os.path.dirname(obj), value.strip('"'))
+            names += [value.strip('"')] if os.path.isfile(whole) else path_tokens(value)
+    return names
+
+
+def obj_resources():
+    """OBJ resources are relative to the OBJ/MTL, never the process directory."""
+    for name in mtl_libraries(SOURCE):
+        path = locate(name, os.path.dirname(SOURCE))
+        if path is None:
+            warn("missingMaterial", name)
+            continue
+        with open(path, encoding="utf-8-sig", errors="replace") as mtl:
+            for row in mtl:
+                key, value = directive(row)
+                if key == "map_Kd":
+                    # MTL texture options precede the filename.
+                    tex = locate(value, os.path.dirname(path)) or locate(texture_name(value), os.path.dirname(path))
+                    if value.startswith("-"):
+                        warn("shaderApproximation", path)
+                    if tex is None:
+                        warn("missingTexture", texture_name(value))
+
+
+def stage():
+    """Importers look for an OBJ's MTL and a glTF's buffers beside the model.
+    When the user supplied one from elsewhere, import a copy of the model from a
+    folder that has every such file under the name the model uses."""
+    global SOURCE, STAGE
+    if EXT == ".obj":
+        refs = mtl_libraries(ORIGINAL)
+    elif EXT == ".gltf":
+        with open(ORIGINAL, encoding="utf-8") as f:
+            doc = json.load(f)
+        from urllib.parse import unquote
+        refs = [unquote(b["uri"]) for key in ("buffers", "images") for b in doc.get(key, [])
+                if "uri" in b and not b["uri"].startswith("data:")]
+    else:
+        return
+    beside = lambda r: os.path.isfile(os.path.join(MODEL_DIR, r))
+    if not EXTRAS or all(beside(r) for r in refs):
+        return
+    STAGE = os.path.join(OUT, "stage")
+    os.makedirs(STAGE, exist_ok=True)
+    SOURCE = os.path.join(STAGE, os.path.basename(ORIGINAL))
+    shutil.copyfile(ORIGINAL, SOURCE)
+    for ref in refs:
+        found = locate(ref, MODEL_DIR)
+        target = os.path.normpath(os.path.join(STAGE, ref))
+        if found and target.startswith(STAGE):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copyfile(found, target)
+
+
+def relink():
+    """Points images that did not load at the file the user added or the one
+    beside the model, wherever the model said they were."""
+    for img in list(bpy.data.images):
+        if img.source != "FILE" or img.packed_file or not img.filepath:
+            continue
+        path = os.path.normpath(bpy.path.abspath(img.filepath))
+        if os.path.isfile(path):
+            continue
+        written = os.path.relpath(path, STAGE) if STAGE and path.startswith(STAGE) else img.filepath
+        found = locate(written, MODEL_DIR) or locate(img.name, MODEL_DIR)
+        if found:
+            # An importer's placeholder does not come back with reload(): load the
+            # file anew and hand it every node that used the placeholder.
+            img.user_remap(bpy.data.images.load(found, check_existing=True))
 
 
 def import_source():
@@ -89,7 +160,8 @@ def import_source():
         bpy.ops.wm.open_mainfile(filepath=SOURCE, load_ui=False, use_scripts=False)
         return
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    progress("importing", os.path.basename(SOURCE))
+    progress("importing", os.path.basename(ORIGINAL))
+    stage()
     if EXT == ".obj":
         obj_resources()
         bpy.ops.wm.obj_import(filepath=SOURCE, forward_axis="NEGATIVE_Z", up_axis="Y")
@@ -105,6 +177,7 @@ def import_source():
             bpy.ops.import_mesh.ply(filepath=SOURCE)
     else:
         raise ValueError("Unsupported input: " + EXT)
+    relink()
     # glTF and Blender's FBX importer produce metres. OBJ/PLY have no units:
     # interpret their coordinate values as millimetres, matching unitless .blend.
     warn("units", "m → mm" if EXT in (".fbx", ".gltf", ".glb") else "1 = 1 mm")

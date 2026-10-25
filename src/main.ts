@@ -26,6 +26,7 @@ import {
 import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, onLangChange, setLang, t, tKey, volume, type Key, type Lang } from "./i18n";
 import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
+import { gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { Viewer, type Tool, type View } from "./viewer";
 
@@ -800,11 +801,14 @@ function renderSlots(s: Summary) {
 
 let unlistenProgress: (() => void) | null = null;
 
-async function openFile(path: string) {
+/** `extras`: files dropped with the model, offered for what it references. */
+async function openFile(path: string, extras: string[] = []) {
   const lower = path.toLowerCase();
   const name = path.split(/[\\/]/).pop() ?? path;
   if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
   if (!MODEL_EXT.test(lower)) return setState("error", { key: "error.notBlend", params: { name } });
+  const files = await gatherCompanions(path, extras);
+  if (files === null) return;
   step = { key: "blender", name: "" };
   setState("converting");
   hideToast();
@@ -816,7 +820,7 @@ async function openFile(path: string) {
   try {
     previousSwaps = null;
     measured = [];
-    render(await api.openBlend(path));
+    render(await api.openBlend(path, files));
     await reloadMesh(true);
     setState("ready");
     // Start both panels at the top once layout has settled.
@@ -852,7 +856,11 @@ void getCurrentWebview().onDragDropEvent((e) => {
   const p = e.payload;
   if (p.type === "enter" || p.type === "over") app.classList.add("is-dragging");
   else app.classList.remove("is-dragging");
-  if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") void openFile(p.paths[0]);
+  if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") {
+    // A model dropped with its .mtl, .bin or textures: the rest go along with it.
+    const model = p.paths.find((f) => MODEL_EXT.test(f) || /\.blend\d+$/i.test(f)) ?? p.paths[0];
+    void openFile(model, p.paths.filter((f) => f !== model));
+  }
 });
 
 // ---- export ------------------------------------------------------------------------------

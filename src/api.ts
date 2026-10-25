@@ -86,6 +86,9 @@ export const isAppError = (e: unknown): e is AppError => typeof e === "object" &
 /** A step of opening a file. */
 export interface Progress { key: string; name: string }
 
+/** A file the model references (`.mtl`, glTF `.bin`, texture) and whether it was found. */
+export interface Companion { kind: "materials" | "buffers" | "textures"; name: string; found: boolean; required: boolean }
+
 export interface Summary {
   fileName: string;
   fileSize: number;
@@ -145,7 +148,8 @@ export const api = {
   blenderStatus: () => invoke<string | null>("blender_status"),
   initialFile: () => invoke<string | null>("initial_file"),
   setBlenderPath: (path: string) => invoke<string>("set_blender_path", { path }),
-  openBlend: (path: string) => invoke<Summary>("open_blend", { path }),
+  openBlend: (path: string, extras: string[] = []) => invoke<Summary>("open_blend", { path, extras }),
+  inspectModel: (path: string, extras: string[]) => invoke<Companion[]>("inspect_model", { path, extras }),
   setPalette: (colors: string[]) => invoke<Summary>("set_palette", { colors }),
   suggestPalette: (count: number) => invoke<Summary>("suggest_palette", { count }),
   setSize: (mm: Vec3) => invoke<Summary>("set_size", { mm }),

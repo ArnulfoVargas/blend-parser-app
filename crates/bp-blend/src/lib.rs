@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 use bp_core::{ColorSource, Image, MaterialInfo, Part, Scene};
 use serde::{Deserialize, Serialize};
 
+pub mod companions;
+
 const SCRIPT: &str = include_str!("extract.py");
 
 #[derive(Debug, thiserror::Error)]
@@ -140,6 +142,17 @@ pub fn extract_with_report(
     source: &Path,
     progress: &mut dyn FnMut(&str),
 ) -> Result<ImportResult, BlendError> {
+    extract_with_files(blender, source, &[], progress)
+}
+
+/// As [`extract_with_report`], with files the user added for what the model
+/// references (see [`companions`]); folders stand for the files inside them.
+pub fn extract_with_files(
+    blender: &Path,
+    source: &Path,
+    extras: &[PathBuf],
+    progress: &mut dyn FnMut(&str),
+) -> Result<ImportResult, BlendError> {
     if !supports(source) {
         return Err(BlendError::Unsupported(source.display().to_string()));
     }
@@ -147,12 +160,19 @@ pub fn extract_with_report(
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("blendparser-{}-{stamp}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    let result = run(blender, &source, &dir, progress).and_then(|_| read_dump(&dir));
+    let extras = companions::expand(extras);
+    let result = run(blender, &source, &extras, &dir, progress).and_then(|_| read_dump(&dir));
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
 
-fn run(blender: &Path, blend: &Path, dir: &Path, progress: &mut dyn FnMut(&str)) -> Result<(), BlendError> {
+fn run(
+    blender: &Path,
+    blend: &Path,
+    extras: &[PathBuf],
+    dir: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), BlendError> {
     let script = dir.join("extract.py");
     std::fs::write(&script, SCRIPT)?;
     let mut cmd = Command::new(blender);
@@ -166,6 +186,7 @@ fn run(blender: &Path, blend: &Path, dir: &Path, progress: &mut dyn FnMut(&str))
         .arg("--")
         .arg(dir)
         .arg(blend)
+        .args(extras)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]

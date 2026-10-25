@@ -80,6 +80,18 @@ pub fn blender_status(app: AppHandle) -> Option<String> {
     blender_path(&app).ok().map(|p| p.display().to_string())
 }
 
+/// Files the model references and whether each is at hand, with `extras` the
+/// files and folders the user added. Reads the model only; Blender is not started.
+#[tauri::command]
+pub async fn inspect_model(path: String, extras: Vec<String>) -> CmdResult<Vec<bp_blend::companions::Companion>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let extras: Vec<PathBuf> = extras.into_iter().map(PathBuf::from).collect();
+        Ok(bp_blend::companions::inspect(Path::new(&path), &extras))
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
 /// A supported model passed on the command line ("Open with…"), if any.
 #[tauri::command]
 pub fn initial_file() -> Option<String> {
@@ -97,7 +109,7 @@ pub fn set_blender_path(app: AppHandle, path: String) -> CmdResult<String> {
 }
 
 #[tauri::command]
-pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
+pub async fn open_blend(app: AppHandle, path: String, extras: Option<Vec<String>>) -> CmdResult<Summary> {
     let blender = blender_path(&app)?;
     let printer = with_store(&app, |s| Ok(s.printer()))?;
     let handle = app.clone();
@@ -110,7 +122,8 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
             let _ = handle.emit("progress", ProgressDto { key: key.to_string(), name: name.to_string() });
         };
         emit("blender");
-        let imported = bp_blend::extract_with_report(&blender, file, &mut |m| emit(m))?;
+        let extras: Vec<PathBuf> = extras.unwrap_or_default().into_iter().map(PathBuf::from).collect();
+        let imported = bp_blend::extract_with_files(&blender, file, &extras, &mut |m| emit(m))?;
         emit("palette");
         let mut project = bp_core::Project::new(imported.scene, 4);
         let state = handle.state::<AppState>();

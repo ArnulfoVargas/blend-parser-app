@@ -324,6 +324,24 @@
     </form>
   </dialog>
 
+  <dialog class="dialog dialog--wide" id="files-dialog" aria-labelledby="h-files">
+    <form method="dialog" class="dialog__body">
+      <div>
+        <h2 id="h-files" data-i18n="files.title">Archivos del modelo</h2>
+        <p class="help mono files__model"></p>
+      </div>
+      <ol class="files__steps"></ol>
+      <section class="files__panel" aria-live="polite"></section>
+      <div class="dialog__actions files__actions">
+        <button class="btn" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <span class="files__spacer"></span>
+        <button class="link" type="button" id="files-now" data-i18n="files.now">Convertir ya</button>
+        <button class="btn" type="button" id="files-back" data-i18n="files.back">Atrás</button>
+        <button class="btn btn--primary" type="button" id="files-next">Siguiente</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>

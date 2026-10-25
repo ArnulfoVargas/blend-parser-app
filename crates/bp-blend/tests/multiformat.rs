@@ -94,11 +94,49 @@ fn real_multicolor_imports_and_missing_resources() {
         let result = bp_blend::extract_with_report(&blender, &dir.join(file), &mut |_| {}).unwrap();
         assert!(result.warnings.iter().any(|w| w.code == code), "{file}: missing warning");
     }
+    // The MTL and its texture live elsewhere: the app asks for them and the user adds them.
+    let (alone, mats, maps) = (dir.join("alone"), dir.join("mats"), dir.join("maps"));
+    for d in [&alone, &mats, &maps] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::copy(dir.join("colors.obj"), alone.join("colors.obj")).unwrap();
+    std::fs::copy(dir.join("colors.mtl"), mats.join("colors.mtl")).unwrap();
+    std::fs::copy(dir.join("blue.png"), maps.join("blue.png")).unwrap();
+    let obj = alone.join("colors.obj");
+    let missing = |extras: &[std::path::PathBuf]| {
+        bp_blend::companions::inspect(&obj, extras).into_iter().filter(|c| !c.found).map(|c| c.kind).collect::<Vec<_>>()
+    };
+    use bp_blend::companions::Kind;
+    assert_eq!(missing(&[]), vec![Kind::Materials]);
+    assert_eq!(missing(&[mats.join("colors.mtl")]), vec![Kind::Textures]);
+    let extras = [mats.join("colors.mtl"), maps.clone()];
+    assert!(missing(&extras).is_empty());
+    let imported = bp_blend::extract_with_files(&blender, &obj, &extras, &mut |_| {}).unwrap();
+    assert!(
+        !imported.warnings.iter().any(|w| w.code.starts_with("missing")),
+        "added files still reported missing: {:?}",
+        imported.warnings.iter().map(|w| (&w.code, &w.detail)).collect::<Vec<_>>()
+    );
+    let scene = imported.scene;
+    assert!(!scene.images.is_empty(), "added texture not loaded");
+    let blue = scene.parts.iter().any(|p| {
+        (0..p.tris.len()).any(|t| {
+            let c = p.sample(&scene.images, t, [1.0 / 3.0; 3]).rgb();
+            c[2] > 0.9 && c[0] < 0.1
+        })
+    });
+    assert!(blue, "added texture colour lost");
+    eprintln!("obj: MTL and texture added from other folders, colours kept");
+
     let gltf: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("colors.gltf")).unwrap()).unwrap();
     let buffer = dir.join(gltf["buffers"][0]["uri"].as_str().unwrap());
-    std::fs::remove_file(buffer).unwrap();
+    let moved = maps.join(buffer.file_name().unwrap());
+    std::fs::rename(&buffer, &moved).unwrap();
     let result = bp_blend::extract_with_report(&blender, &dir.join("colors.gltf"), &mut |_| {});
     assert!(matches!(result, Err(bp_blend::BlendError::Blender(_))), "missing glTF geometry must fail explicitly");
+    let found = bp_blend::extract_with_files(&blender, &dir.join("colors.gltf"), &[moved], &mut |_| {}).unwrap();
+    assert_eq!(found.scene.triangle_count(), 24, "added glTF buffer not used");
+    eprintln!("gltf: buffer added from another folder");
     std::fs::remove_dir_all(&dir).unwrap();
 }

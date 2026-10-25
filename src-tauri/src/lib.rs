@@ -27,6 +27,7 @@ pub fn run() {
             commands::initial_file,
             commands::set_blender_path,
             commands::open_blend,
+            commands::inspect_model,
             commands::set_palette,
             commands::suggest_palette,
             commands::reduce_palette,
