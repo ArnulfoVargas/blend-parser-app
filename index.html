@@ -13,8 +13,35 @@
 
   <header class="bar">
     <span class="wordmark">BlendParser</span>
+    <ul class="menubar" id="menubar" role="menubar" aria-label="Menú" data-i18n-attr="aria-label:menu.label">
+      <li>
+        <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.file"></button>
+        <ul class="menu" role="menu" hidden>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="open"><span data-i18n="menu.open"></span> <kbd>Ctrl+O</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+S</kbd></button></li>
+          <li role="separator" class="menu__sep"></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="printers"><span data-i18n="menu.printers"></span></button></li>
+        </ul>
+      </li>
+      <li>
+        <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.edit"></button>
+        <ul class="menu" role="menu" hidden>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undo"><span data-i18n="menu.undo"></span> <kbd>Ctrl+Z</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undoSize"><span data-i18n="menu.undoSize"></span></button></li>
+          <li role="separator" class="menu__sep"></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="waste"><span data-i18n="menu.waste"></span></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="prefs"><span data-i18n="menu.prefs"></span> <kbd>Ctrl+,</kbd></button></li>
+        </ul>
+      </li>
+      <li>
+        <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.help"></button>
+        <ul class="menu" role="menu" hidden>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="updates"><span data-i18n="menu.updates"></span></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="shortcuts"><span data-i18n="menu.shortcuts"></span></button></li>
+        </ul>
+      </li>
+    </ul>
     <button class="version" type="button" id="version" title="Buscar actualizaciones" data-i18n-attr="title:update.check"><span data-bind="version">v…</span><i class="version__dot" aria-hidden="true"></i></button>
-    <button class="icon-btn" type="button" id="open-prefs" title="Preferencias" aria-label="Preferencias" data-i18n-attr="title:prefs.title;aria-label:prefs.title"><span class="icon-btn__gear" aria-hidden="true"></span></button>
     <p class="bar__file" data-bind="fileName"></p>
     <div class="bar__end">
       <div id="printer-picker"></div>
@@ -254,16 +281,16 @@
           <button class="link" type="button" id="go-reduce" data-i18n="swaps.joinSimilar">unir colores parecidos</button> <span data-i18n="swaps.or">o</span>
           <button class="link" type="button" id="go-islands" data-i18n="swaps.cleanIslands">limpiar islas</button>.
         </p>
-      </section>
-
-      <section class="waste" aria-labelledby="h-waste">
-        <div class="waste__head">
-          <h2 id="h-waste" data-i18n="waste.title">Desperdicio estimado</h2>
-          <button class="btn btn--quiet btn--sm" type="button" id="open-waste" data-i18n="waste.settings">Ajustes</button>
-        </div>
-        <p class="waste__total"><b class="num" data-bind="wasteTotal">0 g</b> <span data-bind="wasteTotalDetail"></span></p>
-        <dl class="facts facts--wide" id="waste-breakdown"></dl>
-        <p class="help" data-bind="wasteAssumes"></p>
+        <!-- The waste follows from the swaps: one line, its breakdown folded away. -->
+        <details class="waste" id="waste">
+          <summary><b class="num" data-bind="wasteTotal">0 g</b> <span data-i18n="waste.title">de desperdicio estimado</span></summary>
+          <div class="waste__body">
+            <p class="help" data-bind="wasteTotalDetail"></p>
+            <dl class="facts facts--wide" id="waste-breakdown"></dl>
+            <p class="help" data-bind="wasteAssumes"></p>
+            <button class="btn btn--quiet btn--sm" type="button" id="open-waste" data-i18n="waste.settings">Ajustes del desperdicio</button>
+          </div>
+        </details>
       </section>
 
       <h2 id="h-ams" data-i18n="ams.title">Ranuras del AMS</h2>

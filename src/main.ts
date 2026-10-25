@@ -24,6 +24,7 @@ import {
   type WastePrefs,
 } from "./api";
 import { applyStatic, currentLang, inputValue, LANGS, list, num, onLangChange, setLang, t, tKey, type Key, type Lang } from "./i18n";
+import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { Viewer, type Tool, type View } from "./viewer";
@@ -1267,9 +1268,38 @@ langSelect.replaceChildren(...LANGS.map((l) => Object.assign(new Option(l.name, 
 langSelect.value = currentLang();
 langSelect.addEventListener("change", () => setLang(langSelect.value as Lang));
 const prefsDialog = $<HTMLDialogElement>("#prefs-dialog");
-$("#open-prefs").addEventListener("click", () => {
+function openPrefs() {
+  if (document.querySelector("dialog[open]")) return;
   langSelect.value = currentLang();
   prefsDialog.showModal();
+}
+
+// ---- menu bar ----------------------------------------------------------------------------
+
+const ready = () => app.dataset.state === "ready";
+const COMMANDS: Record<string, { run: () => void; enabled?: () => boolean }> = {
+  open: { run: () => $("#choose").click(), enabled: () => state !== "converting" },
+  export: { run: () => $("#export").click(), enabled: ready },
+  printers: { run: () => openPrinterDialog() },
+  undo: { run: () => void undo(), enabled: () => ready() && Boolean(summary?.canUndo) },
+  undoSize: { run: () => $("#size-undo").click(), enabled: () => ready() && Boolean(summary?.size.canUndo) },
+  waste: { run: () => $("#open-waste").click(), enabled: ready },
+  prefs: { run: openPrefs },
+  updates: { run: () => versionBtn.click() },
+  shortcuts: { run: () => toast(t("menu.shortcutList"), "ok", undefined, true) },
+};
+menubar($("#menubar"), {
+  run: (cmd) => COMMANDS[cmd]?.run(),
+  enabled: (cmd) => COMMANDS[cmd]?.enabled?.() ?? true,
+});
+
+// Menu shortcuts work in any state and outside text fields.
+window.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || document.querySelector("dialog[open]")) return;
+  const cmd = { o: "open", s: "export", ",": "prefs" }[e.key.toLowerCase()];
+  if (!cmd || !(COMMANDS[cmd].enabled?.() ?? true)) return;
+  e.preventDefault();
+  COMMANDS[cmd].run();
 });
 
 /** Everything drawn from code, worded again. */
