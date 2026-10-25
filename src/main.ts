@@ -38,6 +38,9 @@ const nf = (n: number, d = 0) => num(n, d);
 /** Millimetres as a printer spec reads them: 0,4, 0,25, 256. */
 const mm = (n: number) => num(n, 2, false);
 const dims = (v: number[], d = 1) => `${v.map((x) => nf(x, d)).join(" × ")} mm`;
+/** What Blender can import for us; `bp_blend::INPUT_EXTENSIONS` is the same list. */
+const MODEL_EXTENSIONS = ["blend", "obj", "fbx", "gltf", "glb", "ply"];
+const MODEL_EXT = new RegExp(`\\.(${MODEL_EXTENSIONS.join("|")})$`, "i");
 
 let summary: Summary | null = null;
 let printers: Printers | null = null;
@@ -239,6 +242,54 @@ function fitProblem(s: Summary): string | null {
   return null;
 }
 
+/** Import notices grouped by kind, a few names each; units are information, not a warning. */
+function renderImportWarnings(s: Summary) {
+  const box = $("#import-warnings");
+  const units = s.importWarnings.find((w) => w.code === "units");
+  const groups = new Map<string, string[]>();
+  for (const w of s.importWarnings) if (w.code !== "units") groups.set(w.code, [...(groups.get(w.code) ?? []), w.detail]);
+  const nodes: HTMLElement[] = [];
+  const total = [...groups.values()].reduce((n, d) => n + d.length, 0);
+  if (total) {
+    const head = document.createElement("p");
+    head.className = "import-warnings__head";
+    head.textContent = t("import.warnings", { count: total });
+    nodes.push(head);
+    for (const [code, details] of groups) {
+      const group = document.createElement("div");
+      group.className = "import-warnings__group";
+      const title = document.createElement("strong");
+      title.textContent = tKey(`import.${code}`, {}, code);
+      const names = document.createElement("ul");
+      const SHOWN = 3;
+      for (const detail of details.slice(0, SHOWN)) {
+        const li = document.createElement("li");
+        // Paths read best by file name; the whole path stays one hover away.
+        li.textContent = detail.split(/[\\/]/).pop() || detail;
+        li.title = detail;
+        names.append(li);
+      }
+      if (details.length > SHOWN) {
+        const li = document.createElement("li");
+        li.className = "import-warnings__more";
+        li.textContent = t("import.more", { count: details.length - SHOWN });
+        li.title = details.slice(SHOWN).join("\n");
+        names.append(li);
+      }
+      const help = document.createElement("p");
+      help.className = "help";
+      help.textContent = tKey(`import.${code}Help`);
+      group.append(title, names, help);
+      nodes.push(group);
+    }
+  }
+  box.hidden = !total;
+  box.replaceChildren(...nodes);
+  const unitNote = $("#import-units");
+  unitNote.hidden = !units;
+  unitNote.textContent = units ? t("import.units", { detail: units.detail }) : "";
+}
+
 function render(s: Summary) {
   summary = s;
   bind("fileName", s.fileName);
@@ -295,13 +346,7 @@ function render(s: Summary) {
 
   renderWaste(s);
   renderSlots(s);
-  const warnings = $("#import-warnings");
-  warnings.hidden = s.importWarnings.length === 0;
-  warnings.replaceChildren(...s.importWarnings.map((w) => {
-    const p = document.createElement("p");
-    p.textContent = tKey(`import.${w.code}`, { detail: w.detail }, w.detail);
-    return p;
-  }));
+  renderImportWarnings(s);
   const mats = $<HTMLDListElement>("#materials");
   mats.replaceChildren(...s.materials.flatMap((m) => {
     const dt = document.createElement("dt");
@@ -759,7 +804,7 @@ async function openFile(path: string) {
   const lower = path.toLowerCase();
   const name = path.split(/[\\/]/).pop() ?? path;
   if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
-  if (!/\.(blend|obj|fbx|gltf|glb|ply)$/.test(lower)) return setState("error", { key: "error.notBlend", params: { name } });
+  if (!MODEL_EXT.test(lower)) return setState("error", { key: "error.notBlend", params: { name } });
   step = { key: "blender", name: "" };
   setState("converting");
   hideToast();
@@ -786,7 +831,7 @@ async function openFile(path: string) {
 }
 
 $("#choose").addEventListener("click", async () => {
-  const path = await open({ multiple: false, directory: false, filters: [{ name: t("import.formats"), extensions: ["blend", "obj", "fbx", "gltf", "glb", "ply"] }] });
+  const path = await open({ multiple: false, directory: false, filters: [{ name: t("import.formats"), extensions: MODEL_EXTENSIONS }] });
   if (typeof path === "string") await openFile(path);
 });
 
@@ -827,7 +872,7 @@ $("#export").addEventListener("click", async () => {
   const btn = $<HTMLButtonElement>("#export");
   if (app.dataset.state !== "ready" || !summary || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
-  const path = await save({ defaultPath: summary.fileName.replace(/\.(blend|obj|fbx|gltf|glb|ply)$/i, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
   if (!path) return;
   btn.setAttribute("aria-busy", "true");
   btn.setAttribute("aria-disabled", "true");
@@ -861,7 +906,7 @@ $("#export-zip").addEventListener("click", async () => {
   zipDialog.close();
   if (!(await confirmOversize())) return;
   const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
-  const path = await save({ defaultPath: summary.fileName.replace(/\.(blend|obj|fbx|gltf|glb|ply)$/i, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
   await work(async () => {
     const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());
