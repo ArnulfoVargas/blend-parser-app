@@ -11,13 +11,45 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   a mano) y persisten aunque se recalcule.
 - Vista previa 3D: orbitar, mover y acercar; vista de filamentos o de textura original.
 - Pincel sobre la malla con los colores objetivo, con deshacer (`Ctrl+Z`).
-- Tamaño final, con aviso y ajuste a la placa de la impresora elegida.
+- Impresora y boquilla, con buscador: las 87 impresoras de una sola boquilla que trae Bambu
+  Studio (Bambu Lab, Anker, Anycubic, Creality, Elegoo, Geeetech, Prusa, Qidi, Tronxy, Troodon,
+  Voron y Voxelab), con las boquillas de su perfil, o una impresora propia con su volumen, sus
+  boquillas y, si se quiere, el perfil de una del catálogo. Las propias y la última elección se
+  guardan en `printers.json`, en la carpeta de configuración de la app.
+- Tamaño final, con aviso y ajuste a la placa y a la altura de la impresora elegida.
+- La boquilla manda en la preparación: los bordes de color no se cortan más fino que media
+  boquilla, la estimación usa la altura de capa de su perfil y se avisa de las manchas de color
+  demasiado pequeñas para ella.
 - Optimizaciones para imprimir más rápido: limpiar islas de color, nivel de detalle de bordes,
   simplificar la malla y aplanar la base, con estimación de cambios de filamento y purga.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y un `colores.txt`.
+
+## Perfiles de impresora en el 3MF
+
+El catálogo es `crates/bp-3mf/src/catalog.json`, generado desde `resources/profiles` de
+[BambuStudio](https://github.com/bambulab/BambuStudio) con:
+
+```sh
+node scripts/sync-printers.mjs [commit]
+```
+
+La build de Cargo convierte el JSON versionado en una tabla Rust dentro de `OUT_DIR`.
+La tabla queda embebida en el ejecutable: la app no consulta GitHub ni parsea el JSON
+al arrancar. El bake es offline, se repite al cambiar el JSON o el generador y valida
+identificadores, volumen, boquillas y presets antes de compilar. El script de arriba
+solo se ejecuta manualmente para actualizar los datos desde Bambu Studio; no forma
+parte de la build. Guarda el JSON actualizado en Git para reproducir el mismo bake.
+
+Para cada impresora y boquilla, el 3MF nombra el preset de máquina de Bambu Studio, su proceso
+por defecto (o el compatible con la capa más cercana a media boquilla) y un PLA para ella. Una
+impresora propia sin perfil lleva en el 3MF su volumen (`printable_area`, `printable_height`),
+la boquilla y la altura de capa.
+
+Quedan fuera las impresoras de dos extrusores (H2D, H2D Pro, H2C, X2D): su 3MF necesita otra
+configuración de filamentos.
 
 ## Descarga
 
@@ -71,6 +103,31 @@ contraseña en `~/.tauri/blendparser.key.password`), y en los secretos del repos
 seguridad**: sin ella, las instalaciones existentes no aceptarán actualizaciones nuevas.
 
 ## Publicar una versión
+
+Cada PR fusionada a `main` publica una versión automáticamente cuando pasan todas las
+comprobaciones de CI. Por defecto incrementa el parche (`0.0.2` → `0.0.3`); añade a la PR
+la etiqueta `release:minor` o `release:major` antes de fusionarla para subir esos componentes.
+Si tiene ambas, gana `release:major`. Un push directo a `main` no publica una versión.
+
+La automatización toma la versión más alta entre los tags `alpha-*`, `beta-*`, `v*` y la
+versión del código. Actualiza los manifiestos y lockfiles en un commit de release derivado
+del commit que pasó CI, y sube solamente tags: **no escribe en `main`** ni necesita un PAT.
+La versión en `main` puede quedar por debajo de la publicada; la versión distribuida está
+en su tag `alpha-X.Y.Z`. El tag `release-source-<sha>` permite reintentar el mismo commit
+sin crear otra versión. Las reservas de tags son atómicas para evitar colisiones.
+
+El workflow reutilizable de Release se invoca directamente desde CI, porque los tags
+creados con `GITHUB_TOKEN` no disparan otro workflow. Compila y firma Windows y Linux,
+valida que `latest.json` contenga ambas plataformas y entonces publica el borrador.
+Si falla una build, el release queda como borrador y la versión anterior sigue disponible.
+Reintenta con **Re-run all jobs** en CI o con **Actions → Release → Run workflow**, indicando
+el tag existente. Un release ya publicado se omite. No borres los tags de seguimiento.
+
+Los secretos `TAURI_SIGNING_PRIVATE_KEY` y `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` deben seguir
+configurados en GitHub. El workflow solicita `contents: write`; no requiere permitir que
+Actions apruebe PRs ni cambiar las protecciones de `main`.
+
+Para crear una versión manualmente:
 
 ```sh
 npm run release -- 0.0.3 --push

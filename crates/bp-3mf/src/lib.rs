@@ -7,59 +7,15 @@ use std::io::{Seek, Write};
 
 use zip::write::SimpleFileOptions;
 
+mod printer;
+pub use printer::{canonical_id, catalog, Printer, PrinterProfile, NOZZLES};
+
 pub struct Part<'a> {
     pub name: &'a str,
     pub positions: &'a [[f32; 3]],
     pub tris: &'a [[u32; 3]],
     /// Encoded `paint_color` per triangle.
     pub paint: &'a [String],
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Printer {
-    A1,
-    A1Mini,
-    X1Carbon,
-    P1S,
-}
-
-impl Printer {
-    pub fn from_id(id: &str) -> Self {
-        match id {
-            "A1M" => Printer::A1Mini,
-            "X1C" => Printer::X1Carbon,
-            "P1S" => Printer::P1S,
-            _ => Printer::A1,
-        }
-    }
-
-    /// (model, printer preset, process preset, filament preset suffix, plate centre)
-    fn presets(self) -> (&'static str, &'static str, &'static str, &'static str, (u32, u32)) {
-        match self {
-            Printer::A1 => {
-                ("Bambu Lab A1", "Bambu Lab A1 0.4 nozzle", "0.20mm Standard @BBL A1", "@BBL A1", (128, 128))
-            }
-            Printer::A1Mini => {
-                ("Bambu Lab A1 mini", "Bambu Lab A1 mini 0.4 nozzle", "0.20mm Standard @BBL A1M", "@BBL A1M", (90, 90))
-            }
-            Printer::X1Carbon => (
-                "Bambu Lab X1 Carbon",
-                "Bambu Lab X1 Carbon 0.4 nozzle",
-                "0.20mm Standard @BBL X1C",
-                "@BBL X1C",
-                (128, 128),
-            ),
-            Printer::P1S => {
-                ("Bambu Lab P1S", "Bambu Lab P1S 0.4 nozzle", "0.20mm Standard @BBL X1C", "@BBL X1C", (128, 128))
-            }
-        }
-    }
-
-    /// Printable area in millimetres.
-    pub fn bed_mm(self) -> (f32, f32) {
-        let c = self.presets().4;
-        (c.0 as f32 * 2.0, c.1 as f32 * 2.0)
-    }
 }
 
 pub struct Model<'a> {
@@ -117,7 +73,7 @@ fn objects_xml(model: &Model) -> String {
 }
 
 fn main_xml(model: &Model, object_id: usize) -> String {
-    let (_, _, _, _, (cx, cy)) = model.printer.presets();
+    let (cx, cy) = model.printer.plate_centre();
     let mut comps = String::new();
     for i in 0..model.parts.len() {
         let _ = writeln!(
@@ -167,13 +123,22 @@ fn settings_xml(model: &Model, object_id: usize) -> String {
 }
 
 fn project_json(model: &Model) -> String {
-    let (printer_model, printer_id, process, suffix, _) = model.printer.presets();
+    let printer = &model.printer;
+    let nozzle = format!("{}", printer.nozzle_mm);
+    // Bambu Studio's own presets when it knows the printer; otherwise the
+    // volume and nozzle themselves, so any slicer that reads the config sees them.
+    let (printer_model, printer_id, process, filament) = match printer.presets() {
+        Some(p) => (p.printer_model.to_string(), p.printer_settings_id, p.process.to_string(), p.filament.to_string()),
+        None => (String::new(), printer.profile.name.clone(), String::new(), "Generic PLA".to_string()),
+    };
     let n = model.filaments.len().max(1);
     let rep = |v: &str| vec![v.to_string(); n];
+    // The prime tower stays on small custom beds.
+    let tower_y = format!("{}", (printer.bed_mm().1 - 40.0).clamp(15.0, 145.0).round());
     let flush: Vec<String> = (0..n * n).map(|i| if i / n == i % n { "0" } else { "280" }.to_string()).collect();
-    serde_json::to_string_pretty(&serde_json::json!({
+    let mut cfg = serde_json::json!({
         "filament_colour": model.filaments.iter().map(|c| format!("{}FF", c.to_uppercase())).collect::<Vec<_>>(),
-        "filament_settings_id": rep(&format!("Bambu PLA Basic {suffix}")),
+        "filament_settings_id": rep(&filament),
         "filament_type": rep("PLA"),
         "filament_minimal_purge_on_wipe_tower": rep("15"),
         "filament_flow_ratio": rep("0.98"),
@@ -194,7 +159,7 @@ fn project_json(model: &Model) -> String {
         "flush_volumes_matrix": flush,
         "flush_volumes_vector": vec!["140"; 2 * n],
         "wipe_tower_x": ["15"],
-        "wipe_tower_y": ["145"],
+        "wipe_tower_y": [tower_y],
         "wipe_tower_rotation_angle": "0",
         "wipe_tower_no_sparse_layers": "0",
         "wipe_speed": "80%",
@@ -202,14 +167,24 @@ fn project_json(model: &Model) -> String {
         "print_sequence": "by layer",
         "printer_model": printer_model,
         "printer_settings_id": printer_id,
-        "nozzle_diameter": ["0.4"],
+        "nozzle_diameter": [nozzle],
         "print_settings_id": process,
         "layer_change_gcode": "; layer change\nG92 E0\n",
         "from": "project",
         "name": "project_settings",
         "version": "02.03.01.00"
-    }))
-    .unwrap_or_default()
+    });
+    if printer.profile.custom {
+        let [w, d, h] = printer.profile.volume_mm;
+        let obj = cfg.as_object_mut().expect("config is an object");
+        obj.insert(
+            "printable_area".into(),
+            serde_json::json!(["0x0", format!("{w}x0"), format!("{w}x{d}"), format!("0x{d}")]),
+        );
+        obj.insert("printable_height".into(), serde_json::json!(format!("{h}")));
+        obj.insert("layer_height".into(), serde_json::json!(format!("{}", printer.layer_mm())));
+    }
+    serde_json::to_string_pretty(&cfg).unwrap_or_default()
 }
 
 const CONTENT_TYPES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n</Types>\n";
@@ -255,7 +230,7 @@ mod tests {
             name: "test & co",
             parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint }],
             filaments: vec!["#4d2720".into(), "#222222".into(), "#E8A461".into()],
-            printer: Printer::A1,
+            printer: Printer::default(),
         };
         let mut buf = Cursor::new(Vec::new());
         write(&mut buf, &model).unwrap();
@@ -272,6 +247,44 @@ mod tests {
         let mut main = String::new();
         zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut main).unwrap();
         assert!(main.contains("test &amp; co") && main.contains("objectid=\"2\""));
+        assert!(main.contains("1 0 0 0 1 0 0 0 1 128 128 0"));
+        assert_eq!(v["printer_settings_id"], "Bambu Lab A1 0.4 nozzle");
+        assert!(v.get("printable_area").is_none());
+    }
+
+    fn config(printer: Printer) -> serde_json::Value {
+        let model = Model { name: "t", parts: vec![], filaments: vec!["#FFFFFF".into()], printer };
+        serde_json::from_str(&project_json(&model)).unwrap()
+    }
+
+    #[test]
+    fn names_the_presets_for_the_nozzle() {
+        let x1c = catalog().into_iter().find(|p| p.id == "Bambu Lab X1 Carbon").unwrap();
+        let v = config(Printer::new(x1c, 0.6));
+        assert_eq!(v["printer_model"], "Bambu Lab X1 Carbon");
+        assert_eq!(v["printer_settings_id"], "Bambu Lab X1 Carbon 0.6 nozzle");
+        assert_eq!(v["print_settings_id"], "0.30mm Standard @BBL X1C 0.6 nozzle");
+        assert_eq!(v["filament_settings_id"][0], "Bambu PLA Basic @BBL X1C 0.6 nozzle");
+        assert_eq!(v["nozzle_diameter"][0], "0.6");
+    }
+
+    #[test]
+    fn custom_printer_carries_its_volume() {
+        let p = PrinterProfile {
+            id: "custom-1".into(),
+            vendor: String::new(),
+            name: "Ender 3".into(),
+            volume_mm: [220.0, 120.0, 250.0],
+            nozzles: vec![0.4, 0.6],
+            base: None,
+            custom: true,
+        };
+        let v = config(Printer::new(p, 0.6));
+        assert_eq!(v["printer_settings_id"], "Ender 3");
+        assert_eq!(v["printable_area"][2], "220x120");
+        assert_eq!(v["printable_height"], "250");
+        assert_eq!(v["layer_height"], "0.3");
+        assert_eq!(v["wipe_tower_y"][0], "80");
     }
 }
 

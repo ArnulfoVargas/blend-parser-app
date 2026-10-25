@@ -177,6 +177,7 @@ dependencies = [
 name = "bp-3mf"
 version = "0.0.2"
 dependencies = [
+ "serde",
  "serde_json",
  "zip 2.6.1",
 ]

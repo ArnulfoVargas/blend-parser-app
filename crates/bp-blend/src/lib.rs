@@ -328,7 +328,7 @@ mod tests {
                 .map(|p| bp_3mf::Part { name: &p.name, positions: &p.positions, tris: &p.tris, paint: &p.paint })
                 .collect(),
             filaments,
-            printer: bp_3mf::Printer::A1,
+            printer: bp_3mf::Printer::default(),
         };
         let out = std::env::temp_dir().join("blendparser-integration.3mf");
         bp_3mf::write(std::fs::File::create(&out).unwrap(), &model).unwrap();

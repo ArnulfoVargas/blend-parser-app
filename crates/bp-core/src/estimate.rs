@@ -20,16 +20,15 @@ pub struct SwapEstimate {
     pub purge_grams: f32,
 }
 
-pub const LAYER_MM: f32 = 0.2;
 pub const FLUSH_MM3: f32 = 280.0;
 const PLA_G_PER_MM3: f32 = 0.001_24;
 
-/// `scale` turns mesh units into millimetres.
-pub fn estimate(mesh: &Mesh, trees: &[Vec<Node>], scale: f32) -> SwapEstimate {
+/// `scale` turns mesh units into millimetres; layers are `layer_mm` tall.
+pub fn estimate(mesh: &Mesh, trees: &[Vec<Node>], scale: f32, layer_mm: f32) -> SwapEstimate {
     let Some((lo, hi)) = mesh.bounds() else { return SwapEstimate::default() };
-    let layers = (((hi[2] - lo[2]) * scale / LAYER_MM).ceil() as usize).max(1);
+    let layers = (((hi[2] - lo[2]) * scale / layer_mm).ceil() as usize).max(1);
     let mut masks = vec![0u32; layers];
-    let layer_of = |z: f32| ((((z - lo[2]) * scale) / LAYER_MM) as usize).min(layers - 1);
+    let layer_of = |z: f32| ((((z - lo[2]) * scale) / layer_mm) as usize).min(layers - 1);
     for (part, nodes) in mesh.parts.iter().zip(trees) {
         for (ti, node) in nodes.iter().enumerate() {
             let c = part.corners(ti);
@@ -93,9 +92,11 @@ mod tests {
             parts: vec![MeshPart { name: "t".into(), positions, tris: vec![[0, 1, 2], [3, 4, 5]], origin: None }],
             repair: Default::default(),
         };
-        let e = estimate(&mesh, &[vec![Node::Leaf(0), Node::Leaf(1)]], 1.0);
+        let trees = [vec![Node::Leaf(0), Node::Leaf(1)]];
+        let e = estimate(&mesh, &trees, 1.0, 0.2);
         assert_eq!(e.layers, 10);
         assert_eq!(e.swaps, 1);
         assert_eq!(e.multicolor_layers, 0);
+        assert_eq!(estimate(&mesh, &trees, 1.0, 0.4).layers, 5);
     }
 }

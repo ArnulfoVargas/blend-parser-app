@@ -59,6 +59,8 @@ pub struct SettingsDto {
     pub border_detail: u8,
     pub min_island_mm2: f32,
     pub printer: String,
+    pub nozzle_mm: f32,
+    pub layer_mm: f32,
 }
 
 #[derive(Serialize)]
@@ -75,6 +77,11 @@ pub struct Summary {
     pub size_mm: [f32; 3],
     pub bed_mm: [f32; 2],
     pub fits_bed: bool,
+    pub max_height_mm: f32,
+    pub fits_height: bool,
+    /// Colour patches under `min_detail_mm2`, too small for the nozzle.
+    pub small_islands: usize,
+    pub min_detail_mm2: f32,
     pub contact_mm2: f32,
     pub repair: RepairDto,
     pub estimate: EstimateDto,
@@ -102,12 +109,34 @@ pub struct PaintDto {
     pub tris: Vec<u32>,
 }
 
+/// Every printer to pick from, the current pick, and what a custom one can use.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintersDto {
+    pub profiles: Vec<bp_3mf::PrinterProfile>,
+    pub selected: String,
+    pub nozzle_mm: f32,
+    /// Nozzles a custom printer can take.
+    pub nozzles: Vec<f32>,
+}
+
+pub fn printers(store: &crate::profiles::Store) -> PrintersDto {
+    let p = store.printer();
+    PrintersDto {
+        profiles: store.profiles(),
+        selected: p.profile.id,
+        nozzle_mm: p.nozzle_mm,
+        nozzles: bp_3mf::NOZZLES.to_vec(),
+    }
+}
+
 pub fn summary(doc: &crate::state::Document) -> Summary {
     let p: &Project = &doc.project;
     let stats = p.stats();
     let MeshOps { keep_ratio, flatten_mm, repair, min_piece_mm } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
+    let min_detail = doc.printer.min_detail_mm2();
     Summary {
         file_name: doc.file_name.clone(),
         file_size: doc.file_size,
@@ -136,6 +165,10 @@ pub fn summary(doc: &crate::state::Document) -> Summary {
         size_mm: stats.size_mm,
         bed_mm: [bed.0, bed.1],
         fits_bed: stats.size_mm[0] <= bed.0 && stats.size_mm[1] <= bed.1,
+        max_height_mm: doc.printer.max_height_mm(),
+        fits_height: stats.size_mm[2] <= doc.printer.max_height_mm(),
+        small_islands: p.small_islands(min_detail),
+        min_detail_mm2: min_detail,
         contact_mm2: stats.contact_mm2,
         repair: RepairDto {
             welded_vertices: stats.repair.welded_vertices,
@@ -158,7 +191,9 @@ pub fn summary(doc: &crate::state::Document) -> Summary {
             min_piece_mm,
             border_detail,
             min_island_mm2,
-            printer: doc.printer_id.clone(),
+            printer: doc.printer.profile.id.clone(),
+            nozzle_mm: doc.printer.nozzle_mm,
+            layer_mm: doc.printer.layer_mm(),
         },
         can_undo: p.can_undo(),
         undo_label: p.undo_label().map(str::to_string),

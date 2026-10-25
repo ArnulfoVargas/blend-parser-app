@@ -92,6 +92,33 @@ pub fn despeckle(
     changed
 }
 
+/// How many islands of one colour are smaller than `min_area` (source units²).
+pub fn small_islands(part: &MeshPart, adj: &[Vec<(u32, f32)>], nodes: &[Node], min_area: f32) -> usize {
+    let label: Vec<u8> = nodes.iter().map(Node::dominant).collect();
+    let mut seen = vec![false; nodes.len()];
+    let mut stack = Vec::new();
+    let mut count = 0;
+    for seed in 0..nodes.len() {
+        if seen[seed] {
+            continue;
+        }
+        seen[seed] = true;
+        stack.push(seed as u32);
+        let mut area = 0.0f32;
+        while let Some(t) = stack.pop() {
+            area += geom::area(&part.corners(t as usize));
+            for &(o, _) in &adj[t as usize] {
+                if !seen[o as usize] && label[o as usize] == label[seed] {
+                    seen[o as usize] = true;
+                    stack.push(o);
+                }
+            }
+        }
+        count += (area < min_area) as usize;
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +150,18 @@ mod tests {
         let changed = despeckle(&part, &adj, &mut nodes, &[false; 20], 2.0);
         assert_eq!(changed, 2);
         assert!(nodes.iter().all(|n| *n == Node::Leaf(0)));
+    }
+
+    #[test]
+    fn counts_islands_under_the_area() {
+        let part = strip(10);
+        let adj = adjacency(&part);
+        let mut nodes: Vec<Node> = (0..20).map(|_| Node::Leaf(0)).collect();
+        nodes[8] = Node::Leaf(1);
+        nodes[9] = Node::Leaf(1);
+        // The 1 mm² island counts; the 9 mm² rest of the strip does not.
+        assert_eq!(small_islands(&part, &adj, &nodes, 2.0), 1);
+        assert_eq!(small_islands(&part, &adj, &nodes, 0.5), 0);
     }
 
     #[test]

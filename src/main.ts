@@ -10,7 +10,8 @@ import "./styles/app.css";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
-import { api, type Summary } from "./api";
+import { api, type PrinterProfile, type Printers, type Summary } from "./api";
+import { Picker, type PickerItem } from "./picker";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { Viewer, type Tool, type View } from "./viewer";
 
@@ -20,8 +21,11 @@ const app = document.querySelector<HTMLElement>("[data-app]")!;
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 const live = $<HTMLParagraphElement>("#live");
 const nf = (n: number, d = 0) => n.toLocaleString("es", { maximumFractionDigits: d, minimumFractionDigits: d });
+/** Millimetres as a printer spec reads them: 0,4, 0,25, 256. */
+const mm = (n: number) => n.toLocaleString("es", { maximumFractionDigits: 2 });
 
 let summary: Summary | null = null;
+let printers: Printers | null = null;
 /** Swaps before the last change, to show what a setting did. */
 let previousSwaps: number | null = null;
 let brushSlot = 0;
@@ -132,10 +136,15 @@ function render(s: Summary) {
   const [x, y, z] = s.sizeMm;
   bind("dims", `${nf(x, 1)} × ${nf(y, 1)} × ${nf(z, 1)} mm`);
   const plate = `${nf(s.bedMm[0])} × ${nf(s.bedMm[1])} mm`;
-  bind("bedFit", s.fitsBed ? `Cabe en la placa de ${plate}.` : `No cabe en la placa de ${plate}.`);
-  bind("fitBanner", `No cabe en la placa: mide ${nf(x)} × ${nf(y)} mm.`);
-  $<HTMLDivElement>("#fit-banner").hidden = s.fitsBed;
-  app.classList.toggle("is-oversize", !s.fitsBed);
+  const fits = s.fitsBed && s.fitsHeight;
+  bind("bedFit", !s.fitsBed
+    ? `No cabe en la placa de ${plate}.`
+    : !s.fitsHeight
+      ? `Mide ${nf(z)} mm de alto y la impresora llega a ${nf(s.maxHeightMm)} mm.`
+      : `Cabe en la placa de ${plate} y en sus ${nf(s.maxHeightMm)} mm de alto.`);
+  bind("fitBanner", !s.fitsBed ? `No cabe en la placa: mide ${nf(x)} × ${nf(y)} mm.` : `Es demasiado alto: mide ${nf(z)} mm y la impresora llega a ${nf(s.maxHeightMm)} mm.`);
+  $<HTMLDivElement>("#fit-banner").hidden = fits;
+  app.classList.toggle("is-oversize", !fits);
   bind("exportLabel", "Exportar .3mf");
 
   // Settings.
@@ -148,8 +157,14 @@ function render(s: Summary) {
   setIfIdle("#island", String(st.minIslandMm2));
   setIfIdle("#reduce-to", String(Math.max(1, s.slots.length - 1)));
   $<HTMLInputElement>("#repair").checked = st.repair;
-  $<HTMLSelectElement>("#printer").value = st.printer;
+  renderPrinterPick(st.printer, st.nozzleMm);
   syncOutputs();
+
+  // Colour patches the nozzle cannot draw.
+  const fixTo = Math.ceil(s.minDetailMm2);
+  $<HTMLDivElement>("#detail-note").hidden = s.smallIslands === 0;
+  bind("detailNote", `${nf(s.smallIslands)} ${s.smallIslands === 1 ? "mancha de color mide" : "manchas de color miden"} menos de ${mm(s.minDetailMm2)} mm². Con boquilla de ${mm(st.nozzleMm)} mm salen borrosas o no salen.`);
+  bind("detailFix", `Limpiar islas menores de ${fixTo} mm²`);
   document.querySelectorAll<HTMLInputElement>("#count input").forEach((i) => (i.checked = Number(i.value) === s.slots.length));
 
   // Mesh.
@@ -176,7 +191,7 @@ function render(s: Summary) {
   const deltaEl = document.querySelector<HTMLElement>('[data-bind="swapsDelta"]')!;
   deltaEl.textContent = delta === 0 ? "" : `(${delta < 0 ? "−" : "+"}${nf(Math.abs(delta))} con el último ajuste)`;
   deltaEl.classList.toggle("is-better", delta < 0);
-  bind("swapsDetail", `${nf(s.estimate.purgeGrams)} g de purga; ${nf(s.estimate.multicolorLayers)} de ${nf(s.estimate.layers)} capas llevan más de un color. Estimado a 0,2 mm por capa.`);
+  bind("swapsDetail", `${nf(s.estimate.purgeGrams)} g de purga; ${nf(s.estimate.multicolorLayers)} de ${nf(s.estimate.layers)} capas llevan más de un color. Estimado a ${mm(st.layerMm)} mm por capa.`);
 
   renderSlots(s);
   const mats = $<HTMLDListElement>("#materials");
@@ -322,9 +337,13 @@ void getCurrentWebview().onDragDropEvent((e) => {
 // ---- export ------------------------------------------------------------------------------
 
 async function confirmOversize(): Promise<boolean> {
-  if (!summary || summary.fitsBed) return true;
-  return ask(`El modelo mide ${nf(summary.sizeMm[0])} × ${nf(summary.sizeMm[1])} mm y no cabe en la placa de ${nf(summary.bedMm[0])} × ${nf(summary.bedMm[1])} mm. ¿Exportar de todos modos?`, {
-    title: "No cabe en la placa",
+  if (!summary || (summary.fitsBed && summary.fitsHeight)) return true;
+  const [x, y, z] = summary.sizeMm;
+  const why = !summary.fitsBed
+    ? `El modelo mide ${nf(x)} × ${nf(y)} mm y no cabe en la placa de ${nf(summary.bedMm[0])} × ${nf(summary.bedMm[1])} mm.`
+    : `El modelo mide ${nf(z)} mm de alto y la impresora llega a ${nf(summary.maxHeightMm)} mm.`;
+  return ask(`${why} ¿Exportar de todos modos?`, {
+    title: "No cabe en la impresora",
     kind: "warning",
     okLabel: "Exportar igual",
     cancelLabel: "Cancelar",
@@ -391,13 +410,13 @@ $("#height").addEventListener("change", (e) => {
   else toast("La altura debe estar entre 1 y 1000 mm.", "error");
 });
 
-// Largest height whose footprint fits 90% of the plate.
+// Largest height whose footprint fits 90% of the plate and that the printer reaches.
 $("#fit").addEventListener("click", () => {
   if (!summary) return;
   const [x, y] = summary.sizeMm;
   const k = Math.min((summary.bedMm[0] * 0.9) / x, (summary.bedMm[1] * 0.9) / y);
-  const mm = Math.floor(summary.settings.heightMm * k * 10) / 10;
-  void apply(() => api.setHeight(mm), () => toast(`Altura ajustada a ${nf(mm, 1)} mm para que quepa en la placa.`));
+  const h = Math.floor(Math.min(summary.settings.heightMm * k, summary.maxHeightMm) * 10) / 10;
+  void apply(() => api.setHeight(h), () => toast(`Altura ajustada a ${nf(h, 1)} mm para que quepa en la impresora.`));
 });
 
 const meshOps = () => void apply(() => api.setMeshOps(
@@ -469,9 +488,250 @@ $("#reduce").addEventListener("click", () => {
     toast(`Colores unidos: ahora hay ${n}.`, "ok", { label: "Deshacer", run: () => void undo() }));
 });
 
-$("#printer").addEventListener("change", (e) => {
-  void work(async () => render(await api.setPrinter((e.target as HTMLSelectElement).value)));
+$("#detail-fix").addEventListener("click", () => {
+  if (!summary) return;
+  const island = $<HTMLInputElement>("#island");
+  island.value = String(Math.ceil(summary.minDetailMm2));
+  syncOutputs();
+  colorOps();
 });
+
+// ---- printers ------------------------------------------------------------------------------
+
+const nozzleSelect = $<HTMLSelectElement>("#nozzle");
+const profileOf = (id: string) => printers?.profiles.find((p) => p.id === id);
+const closest = (list: number[], n: number) => list.reduce((a, b) => (Math.abs(b - n) < Math.abs(a - n) ? b : a), list[0]);
+const volumeText = (p: PrinterProfile) => `${mm(p.volumeMm[0])} × ${mm(p.volumeMm[1])} × ${mm(p.volumeMm[2])} mm`;
+/** "Bambu Lab A1" reads as "A1" under its Bambu Lab heading. */
+const shortName = (p: PrinterProfile) => (p.vendor && p.name.startsWith(`${p.vendor} `) ? p.name.slice(p.vendor.length + 1) : p.name);
+const nozzleList = (ns: number[]) => {
+  const t = ns.map(mm);
+  return `${t.length > 1 ? `${t.slice(0, -1).join(", ")} o ${t[t.length - 1]}` : t[0]} mm`;
+};
+
+/** Every printer as a picker item: the user's first, then by brand as the catalogue orders them. */
+function printerItems(): PickerItem[] {
+  const all = printers?.profiles ?? [];
+  return [...all.filter((p) => p.custom), ...all.filter((p) => !p.custom)].map((p) => ({
+    value: p.id,
+    label: shortName(p),
+    group: p.custom ? "Mis impresoras" : p.vendor,
+    detail: `${volumeText(p)}, boquilla de ${nozzleList(p.nozzles)}`,
+    keywords: p.name,
+    full: p.name,
+  }));
+}
+
+const printerPicker = new Picker($("#printer-picker"), {
+  label: "Impresora",
+  placeholder: "Buscar impresora o marca",
+  empty: (q) => `Ninguna impresora coincide con «${q}».`,
+  emptyAction: { label: "Crear una impresora propia", run: (q) => openPrinterDialog(q) },
+  onPick: (id) => void choosePrinter(id, Number(nozzleSelect.value)),
+});
+
+/** The bar's printer and nozzle pickers. */
+function renderPrinterPick(id: string, nozzle: number) {
+  if (!printers) return;
+  printers.selected = id;
+  printers.nozzleMm = nozzle;
+  printerPicker.setItems(printerItems());
+  printerPicker.setValue(id);
+  const profile = profileOf(id);
+  nozzleSelect.replaceChildren(...(profile?.nozzles ?? [nozzle]).map((n) => new Option(`${mm(n)} mm`, String(n))));
+  nozzleSelect.value = String(nozzle);
+  nozzleSelect.disabled = (profile?.nozzles.length ?? 1) < 2;
+}
+
+/** Picks a printer; the open model is prepared again for its nozzle. */
+async function choosePrinter(id: string, nozzle: number) {
+  const profile = profileOf(id);
+  if (!profile) return;
+  const n = profile.nozzles.includes(nozzle) ? nozzle : closest(profile.nozzles, nozzle);
+  await work(async () => {
+    previousSwaps = summary?.estimate.swaps ?? null;
+    const s = await api.setPrinter(id, n);
+    renderPrinterPick(id, n);
+    if (s) {
+      render(s);
+      await reloadMesh();
+    }
+  });
+}
+
+nozzleSelect.addEventListener("change", () => void choosePrinter(printerPicker.value, Number(nozzleSelect.value)));
+
+// The custom printer dialog: a list of the user's printers and one form to add or edit.
+const printerDialog = $<HTMLDialogElement>("#printer-dialog");
+const printerForm = $<HTMLFormElement>("#printer-form");
+const printerError = $<HTMLParagraphElement>("#printer-error");
+const pf = {
+  name: $<HTMLInputElement>("#pf-name"),
+  w: $<HTMLInputElement>("#pf-w"),
+  d: $<HTMLInputElement>("#pf-d"),
+  h: $<HTMLInputElement>("#pf-h"),
+};
+let editing = "";
+
+// The Bambu Studio profile a custom printer borrows; picking one fills in its volume when still empty.
+const basePicker = new Picker($("#pf-base"), {
+  label: "Perfil de Bambu Studio",
+  placeholder: "Buscar impresora o marca",
+  empty: (q) => `Bambu Studio no trae ninguna impresora que coincida con «${q}». Déjala genérica.`,
+  onPick: (id) => {
+    const base = profileOf(id);
+    if (!base) return;
+    [pf.w, pf.d, pf.h].forEach((el, i) => {
+      if (!el.value) el.value = String(base.volumeMm[i]);
+    });
+  },
+});
+
+basePicker.button.setAttribute("aria-describedby", "pf-base-help");
+
+function baseItems(): PickerItem[] {
+  const generic: PickerItem = { value: "", label: "Ninguno: impresora genérica", group: "", detail: "El 3MF lleva solo el volumen y la boquilla" };
+  return [generic, ...printerItems().filter((i) => i.group !== "Mis impresoras")];
+}
+
+function renderPrinterList() {
+  if (!printers) return;
+  const mine = printers.profiles.filter((p) => p.custom);
+  $<HTMLParagraphElement>("#printer-empty").hidden = mine.length > 0;
+  const list = $<HTMLUListElement>("#printer-list");
+  list.hidden = mine.length === 0;
+  list.replaceChildren(...mine.map((p) => {
+    const li = document.createElement("li");
+    li.className = "printers__row";
+    li.toggleAttribute("aria-current", p.id === editing);
+    const base = p.base ? profileOf(p.base)?.name : undefined;
+    li.innerHTML = `
+      <div class="printers__text">
+        <strong></strong>
+        <span class="help"></span>
+      </div>
+      <button class="btn btn--quiet btn--sm" type="button" data-act="edit">Editar</button>
+      <button class="btn btn--quiet btn--sm" type="button" data-act="delete">Borrar</button>`;
+    li.querySelector("strong")!.textContent = p.name;
+    li.querySelector(".help")!.textContent = `${volumeText(p)}, boquilla de ${nozzleList(p.nozzles)}. ${base ? `Perfil de ${base}.` : "Genérica."}`;
+    li.querySelector('[data-act="edit"]')!.addEventListener("click", () => fillPrinterForm(p));
+    li.querySelector('[data-act="delete"]')!.addEventListener("click", () => void deletePrinter(p));
+    return li;
+  }));
+}
+
+function fillPrinterForm(p: PrinterProfile | null) {
+  editing = p?.id ?? "";
+  $("#h-printer-form").textContent = p ? `Editar ${p.name}` : "Nueva impresora";
+  $<HTMLButtonElement>("#printer-new").hidden = !p;
+  pf.name.value = p?.name ?? "";
+  [pf.w.value, pf.d.value, pf.h.value] = (p?.volumeMm ?? ["", "", ""]).map(String);
+  basePicker.setValue(p?.base ?? "");
+  const nozzles = p?.nozzles ?? [0.4];
+  document.querySelectorAll<HTMLInputElement>("#pf-nozzles input").forEach((i) => (i.checked = nozzles.includes(Number(i.value))));
+  for (const el of [pf.name, pf.w, pf.d, pf.h]) el.removeAttribute("aria-invalid");
+  printerError.hidden = true;
+  renderPrinterList();
+}
+
+/** Opens the custom printer dialog, the name filled in when it comes from a search. */
+function openPrinterDialog(name = "") {
+  if (!printers) return;
+  basePicker.setItems(baseItems());
+  $("#pf-nozzles").replaceChildren(
+    Object.assign(document.createElement("legend"), { textContent: "Boquillas que admite, en mm" }),
+    ...printers.nozzles.flatMap((n) => {
+      const input = Object.assign(document.createElement("input"), { type: "checkbox", id: `pf-n${n}`, value: String(n), name: "pf-nozzle" });
+      const label = Object.assign(document.createElement("label"), { htmlFor: input.id, textContent: mm(n) });
+      return [input, label];
+    }),
+  );
+  fillPrinterForm(null);
+  pf.name.value = name;
+  printerDialog.showModal();
+  pf.name.focus();
+}
+
+function printerFormError(message: string, field?: HTMLElement) {
+  printerError.textContent = message;
+  printerError.hidden = false;
+  field?.setAttribute("aria-invalid", "true");
+  field?.focus();
+}
+
+printerForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const save = $<HTMLButtonElement>("#printer-save");
+  if (save.getAttribute("aria-busy") === "true") return;
+  for (const el of [pf.name, pf.w, pf.d, pf.h]) el.removeAttribute("aria-invalid");
+  printerError.hidden = true;
+  const name = pf.name.value.trim();
+  if (!name) return printerFormError("Ponle un nombre a la impresora.", pf.name);
+  const volume = [pf.w, pf.d, pf.h].map((el) => Number(el.value));
+  const bad = [pf.w, pf.d, pf.h].find((el, i) => !el.value || !(volume[i] >= 20 && volume[i] <= 2000));
+  if (bad) return printerFormError("Ancho, fondo y alto van entre 20 y 2000 mm.", bad);
+  const nozzles = [...document.querySelectorAll<HTMLInputElement>("#pf-nozzles input:checked")].map((i) => Number(i.value));
+  if (!nozzles.length) return printerFormError("Marca al menos una boquilla.", document.querySelector<HTMLInputElement>("#pf-nozzles input") ?? undefined);
+  const profile: PrinterProfile = { id: editing, name, volumeMm: volume as [number, number, number], nozzles, base: basePicker.value || null, vendor: "", custom: true };
+  save.setAttribute("aria-busy", "true");
+  save.textContent = "Guardando…";
+  try {
+    const nozzle = closest(nozzles, printers?.nozzleMm ?? 0.4);
+    printers = await api.savePrinter(profile, nozzle);
+    previousSwaps = summary?.estimate.swaps ?? null;
+    if (summary) {
+      // The open model now follows the saved printer.
+      const s = await api.setPrinter(printers.selected, printers.nozzleMm);
+      if (s) {
+        render(s);
+        await reloadMesh();
+      }
+    }
+    renderPrinterPick(printers.selected, printers.nozzleMm);
+    const saved = printers.profiles.find((p) => p.id === printers!.selected) ?? null;
+    fillPrinterForm(saved);
+    toast(`${name} guardada y elegida. Seguirá aquí la próxima vez que abras BlendParser.`);
+  } catch (err) {
+    printerFormError(String(err));
+  } finally {
+    save.removeAttribute("aria-busy");
+    save.textContent = "Guardar impresora";
+  }
+});
+
+async function deletePrinter(p: PrinterProfile) {
+  const ok = await ask(`Se borrará ${p.name} de tus impresoras. Los 3MF que ya exportaste no cambian.`, {
+    title: "Borrar impresora",
+    kind: "warning",
+    okLabel: "Borrar",
+    cancelLabel: "Cancelar",
+  });
+  if (!ok) return;
+  try {
+    const wasSelected = printers?.selected === p.id;
+    printers = await api.deletePrinter(p.id);
+    if (wasSelected && summary) {
+      const s = await api.setPrinter(printers.selected, printers.nozzleMm);
+      if (s) {
+        render(s);
+        await reloadMesh();
+      }
+    }
+    renderPrinterPick(printers.selected, printers.nozzleMm);
+    if (editing === p.id) fillPrinterForm(null);
+    else renderPrinterList();
+    toast(`${p.name} borrada.`);
+  } catch (err) {
+    printerFormError(String(err));
+  }
+}
+
+$("#open-printers").addEventListener("click", () => openPrinterDialog());
+$("#printer-new").addEventListener("click", () => {
+  fillPrinterForm(null);
+  pf.name.focus();
+});
+$("#printer-close").addEventListener("click", () => printerDialog.close());
 
 // Shortcuts from the filament-change summary to the controls that lower it.
 function reveal(groupSel: string, focusSel: string) {
@@ -514,7 +774,7 @@ $("#undo").addEventListener("click", () => void undo());
 
 window.addEventListener("keydown", (e) => {
   const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement;
-  if (typing || app.dataset.state !== "ready" || zipDialog.open) return;
+  if (typing || app.dataset.state !== "ready" || zipDialog.open || printerDialog.open) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
     e.preventDefault();
     void undo();
@@ -583,6 +843,10 @@ versionBtn.addEventListener("click", () => {
 
 setState("empty");
 setTool("orbit");
+void api.printers().then((p) => {
+  printers = p;
+  renderPrinterPick(p.selected, p.nozzleMm);
+});
 void currentVersion().then((v) => bind("version", `v${v}`));
 // Check quietly once the window has settled; only a newer version is announced.
 window.setTimeout(() => void checkForUpdates(true), 4000);
