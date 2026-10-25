@@ -72,6 +72,31 @@ seguridad**: sin ella, las instalaciones existentes no aceptarán actualizacione
 
 ## Publicar una versión
 
+Cada PR fusionada a `main` publica una versión automáticamente cuando pasan todas las
+comprobaciones de CI. Por defecto incrementa el parche (`0.0.2` → `0.0.3`); añade a la PR
+la etiqueta `release:minor` o `release:major` antes de fusionarla para subir esos componentes.
+Si tiene ambas, gana `release:major`. Un push directo a `main` no publica una versión.
+
+La automatización toma la versión más alta entre los tags `alpha-*`, `beta-*`, `v*` y la
+versión del código. Actualiza los manifiestos y lockfiles en un commit de release derivado
+del commit que pasó CI, y sube solamente tags: **no escribe en `main`** ni necesita un PAT.
+La versión en `main` puede quedar por debajo de la publicada; la versión distribuida está
+en su tag `alpha-X.Y.Z`. El tag `release-source-<sha>` permite reintentar el mismo commit
+sin crear otra versión. Las reservas de tags son atómicas para evitar colisiones.
+
+El workflow reutilizable de Release se invoca directamente desde CI, porque los tags
+creados con `GITHUB_TOKEN` no disparan otro workflow. Compila y firma Windows y Linux,
+valida que `latest.json` contenga ambas plataformas y entonces publica el borrador.
+Si falla una build, el release queda como borrador y la versión anterior sigue disponible.
+Reintenta con **Re-run all jobs** en CI o con **Actions → Release → Run workflow**, indicando
+el tag existente. Un release ya publicado se omite. No borres los tags de seguimiento.
+
+Los secretos `TAURI_SIGNING_PRIVATE_KEY` y `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` deben seguir
+configurados en GitHub. El workflow solicita `contents: write`; no requiere permitir que
+Actions apruebe PRs ni cambiar las protecciones de `main`.
+
+Para crear una versión manualmente:
+
 ```sh
 npm run release -- 0.0.3 --push
 ```

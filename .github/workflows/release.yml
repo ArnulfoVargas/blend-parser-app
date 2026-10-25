@@ -6,14 +6,66 @@ name: Release
 on:
   push:
     tags: ["alpha-*", "beta-*", "v*"]
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag existente que se quiere publicar o reintentar
+        required: true
+        type: string
+
+# A rerun must not upload to a release while another run is publishing it.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      id: ${{ steps.release.outputs.id }}
+      build: ${{ steps.release.outputs.build }}
+    steps:
+      - uses: actions/github-script@v7
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            if (!/^(alpha-|beta-|v)\d+\.\d+\.\d+$/.test(tag)) throw new Error('Tag inválido');
+            // Ref must exist; never create a release from the workflow's default ref.
+            await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              release = (await github.rest.repos.createRelease({
+                ...context.repo, tag_name: tag, name: `BlendParser ${tag}`,
+                draft: true, prerelease: false, generate_release_notes: true,
+                body: 'Blender 3.6 o posterior requerido. Windows: .exe/.msi; Linux: .AppImage/.deb. Incluye actualizaciones automáticas firmadas. Los instaladores no llevan firma de código de Windows.',
+              })).data;
+            }
+            core.setOutput('tag', tag);
+            core.setOutput('id', release.id);
+            core.setOutput('build', release.draft);
+
   build:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
     strategy:
       fail-fast: false
+      # Both jobs merge latest.json into the same asset; serialize their uploads.
+      max-parallel: 1
       matrix:
         include:
           - platform: windows-latest
@@ -21,12 +73,16 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
       - name: El tag coincide con la versión de la app
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           app=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          tag="${GITHUB_REF_NAME#*-}"; tag="${tag#v}"
-          if [ "$app" != "$tag" ]; then echo "El tag $GITHUB_REF_NAME no coincide con la versión $app"; exit 1; fi
+          tag="${RELEASE_TAG#*-}"; tag="${tag#v}"
+          if [ "$app" != "$tag" ]; then echo "El tag $RELEASE_TAG no coincide con la versión $app"; exit 1; fi
       - name: Dependencias de sistema (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -45,8 +101,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "BlendParser ${{ github.ref_name }}"
+          releaseId: ${{ needs.prepare.outputs.id }}
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: "BlendParser ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
             Versión de prueba de BlendParser: de .blend con materiales a 3MF multicolor para Bambu Studio.
 
@@ -58,7 +115,67 @@ jobs:
             Si ya tienes BlendParser 0.0.2 o posterior, se actualiza solo al abrirlo (en Linux, con el AppImage).
 
             Los instaladores no llevan firma de código: Windows SmartScreen puede pedir "Más información > Ejecutar de todas formas".
-          releaseDraft: false
+          releaseDraft: true
           # Publicado como versión normal: el actualizador lee releases/latest, que ignora los prereleases.
           prerelease: false
           updaterJsonPreferNsis: true
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+      - name: Descargar y validar el manifiesto de ambas plataformas
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          gh release download "$RELEASE_TAG" --pattern latest.json --dir "$RUNNER_TEMP/updater"
+          node --input-type=module - "$RUNNER_TEMP/updater/latest.json" <<'JS'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const version = process.env.RELEASE_TAG.replace(/^(alpha-|beta-|v)/, '');
+          if (manifest.version !== version) throw new Error('Versión incorrecta en latest.json');
+          for (const platform of ['windows-x86_64', 'linux-x86_64']) {
+            const entry = manifest.platforms?.[platform];
+            if (!entry?.signature || !entry?.url) throw new Error(`Falta ${platform} o su firma`);
+          }
+          JS
+      - name: Publicar solamente cuando ambas builds hayan terminado
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_ID: ${{ needs.prepare.outputs.id }}
+        with:
+          script: |
+            const parse = tag => tag.replace(/^(alpha-|beta-|v)/, '').split('.').map(Number);
+            const newer = (a, b) => {
+              for (let i = 0; i < 3; i++) {
+                if (a[i] !== b[i]) return a[i] > b[i];
+              }
+              return false;
+            };
+            let latest = true;
+            try {
+              const current = (await github.rest.repos.getLatestRelease(context.repo)).data;
+              latest = newer(parse(process.env.RELEASE_TAG), parse(current.tag_name));
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            // Older CI runs may finish after a newer merge. Publish their builds,
+            // but only the current main snapshot can become the updater's latest.
+            const { execFileSync } = require('node:child_process');
+            const markers = execFileSync('git', ['tag', '--points-at', 'HEAD'], { encoding: 'utf8' });
+            const source = markers.split('\n').map(tag => /^release-source-([a-f0-9]{40})$/.exec(tag)?.[1]).find(Boolean);
+            if (source) {
+              const main = (await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' })).data;
+              latest = latest && main.object.sha === source;
+            }
+            await github.rest.repos.updateRelease({
+              ...context.repo, release_id: Number(process.env.RELEASE_ID),
+              draft: false, prerelease: false, make_latest: String(latest),
+            });
