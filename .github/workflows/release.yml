@@ -3,6 +3,10 @@ name: Release
 # Un tag como alpha-0.0.2 o v0.1.0 compila Windows y Linux, firma los paquetes para
 # el actualizador y publica un Release con latest.json. Crea el tag con
 # `npm run release -- <versión>` para que tag y versión coincidan.
+#
+# Firma de código de Windows: con la variable del repo SIGNPATH_PROJECT_SLUG definida,
+# los instaladores de Windows pasan por SignPath (Authenticode) antes de publicarse.
+# Sin ella, salen sin firmar como hasta ahora. Ver CODE_SIGNING.md.
 on:
   push:
     tags: ["alpha-*", "beta-*", "v*"]
@@ -25,6 +29,11 @@ concurrency:
 
 permissions:
   contents: write
+  # SignPath reads the unsigned installers from this run's artifacts.
+  actions: read
+
+env:
+  WINDOWS_SIGNED: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
 
 jobs:
   prepare:
@@ -38,6 +47,7 @@ jobs:
         id: release
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          SIGNING_NOTE: ${{ vars.SIGNPATH_PROJECT_SLUG != '' && 'Los instaladores de Windows llevan firma de código de SignPath Foundation.' || 'Los instaladores no llevan firma de código de Windows.' }}
         with:
           script: |
             const tag = process.env.RELEASE_TAG;
@@ -52,7 +62,7 @@ jobs:
               release = (await github.rest.repos.createRelease({
                 ...context.repo, tag_name: tag, name: `BlendParser ${tag}`,
                 draft: true, prerelease: false, generate_release_notes: true,
-                body: 'Blender 3.6 o posterior requerido. Windows: .exe/.msi; Linux: .AppImage/.deb. Incluye actualizaciones automáticas firmadas. Los instaladores no llevan firma de código de Windows.',
+                body: `Blender 3.6 o posterior requerido. Windows: .exe/.msi; Linux: .AppImage/.deb. Incluye actualizaciones automáticas firmadas. ${process.env.SIGNING_NOTE} Política de firma de código: https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CODE_SIGNING.md`,
               })).data;
             }
             core.setOutput('tag', tag);
@@ -76,6 +86,7 @@ jobs:
         with:
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
       - name: El tag coincide con la versión de la app
+        id: version
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
@@ -83,6 +94,7 @@ jobs:
           app=$(node -p "require('./src-tauri/tauri.conf.json').version")
           tag="${RELEASE_TAG#*-}"; tag="${tag#v}"
           if [ "$app" != "$tag" ]; then echo "El tag $RELEASE_TAG no coincide con la versión $app"; exit 1; fi
+          echo "app=$app" >> "$GITHUB_OUTPUT"
       - name: Dependencias de sistema (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -96,6 +108,8 @@ jobs:
           cache: npm
       - run: npm ci
       - uses: tauri-apps/tauri-action@v0
+        # Signed Windows builds take the steps below instead.
+        if: matrix.platform != 'windows-latest' || env.WINDOWS_SIGNED != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -114,11 +128,66 @@ jobs:
 
             Si ya tienes BlendParser 0.0.2 o posterior, se actualiza solo al abrirlo (en Linux, con el AppImage).
 
-            Los instaladores no llevan firma de código: Windows SmartScreen puede pedir "Más información > Ejecutar de todas formas".
+            ${{ vars.SIGNPATH_PROJECT_SLUG != '' && 'Los instaladores de Windows llevan firma de código de SignPath Foundation. SmartScreen puede avisar en las primeras descargas de cada versión, hasta que el certificado gane reputación.' || 'Los instaladores no llevan firma de código: Windows SmartScreen puede pedir "Más información > Ejecutar de todas formas".' }}
+
+            Política de firma de código: https://github.com/${{ github.repository }}/blob/main/CODE_SIGNING.md
           releaseDraft: true
           # Publicado como versión normal: el actualizador lee releases/latest, que ignora los prereleases.
           prerelease: false
           updaterJsonPreferNsis: true
+
+      # ---- Windows firmado: compilar, firmar en SignPath, volver a firmar para el actualizador y publicar.
+      - name: Compilar instaladores de Windows sin publicar
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --bundles nsis,msi
+      - name: Subir instaladores sin firmar para SignPath
+        id: unsigned
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned
+          # The artifact keeps nsis/ and msi/ as folders, as .signpath/artifact-configuration.xml expects.
+          path: |
+            target/release/bundle/nsis/*_x64-setup.exe
+            target/release/bundle/msi/*_x64_*.msi
+          if-no-files-found: error
+      - name: Firmar en SignPath (espera la aprobación manual)
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          # Each release waits for an approver in SignPath; two hours before the job gives up.
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: signed
+          parameters: |
+            version: "${{ steps.version.outputs.app }}"
+      - name: Comprobar la firma Authenticode
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem signed -Recurse -Include *.exe, *.msi
+          if ($files.Count -lt 2) { throw "SignPath no devolvió los dos instaladores" }
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            if ($sig.Status -ne 'Valid') { throw "$($f.Name): firma $($sig.Status)" }
+            "$($f.Name): firmado por $($sig.SignerCertificate.Subject)"
+          }
+      - name: Publicar los instaladores firmados y su entrada en latest.json
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/publish-signed-windows.mjs signed "${{ needs.prepare.outputs.tag }}"
 
   publish:
     needs: [prepare, build]

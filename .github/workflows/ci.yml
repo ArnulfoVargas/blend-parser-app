@@ -23,7 +23,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: node --test scripts/auto-release.test.mjs
+      - run: node --test scripts/auto-release.test.mjs scripts/publish-signed-windows.test.mjs
       - run: npm run build
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -83,6 +83,7 @@ jobs:
     if: needs.prepare-release.outputs.tag != ''
     permissions:
       contents: write
+      actions: read
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.prepare-release.outputs.tag }}
