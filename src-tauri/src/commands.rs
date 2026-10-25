@@ -263,13 +263,15 @@ pub async fn set_mesh_ops(
     repair: bool,
     min_piece_mm: f32,
 ) -> CmdResult<Summary> {
-    let ops = MeshOps {
-        keep_ratio: keep_ratio.clamp(0.05, 1.0),
-        flatten_mm: flatten_mm.max(0.0),
-        repair,
-        min_piece_mm: min_piece_mm.max(0.0),
-    };
     with_doc(app, move |d, prefs| {
+        // The settings panel has no say over the printability fixes; keep them.
+        let ops = MeshOps {
+            keep_ratio: keep_ratio.clamp(0.05, 1.0),
+            flatten_mm: flatten_mm.max(0.0),
+            repair,
+            min_piece_mm: min_piece_mm.max(0.0),
+            ..d.project.mesh_ops()
+        };
         d.project.set_mesh_ops(ops);
         Ok(dto::summary(d, prefs))
     })
@@ -510,6 +512,101 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
         let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
         bp_3mf::write(std::io::BufWriter::new(file), &model)
             .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
+    })
+    .await
+}
+
+fn printability_for_doc(
+    d: &Document,
+    prefs: &Prefs,
+    params: bp_core::printability::Params,
+) -> bp_core::printability::Report {
+    let project = &d.project;
+    let mut report = project.printability(params);
+    report.printer = Some(d.printer.profile.id.clone());
+    let stats = project.stats();
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
+    let fits = plate.fits && stats.size_mm[2] <= d.printer.max_height_mm();
+    report.checks.push(bp_core::printability::Check::new(
+        "buildVolume",
+        "checked",
+        usize::from(!fits),
+        "error",
+        // Footprint, margin, tower and height all decide this; one number would mislead.
+        None,
+        None,
+        vec![],
+    ));
+    report
+}
+
+/// Runs only on request; large reports never slow down every painting summary.
+#[tauri::command]
+pub async fn analyze_printability(
+    app: AppHandle,
+    params: bp_core::printability::Params,
+) -> CmdResult<bp_core::printability::Report> {
+    if !params.valid() {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, prefs| Ok(printability_for_doc(d, prefs, params))).await
+}
+
+/// The mesh operations a printability fix (or its revert) changes; the rest stay.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeshFix {
+    repair: Option<bool>,
+    orient: Option<bool>,
+    fill_holes: Option<bool>,
+    split_vertices: Option<bool>,
+    deep_clean: Option<bool>,
+    drop_floating: Option<bool>,
+    min_piece_mm: Option<f32>,
+    flatten_mm: Option<f32>,
+}
+
+/// One undoable step, so Ctrl+Z restores geometry, colours and hand painting.
+#[tauri::command]
+pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        let now = d.project.mesh_ops();
+        d.project.fix_mesh(MeshOps {
+            repair: fix.repair.unwrap_or(now.repair),
+            orient: fix.orient.unwrap_or(now.orient),
+            fill_holes: fix.fill_holes.unwrap_or(now.fill_holes),
+            split_vertices: fix.split_vertices.unwrap_or(now.split_vertices),
+            deep_clean: fix.deep_clean.unwrap_or(now.deep_clean),
+            drop_floating: fix.drop_floating.unwrap_or(now.drop_floating),
+            min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
+            flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),
+            ..now
+        });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Turns the model to the orientation with the least overhang; one undoable step.
+#[tauri::command]
+pub async fn orient_for_print(app: AppHandle, overhang_deg: f32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        let r = d.project.best_rotation(overhang_deg.clamp(0.0, 90.0));
+        d.project.set_rotation(r);
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Sets the model's rotation from load (rows of a 3×3 matrix); reverts a turn.
+#[tauri::command]
+pub async fn set_rotation(app: AppHandle, rotation: bp_core::Mat3) -> CmdResult<Summary> {
+    if rotation.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, prefs| {
+        d.project.set_rotation(rotation);
+        Ok(dto::summary(d, prefs))
     })
     .await
 }

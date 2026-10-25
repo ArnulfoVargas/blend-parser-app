@@ -28,6 +28,7 @@ import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
+import { setupPrintability } from "./printability";
 import { Viewer, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
@@ -296,6 +297,7 @@ function renderImportWarnings(s: Summary) {
 
 function render(s: Summary) {
   summary = s;
+  printability.update(s);
   bind("fileName", s.fileName);
   bind("fileMeta", t("file.meta", { mb: nf(s.fileSize / 1048576, 1), count: s.materials.length, n: s.materials.length }));
 
@@ -1517,6 +1519,18 @@ document.querySelectorAll("dialog").forEach((d) => {
     if (fromOutside && outside(e)) d.close();
     fromOutside = false;
   });
+});
+
+const printability = setupPrintability({
+  summary: () => summary,
+  locate: (points, values, threshold) => viewer.setFindings(points.map(p => p.map(v => v / (summary?.size.previewScale ?? 1)) as Vec3), values, threshold),
+  fix: (fix) => apply(() => api.fixMesh(fix)),
+  orient: (deg) => apply(() => api.orientForPrint(deg)),
+  rotate: (rotation) => apply(() => api.setRotation(rotation)),
+  fitPlate: () => apply(() => api.fitToPlate()),
+  resize: (mm) => apply(() => api.setSize(mm)),
+  confirm: (message) => ask(message, { title: t("printability.title"), kind: "warning" }),
+  error: e => toast(errText(e), "error"),
 });
 
 // ---- start -------------------------------------------------------------------------------

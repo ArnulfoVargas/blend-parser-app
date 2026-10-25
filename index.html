@@ -224,6 +224,24 @@
             </div>
           </div>
         </details>
+        <details class="group" id="printability">
+          <summary><h2 data-i18n="printability.title">Viabilidad de impresión</h2><span class="group__sum pa-sum"></span></summary>
+          <div class="group__body">
+            <p class="help" data-i18n="printability.intro">Revisión geométrica FDM al tamaño final y con el perfil actual.</p>
+            <div class="pa-actions">
+              <button class="btn btn--sm" type="button" id="printability-run" data-i18n="printability.run" disabled>Analizar modelo</button>
+              <button class="link" type="button" id="printability-hide" data-i18n="printability.hide" hidden>Ocultar marcadores</button>
+            </div>
+            <p class="help pa-status" role="status" aria-live="polite"></p>
+            <div class="pa-results"></div>
+            <details class="pa-params">
+              <summary data-i18n="printability.parameters">Parámetros del análisis</summary>
+              <div class="pa-params__grid"></div>
+              <p class="help" data-i18n="printability.defaults"></p>
+              <button class="link" type="button" id="printability-reset" data-i18n="printability.reset">Restablecer para la boquilla actual</button>
+            </details>
+          </div>
+        </details>
       </form>
     </aside>
 
@@ -322,6 +340,22 @@
       </div>
       <div class="dialog__actions">
         <button class="btn btn--primary" type="submit" value="close" data-i18n="common.close">Cerrar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="fix-all-dialog" aria-labelledby="h-fix-all">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-fix-all" data-i18n="printability.fixAll">Corregir todo</h2>
+      <p class="help" data-i18n="printability.fixAllIntro">Se intentará corregir:</p>
+      <ul class="fix-all__list" data-bind="problems"></ul>
+      <p class="help" data-i18n="printability.fixAllEffects">Para ello puede:</p>
+      <ul class="fix-all__list" data-bind="effects"></ul>
+      <p class="help fix-all__warn" data-bind="paint" data-i18n="printability.fixAllPaint" hidden>Reparar la malla quita la pintura manual; Revertir todo la recupera.</p>
+      <p class="help" data-i18n="printability.fixAllUndo">Revertir todo lo deshace todo a la vez.</p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="submit" value="ok" data-i18n="printability.fixAll">Corregir todo</button>
       </div>
     </form>
   </dialog>

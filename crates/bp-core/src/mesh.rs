@@ -88,11 +88,32 @@ pub struct MeshOps {
     pub repair: bool,
     /// Loose pieces whose bounding box diagonal is under this are removed; 0 keeps all.
     pub min_piece_mm: f32,
+    /// Make every piece's faces agree on their winding and point outwards.
+    pub orient: bool,
+    /// Close holes with a flat fan that takes the colour of the face beside it.
+    pub fill_holes: bool,
+    /// Give a vertex shared by separate fans of faces one copy per fan.
+    pub split_vertices: bool,
+    /// Lower every piece that floats above the plate until it touches it.
+    pub drop_floating: bool,
+    /// Weld and drop slivers at the printability tolerance, and remove stray
+    /// faces hanging off the surface by one edge.
+    pub deep_clean: bool,
 }
 
 impl Default for MeshOps {
     fn default() -> Self {
-        Self { keep_ratio: 1.0, flatten_mm: 0.0, repair: true, min_piece_mm: 0.0 }
+        Self {
+            keep_ratio: 1.0,
+            flatten_mm: 0.0,
+            repair: true,
+            min_piece_mm: 0.0,
+            orient: false,
+            fill_holes: false,
+            split_vertices: false,
+            drop_floating: false,
+            deep_clean: false,
+        }
     }
 }
 
@@ -104,6 +125,11 @@ pub struct RepairReport {
     pub duplicate_triangles: usize,
     pub loose_pieces: usize,
     pub loose_triangles: usize,
+    pub filled_holes: usize,
+    pub flipped_triangles: usize,
+    pub split_vertices: usize,
+    pub dropped_pieces: usize,
+    pub fin_triangles: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -132,8 +158,26 @@ impl Mesh {
     /// `scale` converts source millimetres to final millimetres.
     pub fn build(scene: &Scene, ops: MeshOps, scale: f32) -> (Self, Self) {
         let mut shape = Self::from_scene(scene);
-        if ops.repair {
+        // Holes, winding and fans are read from shared vertices: on an unwelded
+        // mesh every seam would look like a hole. Reverting the cleanup alone
+        // must not leave them working on loose triangles.
+        if ops.repair || ops.deep_clean || ops.fill_holes || ops.orient || ops.split_vertices {
             shape.repair_all();
+        }
+        // Before holes: a stray face's open sides are not a hole to cap.
+        if ops.deep_clean {
+            shape.deep_clean(CLEAN_MM / scale);
+        }
+        // Holes first, so their caps get oriented with the rest of the piece.
+        if ops.fill_holes {
+            shape.fill_holes();
+        }
+        if ops.orient {
+            shape.orient();
+        }
+        if ops.split_vertices {
+            // Far enough apart that the printability weld does not join them again.
+            shape.split_vertices(0.02 / scale);
         }
         if ops.min_piece_mm > 0.0 {
             shape.remove_loose_pieces(ops.min_piece_mm / scale);
@@ -148,13 +192,118 @@ impl Mesh {
         if ops.flatten_mm > 0.0 {
             work.flatten(ops.flatten_mm / scale);
         }
+        // Only the final shape moves: colours are still looked up where pieces were.
+        if ops.drop_floating {
+            work.drop_floating(1e-4 / scale);
+        }
+        // Flattening squashes the walls under the cut into lines, and holes,
+        // simplifying and the cut leave slivers after the clean-up ran.
+        if ops.deep_clean || ops.flatten_mm > 0.0 {
+            Self::clear_slivers(&mut shape, &mut work, CLEAN_MM / scale);
+        }
         (shape, work)
+    }
+
+    /// Clears the slivers of `work` without opening it, as the printability
+    /// analysis sees it (vertices within `eps` are one). A triangle with two
+    /// corners together goes; a needle, its third corner on its longest edge,
+    /// gives that edge to the face across it, so both end up as two proper
+    /// triangles. `shape` gets the same changes, so both keep matching triangles.
+    fn clear_slivers(shape: &mut Self, work: &mut Self, eps: f32) {
+        let collapsed = |c: &[Vec3; 3]| (0..3).any(|k| geom::len(geom::sub(c[k], c[(k + 1) % 3])) <= eps);
+        let mut fixed = 0;
+        for (s, w) in shape.parts.iter_mut().zip(&mut work.parts) {
+            let keep: Vec<bool> = (0..w.tris.len()).map(|i| !collapsed(&w.corners(i))).collect();
+            fixed += keep.iter().filter(|&&k| !k).count();
+            s.retain(&keep);
+            w.retain(&keep);
+            let mut weld: HashMap<[i64; 3], u32> = HashMap::new();
+            let id: Vec<u32> = w
+                .positions
+                .iter()
+                .enumerate()
+                .map(|(i, p)| *weld.entry(p.map(|c| (c / eps).round() as i64)).or_insert(i as u32))
+                .collect();
+            let key = |a: u32, b: u32| (id[a as usize].min(id[b as usize]), id[a as usize].max(id[b as usize]));
+            // A flip can leave the next needle beside it; a few passes settle it.
+            for _ in 0..4 {
+                let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+                for (ti, t) in w.tris.iter().enumerate() {
+                    for k in 0..3 {
+                        edges.entry(key(t[k], t[(k + 1) % 3])).or_default().push(ti);
+                    }
+                }
+                let mut touched = vec![false; w.tris.len()];
+                let mut flips = 0;
+                for ti in 0..w.tris.len() {
+                    let c = w.corners(ti);
+                    if touched[ti] || geom::area(&c) > eps * eps || collapsed(&c) {
+                        continue;
+                    }
+                    let edge = |k: usize| geom::len(geom::sub(c[(k + 1) % 3], c[k]));
+                    let k = (0..3).max_by(|&i, &j| edge(i).total_cmp(&edge(j))).unwrap_or(0);
+                    let t = w.tris[ti];
+                    let apex = t[(k + 2) % 3];
+                    let faces = &edges[&key(t[k], t[(k + 1) % 3])];
+                    let [x, y] = faces[..] else { continue };
+                    let o = if x == ti { y } else { x };
+                    let ot = w.tris[o];
+                    // The face across has to run the edge the other way.
+                    let Some(m) = (0..3).find(|&m| id[ot[m] as usize] == id[t[(k + 1) % 3] as usize]
+                        && id[ot[(m + 1) % 3] as usize] == id[t[k] as usize])
+                    else {
+                        continue;
+                    };
+                    if touched[o] {
+                        continue;
+                    }
+                    let (b, a, d) = (ot[m], ot[(m + 1) % 3], ot[(m + 2) % 3]);
+                    let (pa, pb) = (w.positions[a as usize], w.positions[b as usize]);
+                    let ab = geom::sub(pb, pa);
+                    let along = geom::dot(geom::sub(w.positions[apex as usize], pa), ab) / geom::dot(ab, ab).max(f32::MIN_POSITIVE);
+                    for part in [&mut *s, &mut *w] {
+                        part.tris[ti] = [apex, a, d];
+                        part.tris[o] = [apex, d, b];
+                        if let Some(origin) = &mut part.origin {
+                            // Both halves lie on the face across, so they take its colour.
+                            let (src, bary) = origin[o];
+                            let (ba, bb, bd) = (bary[(m + 1) % 3], bary[m], bary[(m + 2) % 3]);
+                            let mid = geom::bary_in(&[ba, bb, bd], [1.0 - along, along, 0.0]);
+                            origin[ti] = (src, [mid, ba, bd]);
+                            origin[o] = (src, [mid, bd, bb]);
+                        }
+                    }
+                    touched[ti] = true;
+                    touched[o] = true;
+                    flips += 1;
+                }
+                fixed += flips;
+                if flips == 0 {
+                    break;
+                }
+            }
+        }
+        work.repair.degenerate_triangles += fixed;
     }
 
     /// Welds vertices that coincide (to a millionth of the model size), then
     /// drops triangles that collapsed or repeat another one.
     pub fn repair_all(&mut self) {
         let eps = self.bounds().map_or(1e-4, |(lo, hi)| (geom::len(geom::sub(hi, lo)) * 1e-6).max(1e-6));
+        self.weld(eps, 0.0);
+    }
+
+    /// What the printability analysis calls degenerate or repeated goes too:
+    /// vertices closer than `tol` (source units) are welded and triangles of
+    /// area up to `tol`² dropped. Then stray faces come off (see [`Self::remove_fins`]).
+    pub fn deep_clean(&mut self, tol: f32) {
+        self.weld(tol, tol * tol);
+        self.remove_fins();
+    }
+
+    /// Welds vertices on a grid of `eps`, then drops triangles that collapsed,
+    /// have an area up to `min_area`, or repeat another one.
+    fn weld(&mut self, eps: f32, min_area: f32) {
         let mut report = self.repair;
         for part in &mut self.parts {
             let mut seen: HashMap<[i64; 3], u32> = HashMap::with_capacity(part.positions.len());
@@ -178,7 +327,7 @@ impl Mesh {
             let keep: Vec<bool> = (0..part.tris.len())
                 .map(|i| {
                     let t = part.tris[i];
-                    if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || geom::area(&part.corners(i)) <= 0.0 {
+                    if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || geom::area(&part.corners(i)) <= min_area {
                         report.degenerate_triangles += 1;
                         return false;
                     }
@@ -192,6 +341,72 @@ impl Mesh {
                 })
                 .collect();
             part.retain(&keep);
+        }
+        self.repair = report;
+    }
+
+    /// Removes fins: small sheets of faces (joined through edges with exactly
+    /// two faces) that hang off the surface by a non-manifold edge and leave the
+    /// rest of their border open. They are what modelling leaves behind when a
+    /// face is extruded or duplicated by mistake, and they make that edge
+    /// non-manifold, its sides open and its vertices non-manifold all at once.
+    /// Only sheets up to a tenth of the part's largest one count as fins.
+    pub fn remove_fins(&mut self) {
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            // Taking a fin off can turn the next one into a fin; a few passes settle it.
+            for _ in 0..8 {
+                let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+                for (ti, t) in part.tris.iter().enumerate() {
+                    for k in 0..3 {
+                        let (a, b) = (t[k], t[(k + 1) % 3]);
+                        edges.entry((a.min(b), a.max(b))).or_default().push(ti);
+                    }
+                }
+                let n = part.tris.len();
+                let mut sheet = vec![usize::MAX; n];
+                // Triangles, open edges and non-manifold edges of each sheet.
+                let mut sheets: Vec<(usize, usize, usize)> = vec![];
+                for start in 0..n {
+                    if sheet[start] != usize::MAX {
+                        continue;
+                    }
+                    let id = sheets.len();
+                    let mut s = (0, 0, 0);
+                    sheet[start] = id;
+                    let mut stack = vec![start];
+                    while let Some(ti) = stack.pop() {
+                        s.0 += 1;
+                        let t = part.tris[ti];
+                        for k in 0..3 {
+                            let (a, b) = (t[k], t[(k + 1) % 3]);
+                            let faces = &edges[&(a.min(b), a.max(b))];
+                            match faces.len() {
+                                1 => s.1 += 1,
+                                2 => {
+                                    for &o in faces {
+                                        if sheet[o] == usize::MAX {
+                                            sheet[o] = id;
+                                            stack.push(o);
+                                        }
+                                    }
+                                }
+                                _ => s.2 += 1,
+                            }
+                        }
+                    }
+                    sheets.push(s);
+                }
+                let largest = sheets.iter().map(|s| s.0).max().unwrap_or(0);
+                let fin: Vec<bool> =
+                    sheets.iter().map(|&(size, open, nm)| nm > 0 && open > 0 && size * 10 <= largest).collect();
+                if !fin.contains(&true) {
+                    break;
+                }
+                let keep: Vec<bool> = sheet.iter().map(|&s| !fin[s]).collect();
+                report.fin_triangles += keep.iter().filter(|&&k| !k).count();
+                part.retain(&keep);
+            }
         }
         self.repair = report;
     }
@@ -224,6 +439,266 @@ impl Mesh {
             let keep: Vec<bool> = comp.iter().map(|&c| !small[c as usize]).collect();
             report.loose_triangles += keep.iter().filter(|&&k| !k).count();
             part.retain(&keep);
+        }
+        self.repair = report;
+    }
+
+    /// Caps every hole: each boundary loop gets a fan around its centroid. A cap
+    /// triangle runs its boundary edge backwards, so it agrees with the face it
+    /// closes, and keeps that face's colour by pointing at one spot of its source.
+    /// Boundaries are found on shared vertex indices, so weld first.
+    pub fn fill_holes(&mut self) {
+        fn find(parent: &mut HashMap<u32, u32>, x: u32) -> u32 {
+            let mut root = x;
+            while let Some(&up) = parent.get(&root).filter(|&&up| up != root) {
+                root = up;
+            }
+            parent.insert(x, root);
+            root
+        }
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            let mut uses: HashMap<(u32, u32), usize> = HashMap::new();
+            for t in &part.tris {
+                for k in 0..3 {
+                    let (a, b) = (t[k], t[(k + 1) % 3]);
+                    *uses.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+            // Directed boundary edges as their face runs them, with that face.
+            let mut boundary = vec![];
+            for (ti, t) in part.tris.iter().enumerate() {
+                for k in 0..3 {
+                    let (a, b) = (t[k], t[(k + 1) % 3]);
+                    if uses[&(a.min(b), a.max(b))] == 1 {
+                        boundary.push((a, b, ti));
+                    }
+                }
+            }
+            if boundary.is_empty() {
+                continue;
+            }
+            // A loop is the boundary vertices its edges join.
+            let mut parent: HashMap<u32, u32> = HashMap::new();
+            for &(a, b, _) in &boundary {
+                parent.entry(a).or_insert(a);
+                parent.entry(b).or_insert(b);
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                if ra != rb {
+                    parent.insert(rb, ra);
+                }
+            }
+            let mut centre: HashMap<u32, (Vec3, f32)> = HashMap::new();
+            for &(a, _, _) in &boundary {
+                let root = find(&mut parent, a);
+                let c = centre.entry(root).or_insert(([0.0; 3], 0.0));
+                c.0 = geom::add(c.0, part.positions[a as usize]);
+                c.1 += 1.0;
+            }
+            let mut hub: HashMap<u32, u32> = HashMap::new();
+            for (&root, &(sum, n)) in &centre {
+                hub.insert(root, part.positions.len() as u32);
+                part.positions.push(geom::scale(sum, 1.0 / n));
+            }
+            report.filled_holes += hub.len();
+            for (a, b, ti) in boundary {
+                let c = hub[&find(&mut parent, a)];
+                part.tris.push([b, a, c]);
+                if let Some(origin) = &mut part.origin {
+                    let (src, corners) = origin[ti];
+                    let spot = geom::bary_in(&corners, [1.0 / 3.0; 3]);
+                    origin.push((src, [spot; 3]));
+                }
+            }
+        }
+        self.repair = report;
+    }
+
+    /// Flips faces so neighbours run each shared edge in opposite directions,
+    /// then turns any piece whose volume comes out negative inside out. Only
+    /// edges with exactly two faces carry the orientation across.
+    pub fn orient(&mut self) {
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            let mut edges: HashMap<(u32, u32), Vec<(usize, bool)>> = HashMap::new();
+            for (ti, t) in part.tris.iter().enumerate() {
+                for k in 0..3 {
+                    let (a, b) = (t[k], t[(k + 1) % 3]);
+                    edges.entry((a.min(b), a.max(b))).or_default().push((ti, a < b));
+                }
+            }
+            let n = part.tris.len();
+            let mut flip = vec![false; n];
+            let mut seen = vec![false; n];
+            let mut piece = vec![0usize; n];
+            let mut volume: Vec<f64> = vec![];
+            for start in 0..n {
+                if seen[start] {
+                    continue;
+                }
+                let id = volume.len();
+                volume.push(0.0);
+                seen[start] = true;
+                let mut stack = vec![start];
+                while let Some(ti) = stack.pop() {
+                    piece[ti] = id;
+                    let t = part.tris[ti];
+                    for k in 0..3 {
+                        let (a, b) = (t[k], t[(k + 1) % 3]);
+                        let faces = &edges[&(a.min(b), a.max(b))];
+                        if faces.len() != 2 {
+                            continue;
+                        }
+                        let mine = (a < b) ^ flip[ti];
+                        for &(other, raw) in faces {
+                            if other != ti && !seen[other] {
+                                // The neighbour must run this edge the other way.
+                                flip[other] = raw == mine;
+                                seen[other] = true;
+                                stack.push(other);
+                            }
+                        }
+                    }
+                }
+            }
+            // Translate near the piece to avoid cancellation at large offsets.
+            let lo = part.positions.iter().fold([f32::MAX; 3], |m, p| std::array::from_fn(|k| m[k].min(p[k])));
+            for ti in 0..n {
+                let mut c = part.corners(ti);
+                if flip[ti] {
+                    c.swap(1, 2);
+                }
+                let [a, b, d] = c.map(|p| geom::sub(p, lo));
+                volume[piece[ti]] += geom::dot(a, geom::cross(b, d)) as f64;
+            }
+            for ti in 0..n {
+                if volume[piece[ti]] < 0.0 {
+                    flip[ti] = !flip[ti];
+                }
+                if flip[ti] {
+                    part.tris[ti].swap(1, 2);
+                    if let Some(origin) = &mut part.origin {
+                        origin[ti].1.swap(1, 2);
+                    }
+                    report.flipped_triangles += 1;
+                }
+            }
+        }
+        self.repair = report;
+    }
+
+    /// Unbinds non-manifold vertices: the faces around a vertex that do not
+    /// reach each other across an edge through it each get their own copy,
+    /// moved `nudge` towards their fan so a positional weld keeps them apart.
+    pub fn split_vertices(&mut self, nudge: f32) {
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            let mut around: Vec<Vec<usize>> = vec![vec![]; part.positions.len()];
+            for (ti, t) in part.tris.iter().enumerate() {
+                for &v in t {
+                    around[v as usize].push(ti);
+                }
+            }
+            for (v, faces) in around.iter().enumerate() {
+                if faces.len() < 2 {
+                    continue;
+                }
+                // Fans: faces joined through an edge that has `v` at one end.
+                let mut fan: Vec<usize> = (0..faces.len()).collect();
+                fn root(fan: &mut [usize], mut i: usize) -> usize {
+                    while fan[i] != i {
+                        fan[i] = fan[fan[i]];
+                        i = fan[i];
+                    }
+                    i
+                }
+                let others = |ti: usize| part.tris[ti].iter().copied().filter(|&w| w as usize != v).collect::<Vec<_>>();
+                for i in 0..faces.len() {
+                    for j in i + 1..faces.len() {
+                        let a = others(faces[i]);
+                        if others(faces[j]).iter().any(|w| a.contains(w)) {
+                            let (ri, rj) = (root(&mut fan, i), root(&mut fan, j));
+                            fan[rj] = ri;
+                        }
+                    }
+                }
+                let roots: Vec<usize> = (0..faces.len()).map(|i| root(&mut fan, i)).collect();
+                let mut distinct = roots.clone();
+                distinct.sort_unstable();
+                distinct.dedup();
+                if distinct.len() < 2 {
+                    continue;
+                }
+                let p = part.positions[v];
+                // The first fan keeps the vertex; each other fan gets a copy.
+                for &r in &distinct[1..] {
+                    let mine: Vec<usize> = (0..faces.len()).filter(|&i| roots[i] == r).map(|i| faces[i]).collect();
+                    let centre = mine.iter().fold([0.0; 3], |acc, &ti| {
+                        geom::add(
+                            acc,
+                            geom::scale(
+                                geom::add(geom::add(part.corners(ti)[0], part.corners(ti)[1]), part.corners(ti)[2]),
+                                1.0 / 3.0,
+                            ),
+                        )
+                    });
+                    let towards = geom::sub(geom::scale(centre, 1.0 / mine.len() as f32), p);
+                    let len = geom::len(towards);
+                    let copy =
+                        if len > 0.0 { geom::add(p, geom::scale(towards, nudge.min(len * 0.5) / len)) } else { p };
+                    let id = part.positions.len() as u32;
+                    part.positions.push(copy);
+                    for ti in mine {
+                        for w in part.tris[ti].iter_mut() {
+                            if *w as usize == v {
+                                *w = id;
+                            }
+                        }
+                    }
+                    report.split_vertices += 1;
+                }
+            }
+        }
+        self.repair = report;
+    }
+
+    /// Lowers each connected piece that has nothing under it (see [`unsupported`])
+    /// until it rests on the lowest point of the whole mesh. Pieces resting on or
+    /// sunk into another one stay where they are.
+    pub fn drop_floating(&mut self, tol: f32) {
+        let Some((lo, _)) = self.bounds() else { return };
+        let mut report = self.repair;
+        // Pieces of every part, since one object usually sits on another.
+        let mut pieces = vec![];
+        let mut boxes = vec![];
+        for part in &self.parts {
+            let comp = part.components();
+            let n = comp.iter().copied().max().map_or(0, |m| m as usize + 1);
+            let mut bb = vec![([f32::MAX; 3], [f32::MIN; 3]); n];
+            let mut piece_of = vec![u32::MAX; part.positions.len()];
+            for (ti, t) in part.tris.iter().enumerate() {
+                let c = comp[ti] as usize;
+                for &v in t {
+                    let p = part.positions[v as usize];
+                    bb[c] =
+                        (std::array::from_fn(|k| bb[c].0[k].min(p[k])), std::array::from_fn(|k| bb[c].1[k].max(p[k])));
+                    piece_of[v as usize] = comp[ti];
+                }
+            }
+            pieces.push((piece_of, boxes.len()));
+            boxes.extend(bb);
+        }
+        let floats = unsupported(&boxes, lo[2], tol);
+        report.dropped_pieces += floats.iter().filter(|&&f| f).count();
+        for (part, (piece_of, first)) in self.parts.iter_mut().zip(pieces) {
+            for (v, p) in part.positions.iter_mut().enumerate() {
+                let Some(i) = piece_of.get(v).filter(|&&c| c != u32::MAX).map(|&c| first + c as usize) else {
+                    continue;
+                };
+                if floats[i] {
+                    p[2] -= boxes[i].0[2] - lo[2];
+                }
+            }
         }
         self.repair = report;
     }
@@ -381,6 +856,30 @@ impl Mesh {
     }
 }
 
+/// Weld and sliver size of the deep clean, in final millimetres: the
+/// printability analysis's default tolerance, so what it flags goes.
+pub const CLEAN_MM: f32 = 0.001;
+
+/// Which pieces (by bounding box, lowest corner first) have nothing to hold
+/// them up: they do not reach `floor` and do not touch, within `tol`, any piece
+/// that does, directly or through others. Boxes are coarse, so a piece above a
+/// hollow of its neighbour still counts as supported; a separate object resting
+/// on another (a hat, an eye) is never taken for a floating one.
+pub(crate) fn unsupported(boxes: &[(Vec3, Vec3)], floor: f32, tol: f32) -> Vec<bool> {
+    let touch = |a: &(Vec3, Vec3), b: &(Vec3, Vec3)| (0..3).all(|k| a.0[k] <= b.1[k] + tol && b.0[k] <= a.1[k] + tol);
+    let mut floats: Vec<bool> = boxes.iter().map(|b| b.0[2] > floor + tol).collect();
+    let mut stack: Vec<usize> = (0..boxes.len()).filter(|&i| !floats[i]).collect();
+    while let Some(i) = stack.pop() {
+        for j in 0..boxes.len() {
+            if floats[j] && touch(&boxes[i], &boxes[j]) {
+                floats[j] = false;
+                stack.push(j);
+            }
+        }
+    }
+    floats
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +898,149 @@ mod tests {
         let tris = vec![[0, 2, 1], [0, 3, 2], [0, 4, 3], [0, 1, 4], [5, 1, 2], [5, 2, 3], [5, 3, 4], [5, 4, 1]];
         let origin = Some((0..8).map(|i| (i, ROOT)).collect());
         Mesh { parts: vec![MeshPart { name: "o".into(), positions, tris, origin }], repair: RepairReport::default() }
+    }
+
+    fn closed_cube() -> Mesh {
+        let positions = vec![
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [1., 1., 0.],
+            [0., 1., 0.],
+            [0., 0., 1.],
+            [1., 0., 1.],
+            [1., 1., 1.],
+            [0., 1., 1.],
+        ];
+        let tris = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let origin = Some((0..tris.len() as u32).map(|i| (i, ROOT)).collect());
+        Mesh { parts: vec![MeshPart { name: "cube".into(), positions, tris, origin }], repair: RepairReport::default() }
+    }
+
+    fn signed_volume(m: &Mesh) -> f32 {
+        let p = &m.parts[0];
+        (0..p.tris.len())
+            .map(|i| {
+                let [a, b, c] = p.corners(i);
+                geom::dot(a, geom::cross(b, c)) / 6.0
+            })
+            .sum()
+    }
+
+    #[test]
+    fn orient_fixes_a_flipped_face_and_an_inside_out_piece() {
+        let mut m = closed_cube();
+        m.parts[0].tris[3].swap(1, 2);
+        m.orient();
+        assert_eq!(m.repair.flipped_triangles, 1);
+        assert!((signed_volume(&m) - 1.0).abs() < 1e-5);
+        let mut m = closed_cube();
+        for t in &mut m.parts[0].tris {
+            t.swap(1, 2);
+        }
+        m.orient();
+        assert_eq!(m.repair.flipped_triangles, 12);
+        assert!((signed_volume(&m) - 1.0).abs() < 1e-5);
+        // Each corner keeps its own spot of the source: the origin swaps with it.
+        assert_eq!(m.parts[0].origin.as_ref().unwrap()[0].1, [ROOT[0], ROOT[2], ROOT[1]]);
+    }
+
+    #[test]
+    fn split_vertices_unbinds_a_bow_tie_and_drop_floating_lands_pieces() {
+        // Two triangles touching only at vertex 0.
+        let positions = vec![[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [-1., 0., 0.], [-1., -1., 0.]];
+        let mut m = Mesh {
+            parts: vec![MeshPart { name: "bow".into(), positions, tris: vec![[0, 1, 2], [0, 3, 4]], origin: None }],
+            repair: RepairReport::default(),
+        };
+        m.split_vertices(0.01);
+        assert_eq!(m.repair.split_vertices, 1);
+        assert_eq!(m.parts[0].positions.len(), 6);
+        assert_ne!(m.parts[0].tris[0][0], m.parts[0].tris[1][0]);
+        assert!(geom::len(m.parts[0].positions[5]) <= 0.0101);
+        // A closed cube has no such vertex.
+        let mut cube = closed_cube();
+        cube.split_vertices(0.01);
+        assert_eq!(cube.repair.split_vertices, 0);
+
+        let mut m = closed_cube();
+        let raised: Vec<Vec3> = m.parts[0].positions.iter().map(|p| [p[0] + 3.0, p[1], p[2] + 5.0]).collect();
+        let offset = m.parts[0].positions.len() as u32;
+        let tris: Vec<[u32; 3]> = m.parts[0].tris.iter().map(|t| t.map(|v| v + offset)).collect();
+        m.parts[0].positions.extend(raised);
+        m.parts[0].tris.extend(tris);
+        m.parts[0].origin = None;
+        m.drop_floating(1e-4);
+        assert_eq!(m.repair.dropped_pieces, 1);
+        assert!(m.parts[0].positions.iter().all(|p| p[2] <= 1.0 + 1e-6));
+
+        // A separate object stacked on the first one (a hat, an eye) is held up and stays put.
+        let mut m = closed_cube();
+        let mut top = closed_cube().parts.remove(0);
+        for p in &mut top.positions {
+            p[2] += 1.0;
+        }
+        m.parts.push(top);
+        let before = m.parts[1].positions.clone();
+        m.drop_floating(1e-4);
+        assert_eq!(m.repair.dropped_pieces, 0);
+        assert_eq!(m.parts[1].positions, before);
+        let report = crate::printability::analyze(&m, crate::printability::Params::for_nozzle(0.4));
+        assert_eq!(report.checks.iter().find(|c| c.code == "floating").unwrap().count, 0);
+    }
+
+    #[test]
+    fn deep_clean_takes_off_a_stray_face_hanging_by_one_edge() {
+        let mut m = closed_cube();
+        // A flap on the bottom edge 0-1: that edge gets three faces, the flap two open sides.
+        m.parts[0].positions.push([0.5, -1.0, -1.0]);
+        m.parts[0].tris.push([0, 1, 8]);
+        m.parts[0].origin.as_mut().unwrap().push((0, ROOT));
+        let before = crate::printability::analyze(&m, crate::printability::Params::for_nozzle(0.4));
+        let count =
+            |r: &crate::printability::Report, code: &str| r.checks.iter().find(|c| c.code == code).unwrap().count;
+        assert_eq!(count(&before, "nonManifoldEdges"), 1);
+        assert_eq!(count(&before, "openEdges"), 2);
+        m.deep_clean(1e-3);
+        assert_eq!(m.repair.fin_triangles, 1);
+        assert_eq!(m.parts[0].tris.len(), 12);
+        let after = crate::printability::analyze(&m, crate::printability::Params::for_nozzle(0.4));
+        for code in ["nonManifoldEdges", "openEdges", "nonManifoldVertices"] {
+            assert_eq!(count(&after, code), 0, "{code}");
+        }
+        // A real hole in the surface is not a fin: nothing hangs from a non-manifold edge.
+        let mut open = closed_cube();
+        open.parts[0].tris.pop();
+        open.parts[0].origin.as_mut().unwrap().pop();
+        open.deep_clean(1e-3);
+        assert_eq!(open.parts[0].tris.len(), 11);
+    }
+
+    #[test]
+    fn fill_holes_closes_the_box_with_matching_winding() {
+        let mut m = closed_cube();
+        m.parts[0].tris.drain(2..4);
+        m.parts[0].origin.as_mut().unwrap().drain(2..4);
+        m.fill_holes();
+        assert_eq!(m.repair.filled_holes, 1);
+        assert_eq!(m.parts[0].tris.len(), 14);
+        assert_eq!(m.parts[0].origin.as_ref().unwrap().len(), 14);
+        assert!((signed_volume(&m) - 1.0).abs() < 1e-5);
+        // Closed and consistent now: orienting changes nothing.
+        m.orient();
+        assert_eq!(m.repair.flipped_triangles, 0);
     }
 
     #[test]
