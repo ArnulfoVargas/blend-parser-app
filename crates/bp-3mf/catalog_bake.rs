@@ -17,6 +17,8 @@ struct Printer {
     name: String,
     area: [f32; 4],
     height: f32,
+    #[serde(default)]
+    exclude: Vec<[f32; 4]>,
     nozzles: Vec<Nozzle>,
 }
 
@@ -56,10 +58,13 @@ pub fn bake(input: &str) -> Result<String, String> {
         {
             return Err(format!("{}: invalid print volume or missing nozzles", p.id));
         }
+        if p.exclude.iter().any(|e| !e.iter().all(|v| v.is_finite()) || e[2] <= e[0] || e[3] <= e[1]) {
+            return Err(format!("{}: invalid excluded zone", p.id));
+        }
         writeln!(
             output,
-            "CatalogPrinter {{ id: {:?}, vendor: {:?}, name: {:?}, area: {:?}, height: {:?}, nozzles: &[",
-            p.id, p.vendor, p.name, p.area, p.height
+            "CatalogPrinter {{ id: {:?}, vendor: {:?}, name: {:?}, area: {:?}, height: {:?}, exclude: &{:?}, nozzles: &[",
+            p.id, p.vendor, p.name, p.area, p.height, p.exclude
         )
         .unwrap();
         let mut diameters = HashSet::new();
@@ -127,6 +132,15 @@ mod tests {
         let mut input = sample();
         input["printers"][0]["nozzles"][0]["layer"] = json!(0.8);
         assert!(bake(&input.to_string()).is_err());
+    }
+
+    #[test]
+    fn keeps_excluded_zones_and_rejects_empty_ones() {
+        let mut input = sample();
+        input["printers"][0]["exclude"] = json!([[0, 0, 18, 28]]);
+        assert!(bake(&input.to_string()).unwrap().contains("exclude: &[[0.0, 0.0, 18.0, 28.0]]"));
+        input["printers"][0]["exclude"] = json!([[18, 0, 18, 28]]);
+        assert!(bake(&input.to_string()).unwrap_err().contains("excluded zone"));
     }
 
     #[test]

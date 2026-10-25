@@ -102,8 +102,20 @@ const NO_LABEL: u8 = u8::MAX;
 
 pub struct Project {
     scene: Scene,
+    /// Scene positions as the file has them, placed on the plate; `scene` holds
+    /// them stretched by `stretch`.
+    source_positions: Vec<Vec<Vec3>>,
+    /// Width, depth and height of the scene before any resizing.
+    source_size: Vec3,
     source_height: f32,
     scale: f32,
+    /// Extra scale per axis on top of `scale`, relative to Z (always 1 on Z).
+    stretch: Vec3,
+    /// Size the user asked for (before any base is flattened away). Kept as
+    /// typed so no rounding builds up from one change to the next.
+    size_mm: Vec3,
+    /// Sizes before each resize, for undo.
+    size_history: Vec<Vec3>,
     mesh_ops: MeshOps,
     color_ops: ColorOps,
     print_ops: PrintOps,
@@ -127,11 +139,18 @@ pub struct Project {
 impl Project {
     pub fn new(mut scene: Scene, filaments: usize) -> Self {
         scene.place_on_plate();
-        let source_height = scene.bounds().map_or(1.0, |(lo, hi)| (hi[2] - lo[2]).max(1e-6));
+        let source_size: Vec3 =
+            scene.bounds().map_or([1.0; 3], |(lo, hi)| std::array::from_fn(|i| (hi[i] - lo[i]).max(1e-6)));
+        let source_positions = scene.parts.iter().map(|p| p.positions.clone()).collect();
         let mut p = Self {
             scene,
-            source_height,
+            source_positions,
+            source_size,
+            source_height: source_size[2],
             scale: 1.0,
+            stretch: [1.0; 3],
+            size_mm: source_size,
+            size_history: vec![],
             mesh_ops: MeshOps::default(),
             color_ops: ColorOps::default(),
             print_ops: PrintOps::default(),
@@ -168,6 +187,25 @@ impl Project {
     pub fn height_mm(&self) -> f32 {
         self.source_height * self.scale
     }
+    /// Width, depth and height as the file has them, in millimetres.
+    pub fn original_size_mm(&self) -> Vec3 {
+        self.source_size
+    }
+    /// Width, depth and height the user asked for, before flattening.
+    pub fn size_mm(&self) -> Vec3 {
+        self.size_mm
+    }
+    /// Scale of each axis against the original size.
+    pub fn axis_scale(&self) -> Vec3 {
+        std::array::from_fn(|i| self.scale * self.stretch[i])
+    }
+    /// Per-axis stretch the preview positions carry on top of [`Self::scale`].
+    pub fn stretch(&self) -> Vec3 {
+        self.stretch
+    }
+    pub fn can_undo_size(&self) -> bool {
+        !self.size_history.is_empty()
+    }
     pub fn mesh_ops(&self) -> MeshOps {
         self.mesh_ops
     }
@@ -181,14 +219,14 @@ impl Project {
         !self.undo.is_empty() || !self.stroke.is_empty()
     }
 
-    /// What the next undo would revert, for the UI.
+    /// What the next undo would revert, as a key the UI translates: "stroke" or "merge".
     pub fn undo_label(&self) -> Option<&'static str> {
         if !self.stroke.is_empty() {
-            return Some("trazo");
+            return Some("stroke");
         }
         self.undo.last().map(|e| match e {
-            UndoEntry::Stroke(_) => "trazo",
-            UndoEntry::Slots(_) => "unión de colores",
+            UndoEntry::Stroke(_) => "stroke",
+            UndoEntry::Slots(_) => "merge",
         })
     }
 
@@ -284,11 +322,55 @@ impl Project {
 
     // ---- size and mesh ----------------------------------------------------
 
-    /// Sets the final height; width and depth follow.
+    /// Sets the final height; width and depth keep their proportions.
     pub fn set_height_mm(&mut self, mm: f32) {
-        self.scale = (mm / self.source_height).max(1e-6);
-        if self.mesh_ops.flatten_mm > 0.0 {
+        let k = mm / self.size_mm[2];
+        self.set_size_mm(self.size_mm.map(|v| v * k));
+    }
+
+    /// Sets width, depth and height (before flattening). Unequal factors
+    /// stretch the model; the previous size can be undone.
+    pub fn set_size_mm(&mut self, size: Vec3) {
+        let size = size.map(|v| v.max(1e-6));
+        if size == self.size_mm {
+            return;
+        }
+        self.size_history.push(self.size_mm);
+        self.apply_size(size);
+    }
+
+    /// Goes back to the size before the last resize.
+    pub fn undo_size(&mut self) -> bool {
+        let Some(size) = self.size_history.pop() else { return false };
+        self.apply_size(size);
+        true
+    }
+
+    /// Back to the size the file has; it can be undone like any resize.
+    pub fn reset_size(&mut self) {
+        self.set_size_mm(self.source_size);
+    }
+
+    fn apply_size(&mut self, size: Vec3) {
+        self.size_mm = size;
+        self.scale = (size[2] / self.source_height).max(1e-6);
+        let stretch: Vec3 = std::array::from_fn(|i| size[i] / (self.source_size[i] * self.scale));
+        let stretch_changes = stretch.iter().zip(&self.stretch).any(|(a, b)| (a - b).abs() > 1e-6);
+        if stretch_changes {
+            self.stretch = stretch;
+            for (part, src) in self.scene.parts.iter_mut().zip(&self.source_positions) {
+                for (v, s) in part.positions.iter_mut().zip(src) {
+                    *v = std::array::from_fn(|i| s[i] * stretch[i]);
+                }
+            }
+        }
+        if stretch_changes || self.mesh_ops.flatten_mm > 0.0 || self.mesh_ops.min_piece_mm > 0.0 {
+            let before: Vec<usize> = self.work.parts.iter().map(|p| p.tris.len()).collect();
             self.rebuild_geometry_keep_paint();
+            // Hand painting is per triangle: it only survives when the triangles do.
+            if self.work.parts.iter().map(|p| p.tris.len()).ne(before) {
+                self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
+            }
         }
         self.rebuild_paint();
     }
@@ -581,6 +663,47 @@ mod tests {
     }
 
     #[test]
+    fn size_per_axis_undo_and_reset() {
+        let mut p = Project::new(scene(), 2);
+        assert_eq!(p.original_size_mm(), [10.0, 1e-6, 20.0]);
+        p.set_height_mm(40.0);
+        assert_eq!(p.size_mm()[2], 40.0);
+        assert!((p.stats().size_mm[0] - 20.0).abs() < 1e-3);
+
+        // Only the width changes: the model stretches, the height stays.
+        p.set_size_mm([35.0, p.size_mm()[1], 40.0]);
+        let s = p.stats().size_mm;
+        assert!((s[0] - 35.0).abs() < 1e-3 && (s[2] - 40.0).abs() < 1e-3, "{s:?}");
+        assert!((p.axis_scale()[0] - 3.5).abs() < 1e-5);
+        assert!((p.stretch()[0] - 1.75).abs() < 1e-5);
+
+        // The typed size is kept exactly, with no rounding from the scale.
+        p.set_size_mm([12.34, p.size_mm()[1], 56.78]);
+        assert_eq!(p.size_mm()[0], 12.34);
+        assert!((p.stats().size_mm[0] - 12.34).abs() < 1e-3);
+
+        assert!(p.undo_size());
+        assert_eq!(p.size_mm()[0], 35.0);
+        p.reset_size();
+        assert_eq!(p.size_mm(), p.original_size_mm());
+        assert!((p.stats().size_mm[0] - 10.0).abs() < 1e-3);
+        assert!(p.undo_size());
+        assert_eq!(p.size_mm()[0], 35.0);
+        while p.undo_size() {}
+        assert_eq!(p.size_mm(), p.original_size_mm());
+    }
+
+    #[test]
+    fn stretching_keeps_hand_painting() {
+        let mut p = Project::new(scene(), 2);
+        p.paint([2.0, -5.0, 3.0], [0.0, 1.0, 0.0], 0.5, 1).unwrap();
+        p.end_stroke();
+        let painted = p.painted_count();
+        p.set_size_mm([30.0, 1.0, 20.0]);
+        assert_eq!(p.painted_count(), painted);
+    }
+
+    #[test]
     fn brush_paints_and_undo_restores() {
         let mut p = Project::new(scene(), 2);
         let before = p.export_parts()[0].paint.clone();
@@ -615,7 +738,7 @@ mod tests {
         let mut p = Project::new(scene(), 2);
         let before = p.export_parts()[0].paint.clone();
         p.merge_slots(1, 0);
-        assert_eq!(p.undo_label(), Some("unión de colores"));
+        assert_eq!(p.undo_label(), Some("merge"));
         assert!(p.undo());
         assert_eq!(p.palette().len(), 2);
         assert_eq!(p.export_parts()[0].paint, before);

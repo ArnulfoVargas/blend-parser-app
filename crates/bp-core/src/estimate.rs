@@ -4,24 +4,36 @@
 //! it, plus one when it cannot start with the colour the previous layer ended on.
 //! Bambu Studio orders colours per layer in a similar greedy way; the real
 //! number depends on its flushing and ordering settings, so this is a guide for
-//! comparing settings, not a promise.
+//! comparing settings, not a promise. Each swap is kept with its direction, so
+//! [`crate::waste`] can price it with the flush volume of that pair.
 
 use crate::geom::{self, ROOT};
 use crate::mesh::Mesh;
 use crate::paint::Node;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SwapEstimate {
     pub layers: u32,
     /// Layers that print more than one colour.
     pub multicolor_layers: u32,
     pub swaps: u32,
-    /// Flushed filament, at `flush_mm3` per swap and PLA density.
-    pub purge_grams: f32,
+    /// The swaps of each layer that has any, as (layer, from slot, to slot), bottom up.
+    pub changes: Vec<(u32, u8, u8)>,
+    /// Slots in the order they first print; the first one is loaded, not swapped to.
+    pub first_use: Vec<u8>,
 }
 
-pub const FLUSH_MM3: f32 = 280.0;
-const PLA_G_PER_MM3: f32 = 0.001_24;
+impl SwapEstimate {
+    /// Layers up to the last swap: how tall a prime tower has to grow.
+    pub fn tower_layers(&self) -> u32 {
+        self.changes.last().map_or(0, |c| c.0 + 1)
+    }
+
+    /// Swaps per layer, for the layers that have any.
+    pub fn per_layer(&self) -> impl Iterator<Item = &[(u32, u8, u8)]> {
+        self.changes.chunk_by(|a, b| a.0 == b.0)
+    }
+}
 
 /// `scale` turns mesh units into millimetres; layers are `layer_mm` tall.
 pub fn estimate(mesh: &Mesh, trees: &[Vec<Node>], scale: f32, layer_mm: f32) -> SwapEstimate {
@@ -41,41 +53,36 @@ pub fn estimate(mesh: &Mesh, trees: &[Vec<Node>], scale: f32, layer_mm: f32) -> 
             });
         }
     }
-    let mut swaps = 0u32;
-    let mut multicolor = 0u32;
-    let mut current: Option<u32> = None;
-    for &m in &masks {
+    let mut e = SwapEstimate { layers: layers as u32, ..Default::default() };
+    let mut current: Option<u8> = None;
+    for (layer, &m) in masks.iter().enumerate() {
         if m == 0 {
             continue;
         }
-        let k = m.count_ones();
-        if k > 1 {
-            multicolor += 1;
+        if m.count_ones() > 1 {
+            e.multicolor_layers += 1;
         }
-        match current {
-            Some(c) if m & (1 << c) != 0 => {
-                swaps += k - 1;
-                // Ends on another colour of this layer when there is one.
-                if k > 1 {
-                    current = Some(31 - (m & !(1 << c)).leading_zeros());
-                }
+        // The layer starts on the colour already loaded when it prints it, then
+        // goes through the others from the lowest slot up.
+        let mut order: Vec<u8> = (0..32u8).filter(|&s| m & (1 << s) != 0).collect();
+        if let Some(c) = current.filter(|&c| m & (1 << c) != 0) {
+            order.retain(|&s| s != c);
+            order.insert(0, c);
+        }
+        for &s in &order {
+            match current {
+                None => {}
+                Some(c) if c == s => continue,
+                Some(c) => e.changes.push((layer as u32, c, s)),
             }
-            Some(_) => {
-                swaps += k;
-                current = Some(31 - m.leading_zeros());
+            if !e.first_use.contains(&s) {
+                e.first_use.push(s);
             }
-            None => {
-                swaps += k - 1;
-                current = Some(31 - m.leading_zeros());
-            }
+            current = Some(s);
         }
     }
-    SwapEstimate {
-        layers: layers as u32,
-        multicolor_layers: multicolor,
-        swaps,
-        purge_grams: swaps as f32 * FLUSH_MM3 * PLA_G_PER_MM3,
-    }
+    e.swaps = e.changes.len() as u32;
+    e
 }
 
 #[cfg(test)]
@@ -83,20 +90,37 @@ mod tests {
     use super::*;
     use crate::mesh::MeshPart;
 
+    fn mesh(positions: Vec<[f32; 3]>, tris: Vec<[u32; 3]>) -> Mesh {
+        Mesh { parts: vec![MeshPart { name: "t".into(), positions, tris, origin: None }], repair: Default::default() }
+    }
+
     #[test]
     fn two_colours_stacked_need_one_swap() {
         // Two triangles, one under the other, 2 mm tall in total.
         let positions =
             vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.9], [0.0, 0.0, 1.1], [1.0, 0.0, 1.1], [0.0, 0.0, 2.0]];
-        let mesh = Mesh {
-            parts: vec![MeshPart { name: "t".into(), positions, tris: vec![[0, 1, 2], [3, 4, 5]], origin: None }],
-            repair: Default::default(),
-        };
+        let mesh = mesh(positions, vec![[0, 1, 2], [3, 4, 5]]);
         let trees = [vec![Node::Leaf(0), Node::Leaf(1)]];
         let e = estimate(&mesh, &trees, 1.0, 0.2);
         assert_eq!(e.layers, 10);
         assert_eq!(e.swaps, 1);
         assert_eq!(e.multicolor_layers, 0);
+        assert_eq!(e.changes, vec![(5, 0, 1)]);
+        assert_eq!(e.first_use, vec![0, 1]);
+        assert_eq!(e.tower_layers(), 6);
         assert_eq!(estimate(&mesh, &trees, 1.0, 0.4).layers, 5);
+    }
+
+    #[test]
+    fn side_by_side_colours_swap_back_and_forth() {
+        // Two colours next to each other on every layer, 1 mm tall: five layers.
+        let positions =
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 0.0, 1.0]];
+        let mesh = mesh(positions, vec![[0, 1, 2], [3, 4, 5]]);
+        let e = estimate(&mesh, &[vec![Node::Leaf(0), Node::Leaf(1)]], 1.0, 0.2);
+        assert_eq!((e.layers, e.multicolor_layers, e.swaps), (5, 5, 5));
+        // Each layer starts on the colour the last one ended on.
+        assert_eq!(&e.changes[..3], &[(0, 0, 1), (1, 1, 0), (2, 0, 1)]);
+        assert_eq!(e.per_layer().count(), 5);
     }
 }

@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 use bp_3mf::{Printer, PrinterProfile, NOZZLES};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::error::{AppError, CmdResult};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,10 +44,10 @@ impl Store {
         store
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub fn save(&self) -> CmdResult<()> {
         let Some(path) = &self.path else { return Ok(()) };
-        write_atomic(path, &serde_json::to_string_pretty(self).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("No se pudo guardar {}: {e}", path.display()))
+        write_atomic(path, &serde_json::to_string_pretty(self).map_err(AppError::internal)?)
+            .map_err(|e| AppError::file(&path.display().to_string(), e))
     }
 
     /// The catalogue, then the user's printers.
@@ -60,17 +63,20 @@ impl Store {
         Printer::new(profile, sel.map_or(0.4, |s| s.nozzle_mm))
     }
 
-    pub fn select(&mut self, id: &str, nozzle_mm: f32) -> Result<Printer, String> {
+    pub fn select(&mut self, id: &str, nozzle_mm: f32) -> CmdResult<Printer> {
         let id = bp_3mf::canonical_id(id);
-        let profile =
-            self.profiles().into_iter().find(|p| p.id == id).ok_or(format!("No conozco la impresora {id}."))?;
+        let profile = self
+            .profiles()
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| AppError::with("error.unknownPrinter", json!({ "id": id })))?;
         let printer = Printer::new(profile, nozzle_mm);
         self.selected = Some(Selection { id: id.into(), nozzle_mm: printer.nozzle_mm });
         Ok(printer)
     }
 
     /// Adds or replaces a custom printer; a blank id makes a new one.
-    pub fn upsert(&mut self, mut p: PrinterProfile) -> Result<PrinterProfile, String> {
+    pub fn upsert(&mut self, mut p: PrinterProfile) -> CmdResult<PrinterProfile> {
         p.name = p.name.trim().to_string();
         p.custom = true;
         p.vendor.clear();
@@ -80,7 +86,7 @@ impl Store {
         if self.custom.iter().any(|c| c.id != p.id && c.name.eq_ignore_ascii_case(&p.name))
             || bp_3mf::catalog().iter().any(|c| c.name.eq_ignore_ascii_case(&p.name))
         {
-            return Err(format!("Ya hay una impresora llamada «{}».", p.name));
+            return Err(AppError::with("error.printerNameTaken", json!({ "name": p.name })));
         }
         if p.id.is_empty() {
             let mut n = self.custom.len() + 1;
@@ -92,7 +98,7 @@ impl Store {
         match self.custom.iter_mut().find(|c| c.id == p.id) {
             Some(c) => *c = p.clone(),
             None if p.id.starts_with("custom-") => self.custom.push(p.clone()),
-            None => return Err("Solo se pueden editar las impresoras propias.".into()),
+            None => return Err(AppError::new("error.onlyOwnPrinters")),
         }
         Ok(p)
     }
@@ -105,26 +111,26 @@ impl Store {
     }
 }
 
-fn validate(p: &PrinterProfile) -> Result<(), String> {
+fn validate(p: &PrinterProfile) -> CmdResult<()> {
     if p.name.trim().is_empty() || p.name.chars().count() > 60 {
-        return Err("El nombre debe tener entre 1 y 60 caracteres.".into());
+        return Err(AppError::new("error.printerName"));
     }
     if p.volume_mm.iter().any(|v| !(20.0..=2000.0).contains(v)) {
-        return Err("Ancho, fondo y alto deben estar entre 20 y 2000 mm.".into());
+        return Err(AppError::new("error.printerVolume"));
     }
     if p.nozzles.is_empty() || p.nozzles.iter().any(|n| !NOZZLES.iter().any(|k| (k - n).abs() < 1e-3)) {
-        return Err("Elige al menos una boquilla.".into());
+        return Err(AppError::new("error.printerNozzles"));
     }
     if let Some(base) = &p.base {
         if !bp_3mf::catalog().iter().any(|c| &c.id == base) {
-            return Err(format!("{base} no está entre las impresoras de Bambu Studio."));
+            return Err(AppError::with("error.printerBase", json!({ "base": base })));
         }
     }
     Ok(())
 }
 
 /// Writes next to the file and renames, so a crash never leaves half a file.
-fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

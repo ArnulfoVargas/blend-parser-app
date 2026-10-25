@@ -1,6 +1,7 @@
 // The 3D preview: orbit / pan / zoom with OrbitControls, the painted mesh with
-// one colour per leaf triangle, and the brush. Picking and painting run in Rust;
-// this file only turns pointer positions into rays and recolours what changed.
+// one colour per leaf triangle, the brush and the measuring tape. Picking and
+// painting run in Rust; this file only turns pointer positions into rays and
+// recolours what changed.
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { Hit, PaintResult, PreviewMesh, Vec3 } from "./api";
@@ -9,12 +10,14 @@ import type { Hit, PaintResult, PreviewMesh, Vec3 } from "./api";
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
-export type Tool = "orbit" | "brush";
+export type Tool = "orbit" | "brush" | "measure";
 
 export interface BrushHandlers {
   pick(origin: Vec3, dir: Vec3): Promise<Hit | null>;
   paint(origin: Vec3, dir: Vec3): Promise<PaintResult | null>;
   endStroke(): void;
+  /** A click on the model with the measuring tool. */
+  measure(point: Vec3): void;
 }
 
 /** Resolves a CSS colour token (oklch included) through a 1×1 canvas. */
@@ -40,6 +43,8 @@ export class Viewer {
   private cursor = new THREE.Group();
   private cursorFill: THREE.MeshBasicMaterial;
   private plate: THREE.Mesh;
+  private tape = new THREE.Group();
+  private down: { x: number; y: number } | null = null;
   private ray = new THREE.Raycaster();
   private pending = false;
   private painting = false;
@@ -87,11 +92,13 @@ export class Viewer {
     });
     this.cursor.visible = false;
     this.scene.add(this.cursor);
+    this.tape.renderOrder = 20;
+    this.scene.add(this.tape);
 
     new ResizeObserver(() => this.resize()).observe(canvas);
     canvas.addEventListener("pointermove", (e) => this.onMove(e));
     canvas.addEventListener("pointerdown", (e) => this.onDown(e));
-    window.addEventListener("pointerup", () => this.onUp());
+    window.addEventListener("pointerup", (e) => this.onUp(e));
     canvas.addEventListener("pointerleave", () => {
       this.cursor.visible = false;
       this.requestRender();
@@ -188,7 +195,7 @@ export class Viewer {
     this.controls.mouseButtons = t === "brush"
       ? { LEFT: null as unknown as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }
       : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-    if (t === "orbit") {
+    if (t !== "brush") {
       this.cursor.visible = false;
       this.canvas.style.cursor = "";
     }
@@ -279,7 +286,33 @@ export class Viewer {
     }
   }
 
+  /** Shows the measured points (preview units) and the line between them. */
+  setMeasure(points: Vec3[]) {
+    this.tape.clear();
+    const r = (this.mesh?.geometry.boundingSphere?.radius ?? 50) * 0.012;
+    const mat = (name: string) => new THREE.MeshBasicMaterial({ color: cssColor(name), depthTest: false, transparent: true });
+    const dot = new THREE.SphereGeometry(r, 16, 12);
+    const ring = new THREE.SphereGeometry(r * 1.45, 16, 12);
+    for (const p of points) {
+      const outer = new THREE.Mesh(ring, mat("--glint"));
+      const inner = new THREE.Mesh(dot, mat("--color-ink"));
+      outer.position.set(...p);
+      inner.position.set(...p);
+      outer.renderOrder = 20;
+      inner.renderOrder = 21;
+      this.tape.add(outer, inner);
+    }
+    if (points.length === 2) {
+      const geo = new THREE.BufferGeometry().setFromPoints(points.map((p) => new THREE.Vector3(...p)));
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: cssColor("--color-ink"), depthTest: false, transparent: true }));
+      line.renderOrder = 22;
+      this.tape.add(line);
+    }
+    this.requestRender();
+  }
+
   private onDown(e: PointerEvent) {
+    if (this.tool === "measure" && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
     if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
     this.painting = true;
     this.canvas.setPointerCapture(e.pointerId);
@@ -287,7 +320,14 @@ export class Viewer {
     void this.onMove(e);
   }
 
-  private onUp() {
+  private onUp(e: PointerEvent) {
+    // A click, not a drag to orbit, places a measuring point.
+    const d = this.down;
+    this.down = null;
+    if (this.tool === "measure" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+      const [o, dir] = this.rayFrom(e);
+      void this.handlers.pick(o, dir).then((hit) => hit && this.handlers.measure(hit.point));
+    }
     if (!this.painting) return;
     this.painting = false;
     this.handlers.endStroke();

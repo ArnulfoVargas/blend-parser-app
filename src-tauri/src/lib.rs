@@ -2,6 +2,8 @@
 
 mod commands;
 mod dto;
+mod error;
+mod prefs;
 mod profiles;
 mod state;
 
@@ -14,8 +16,10 @@ pub fn run() {
         .manage(state::AppState::default())
         .setup(|app| {
             use tauri::Manager;
-            let path = app.path().app_config_dir()?.join("printers.json");
-            *app.state::<state::AppState>().printers.lock().expect("printer store") = profiles::Store::load(path);
+            let dir = app.path().app_config_dir()?;
+            let state = app.state::<state::AppState>();
+            *state.printers.lock().expect("printer store") = profiles::Store::load(dir.join("printers.json"));
+            *state.prefs.lock().expect("settings") = prefs::Prefs::load(dir.join("settings.json"));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -27,13 +31,20 @@ pub fn run() {
             commands::suggest_palette,
             commands::reduce_palette,
             commands::merge_slots,
-            commands::set_height,
+            commands::set_size,
+            commands::undo_size,
+            commands::reset_size,
+            commands::fit_to_plate,
             commands::set_mesh_ops,
             commands::set_color_ops,
             commands::printers,
             commands::set_printer,
             commands::save_printer,
             commands::delete_printer,
+            commands::prefs,
+            commands::set_waste,
+            commands::set_plate,
+            commands::set_flush,
             commands::preview_mesh,
             commands::pick,
             commands::paint,
