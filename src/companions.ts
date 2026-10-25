@@ -284,6 +284,8 @@ export async function gatherCompanions(model: string, extras: string[] = []): Pr
     if (kind === "unmapped") {
       panel.replaceChildren(head, el("p", "help", t("files.unmapped.help")), sources());
       if (items.length) {
+        // The chosen .mtl changed nothing for these: say so, or it looks like it did not load.
+        if (library && !blend) panel.append(el("p", "note files__warn", t("files.unmapped.libraryEmpty", { name: fileName(library) })));
         panel.append(progress(ready, items.length), unmappedRows(items));
         if (blend) panel.append(el("p", "help files__added", t("files.unmapped.blendNote")));
       } else {

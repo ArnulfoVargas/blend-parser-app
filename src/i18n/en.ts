@@ -73,6 +73,7 @@ export const en: Catalog = {
   "files.unmapped.fromBlend": "From the .blend, by name",
   "files.unmapped.blendNote": "On convert, each material takes the texture of the material with the same name in the .blend. An image chosen by hand comes first.",
   "files.unmapped.allMapped": "The chosen .mtl names a texture for every material.",
+  "files.unmapped.libraryEmpty": "{name} names no textures for these materials either; it may be the same grey .mtl. Try the .blend or the images.",
   "files.source.images": "Images",
   "files.source.imagesHelp": "Several at once are matched by name",
   "files.source.library": "Another .mtl",

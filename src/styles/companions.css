@@ -70,4 +70,7 @@
 @media (max-width: 560px) { .files__sources, .files__grid { grid-template-columns: minmax(0, 1fr); } }
 
 /* Files dragged over the open dialog are added to it. */
-#files-dialog.is-dropping::after { content: attr(data-drop); position: absolute; inset: var(--space-xs); z-index: 1; display: grid; place-items: center; padding: var(--space-lg); border: 2px dashed var(--color-accent); border-radius: calc(var(--radius-card) - 4px); background: color-mix(in oklab, var(--color-accent-soft) 85%, var(--color-paper)); color: var(--color-ink); font: 700 var(--text-xl)/1.2 var(--font-display); letter-spacing: var(--tracking-display); text-align: center; pointer-events: none; }
+#files-dialog::after { content: attr(data-drop); position: absolute; inset: var(--space-xs); z-index: 1; display: grid; place-items: center; padding: var(--space-lg); border: 2px dashed var(--color-accent); border-radius: calc(var(--radius-card) - 4px); background: color-mix(in oklab, var(--color-accent-soft) 55%, transparent); backdrop-filter: blur(1.5px); color: var(--color-ink); font: 700 var(--text-xl)/1.2 var(--font-display); letter-spacing: var(--tracking-display); text-align: center; text-shadow: 0 1px 0 var(--glint); pointer-events: none; opacity: 0; visibility: hidden; transform: scale(0.985); transition: opacity var(--dur-short) var(--ease-out), transform var(--dur-short) var(--ease-out), visibility var(--dur-short); }
+#files-dialog.is-dropping::after { opacity: 1; visibility: visible; transform: none; }
+@media (prefers-reduced-motion: reduce) { #files-dialog::after { transition: none; transform: none; } }
+.files__warn { font-size: var(--text-xs); }

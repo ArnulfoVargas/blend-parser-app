@@ -77,6 +77,7 @@ export const es = {
   "files.unmapped.fromBlend": "Del .blend, por nombre",
   "files.unmapped.blendNote": "Al convertir, cada material toma la textura del material con el mismo nombre en el .blend. Una imagen elegida a mano tiene prioridad.",
   "files.unmapped.allMapped": "El .mtl elegido indica una textura para cada material.",
+  "files.unmapped.libraryEmpty": "{name} tampoco indica texturas para estos materiales; quizá es el mismo .mtl gris. Prueba con el .blend o con las imágenes.",
   "files.source.images": "Imágenes",
   "files.source.imagesHelp": "Varias a la vez se emparejan por nombre",
   "files.source.library": "Otro .mtl",
