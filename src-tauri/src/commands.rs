@@ -246,26 +246,44 @@ pub async fn undo(app: AppHandle) -> CmdResult<Summary> {
     .await
 }
 
-/// One STL per colour in a ZIP. Returns how many colour files were written.
+/// The model split into solid pieces per colour, laid out on single-colour
+/// plates, with STLs and an assembly guide, all in one ZIP.
 #[tauri::command]
-pub async fn export_color_zip(app: AppHandle, path: String, thickness_mm: f32, main_solid: bool) -> CmdResult<usize> {
-    if !(0.2..=20.0).contains(&thickness_mm) {
-        return Err("El grosor debe estar entre 0,2 y 20 mm.".into());
+pub async fn export_color_zip(
+    app: AppHandle,
+    path: String,
+    voxel_mm: f32,
+    depth_mm: f32,
+    core_slot: Option<u8>,
+    min_piece_mm3: f32,
+) -> CmdResult<dto::KitDto> {
+    if !(0.2..=2.0).contains(&voxel_mm) {
+        return Err("El detalle debe estar entre 0,2 y 2 mm.".into());
     }
+    if !(0.0..=50.0).contains(&depth_mm) {
+        return Err("La profundidad debe estar entre 0 y 50 mm.".into());
+    }
+    let handle = app.clone();
     with_doc(app, move |d| {
-        let pieces = d.project.color_pieces(thickness_mm, main_solid);
-        let hexes: Vec<String> =
-            pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
-        let files: Vec<bp_3mf::ColorFile> = pieces
-            .iter()
-            .zip(&hexes)
-            .map(|(p, hex)| bp_3mf::ColorFile { hex, positions: &p.positions, tris: &p.tris, solid: p.solid })
-            .collect();
+        let emit = |msg: &str| {
+            let _ = handle.emit("progress", msg.to_string());
+        };
+        emit("Dividiendo en piezas");
+        let params = bp_core::SplitParams { voxel_mm, depth_mm, core_slot, min_piece_mm3: min_piece_mm3.max(0.0) };
+        let split = d.project.split_by_color(params);
+        if split.pieces.is_empty() {
+            return Err("No se pudo sacar ninguna pieza sólida: revisa que la malla esté cerrada.".into());
+        }
+        emit("Acomodando en placas");
+        let kit = bp_core::kit::kit(split, d.printer.bed_mm());
+        emit("Dibujando la guía de armado");
+        let palette: Vec<String> = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let info = bp_3mf::KitInfo { name: &name, palette: &palette, printer: d.printer };
         let file = std::fs::File::create(&path).map_err(|e| format!("{path}: {e}"))?;
-        bp_3mf::write_color_zip(std::io::BufWriter::new(file), &name, &files)
+        let s = bp_3mf::write_kit_zip(std::io::BufWriter::new(file), &kit, &info)
             .map_err(|e| format!("No se pudo escribir el ZIP: {e}"))?;
-        Ok(files.len())
+        Ok(dto::KitDto { pieces: s.pieces, plates: s.plates, oversize: s.oversize })
     })
     .await
 }

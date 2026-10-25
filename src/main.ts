@@ -353,26 +353,51 @@ $("#export").addEventListener("click", async () => {
 });
 
 const zipDialog = $<HTMLDialogElement>("#zip-dialog");
+const syncCore = () => {
+  $<HTMLElement>("#core-field").hidden = !(Number($<HTMLInputElement>("#depth").value) > 0);
+};
+$("#depth").addEventListener("input", syncCore);
 $("#open-zip").addEventListener("click", () => {
-  if (app.dataset.state === "ready") zipDialog.showModal();
+  if (app.dataset.state !== "ready" || !summary) return;
+  const core = $<HTMLSelectElement>("#core");
+  const keep = core.value;
+  core.replaceChildren(
+    new Option("El más usado", ""),
+    ...summary.slots.map((s, i) => new Option(`Ranura ${i + 1} · ${s.hex}`, String(i))),
+  );
+  core.value = [...core.options].some((o) => o.value === keep) ? keep : "";
+  syncCore();
+  zipDialog.showModal();
 });
 $("#export-zip").addEventListener("click", async () => {
   if (!summary) return;
-  const shell = $<HTMLInputElement>("#shell");
-  const mm = Number(shell.value);
-  const ok = mm >= 0.2 && mm <= 20;
-  shell.setAttribute("aria-invalid", String(!ok));
-  if (!ok) {
-    shell.focus();
+  const depth = $<HTMLInputElement>("#depth");
+  const minPiece = $<HTMLInputElement>("#min-piece");
+  const depthMm = Number(depth.value);
+  const minPieceMm3 = Number(minPiece.value);
+  const depthOk = depth.value !== "" && depthMm >= 0 && depthMm <= 50;
+  const minOk = minPiece.value !== "" && minPieceMm3 >= 0 && minPieceMm3 <= 10000;
+  depth.setAttribute("aria-invalid", String(!depthOk));
+  minPiece.setAttribute("aria-invalid", String(!minOk));
+  if (!depthOk || !minOk) {
+    (depthOk ? minPiece : depth).focus();
     return;
   }
+  const core = $<HTMLSelectElement>("#core").value;
+  const options = {
+    voxelMm: Number($<HTMLSelectElement>("#voxel").value),
+    depthMm,
+    coreSlot: depthMm > 0 && core !== "" ? Number(core) : null,
+    minPieceMm3,
+  };
   zipDialog.close();
   if (!(await confirmOversize())) return;
-  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, "_colores.zip"), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, "_piezas.zip"), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
   await work(async () => {
-    const n = await api.exportColorZip(path, mm, $<HTMLInputElement>("#main-solid").checked);
-    toast(`${n} colores guardados en ${path}`);
+    const r = await api.exportColorZip(path, options);
+    const extra = r.oversize ? ` ${r.oversize} no caben en la placa; revisa la guía.` : "";
+    toast(`${r.pieces} piezas en ${r.plates} placas, con guía de armado, guardadas en ${path}.${extra}`, r.oversize ? "error" : undefined);
   });
 });
 

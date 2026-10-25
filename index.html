@@ -200,13 +200,29 @@
   <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip">Exportar por color</h2>
-      <p class="help">Un STL cerrado por color en un .zip, para imprimir cada color como pieza aparte.</p>
+      <p class="help">Divide el modelo en piezas sólidas, una o varias por color, que encajan entre sí. El .zip trae un 3MF con las piezas acomodadas en placas de un solo color, un STL por pieza y una guía de armado con imágenes.</p>
       <div class="field">
-        <label for="shell">Grosor de cada color</label>
-        <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2" aria-describedby="shell-help"><span>mm</span></div>
-        <p class="help" id="shell-help">Entre 0,2 y 20&nbsp;mm.</p>
+        <label for="voxel">Detalle de las uniones</label>
+        <select class="select" id="voxel">
+          <option value="0.3">Fino, 0,3&nbsp;mm (más lento)</option>
+          <option value="0.5" selected>Normal, 0,5&nbsp;mm</option>
+          <option value="0.8">Rápido, 0,8&nbsp;mm</option>
+        </select>
       </div>
-      <label class="check"><input type="checkbox" id="main-solid" checked> Color principal como sólido completo</label>
+      <div class="field">
+        <label for="depth">Profundidad de cada color</label>
+        <div class="field__unit"><input class="input" id="depth" type="number" inputmode="decimal" min="0" max="50" step="0.5" value="0" aria-describedby="depth-help"><span>mm</span></div>
+        <p class="help" id="depth-help">0: cada color llega hasta el centro y las piezas son macizas. Con más de 0, cada color es una placa de ese grosor sobre un núcleo de un solo color.</p>
+      </div>
+      <div class="field" id="core-field">
+        <label for="core">Color del núcleo</label>
+        <select class="select" id="core"></select>
+      </div>
+      <div class="field">
+        <label for="min-piece">Unir piezas menores de</label>
+        <div class="field__unit"><input class="input" id="min-piece" type="number" inputmode="decimal" min="0" max="10000" step="5" value="30" aria-describedby="min-piece-help"><span>mm³</span></div>
+        <p class="help" id="min-piece-help">Las migas más pequeñas se pegan a la pieza vecina con la que más contacto tienen.</p>
+      </div>
       <div class="dialog__actions">
         <button class="btn btn--quiet" type="submit" value="cancel">Cancelar</button>
         <button class="btn btn--primary" type="button" id="export-zip">Exportar .zip</button>

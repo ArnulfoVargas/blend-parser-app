@@ -58,6 +58,30 @@ impl Node {
         matches!(self, Node::Split(_))
     }
 
+    /// The label of the leaf containing barycentric point `b` of the root triangle.
+    pub fn label_at(&self, b: Bary) -> u8 {
+        let (mut node, mut u) = (self, b);
+        loop {
+            match node {
+                Node::Leaf(l) => return *l,
+                Node::Split(k) => {
+                    // Inverse of `geom::split4`: which child holds `u`, and where in it.
+                    let (i, w) = if u[0] >= 0.5 {
+                        (0, [2.0 * u[0] - 1.0, 2.0 * u[1], 2.0 * u[2]])
+                    } else if u[1] >= 0.5 {
+                        (1, [2.0 * u[0], 2.0 * u[1] - 1.0, 2.0 * u[2]])
+                    } else if u[2] >= 0.5 {
+                        (2, [2.0 * u[1], 2.0 * u[2] - 1.0, 2.0 * u[0]])
+                    } else {
+                        (3, [1.0 - 2.0 * u[2], 1.0 - 2.0 * u[0], 1.0 - 2.0 * u[1]])
+                    };
+                    node = &k[i];
+                    u = w;
+                }
+            }
+        }
+    }
+
     /// Relabels every leaf through `map` (old slot -> new slot), collapsing
     /// splits whose children end up the same colour.
     pub fn relabel(&self, map: &[u8]) -> Node {
@@ -85,6 +109,15 @@ mod tests {
         let n = Node::Split(Box::new([Node::Leaf(0), Node::Leaf(2), Node::Leaf(0), Node::Leaf(2)]));
         assert_eq!(n.relabel(&[0, 1, 0]), Node::Leaf(0));
         assert!(n.relabel(&[0, 1, 1]).is_split());
+    }
+
+    #[test]
+    fn label_at_finds_the_leaf_under_a_point() {
+        let n = Node::Split(Box::new([Node::Leaf(1), Node::Leaf(2), Node::Leaf(3), Node::Leaf(4)]));
+        // The centre of each child, mapped back to the root.
+        for (kid, label) in geom::split4(&ROOT).iter().zip(1..) {
+            assert_eq!(n.label_at(geom::bary_in(kid, [1.0 / 3.0; 3])), label);
+        }
     }
 }
 

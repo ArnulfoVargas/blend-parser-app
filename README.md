@@ -16,8 +16,12 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   simplificar la malla y aplanar la base, con estimación de cambios de filamento y purga.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
-- Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
-  dentro; opcionalmente el color principal como sólido completo) y un `colores.txt`.
+- Exportar por color: divide el modelo en piezas **sólidas** (no cáscaras) que encajan entre sí.
+  Cada voxel interior toma el color de la superficie pintada más cercana, o solo hasta una
+  profundidad dada sobre un núcleo de un color; las migas se unen a su vecina. El `.zip` trae un
+  3MF con las piezas giradas sobre su cara más plana y acomodadas en placas de un solo color, un
+  STL por pieza y una guía de armado (`guia-de-armado.html` con imágenes de cada paso, e
+  `instrucciones.txt`).
 
 ## Descarga
 
@@ -97,11 +101,13 @@ crates/
     mesh        Reparación, piezas sueltas, simplificación (meshoptimizer), aplanado con corte real
     optimize    Limpieza de islas de color por adyacencia
     estimate    Cambios de filamento por capa y purga
-    split       Una pieza cerrada por color (cáscara o sólido completo)
+    split       Piezas sólidas por color: vóxeles, Voronoi de la superficie, tetraedros marchantes
+    kit         Orientación de cada pieza, acomodo en placas por color y orden de armado
+    render      Renderizador por software para las imágenes de la guía
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
-  bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color
+  bp-3mf/     Escritor del 3MF de Bambu (pintado o por placas), STL binario y ZIP con guía de armado
 src-tauri/    Capa de aplicación: comandos, estado, malla en binario hacia la UI
 src/          Interfaz (TypeScript + three.js), diseño Dose
   api.ts        Tipos y llamadas al backend
