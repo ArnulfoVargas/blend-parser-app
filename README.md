@@ -105,8 +105,31 @@ Para añadir un idioma:
 
 Los instaladores de Windows (`.exe`, `.msi`) y Linux (`.AppImage`, `.deb`) están en
 [Releases](https://github.com/ArnulfoVargas/blend-parser-app/releases). Hace falta tener
-**Blender 3.6 o posterior** instalado. Los binarios no están firmados: en Windows,
-SmartScreen puede pedir "Más información > Ejecutar de todas formas".
+**Blender 3.6 o posterior** instalado.
+
+Los instaladores de Windows se firman con un certificado de
+[SignPath Foundation](https://signpath.org) en cuanto el proyecto queda aprobado; hasta entonces
+salen sin firmar, y SmartScreen puede pedir "Más información > Ejecutar de todas formas". Aun
+firmados, SmartScreen puede avisar en las primeras descargas de una versión mientras el
+certificado gana reputación.
+
+**Code signing policy / Política de firma de código:** [CODE_SIGNING.md](CODE_SIGNING.md).
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
+### Activar la firma (mantenedores)
+
+1. Solicitar el proyecto en [signpath.org/apply](https://signpath.org/apply.html) y activar la
+   verificación en dos pasos en GitHub y en SignPath.
+2. En SignPath: crear el proyecto con el repositorio de GitHub como origen, pegar
+   [`.signpath/artifact-configuration.xml`](.signpath/artifact-configuration.xml) como configuración
+   de artefactos y crear una política de firma `release-signing` con aprobación manual.
+3. En GitHub (Settings > Secrets and variables > Actions): el secreto `SIGNPATH_API_TOKEN` y las
+   variables `SIGNPATH_ORGANIZATION_ID` y `SIGNPATH_PROJECT_SLUG` (y `SIGNPATH_SIGNING_POLICY_SLUG`
+   si la política no se llama `release-signing`).
+
+Con `SIGNPATH_PROJECT_SLUG` definida, el flujo de release compila los instaladores, espera la
+aprobación en SignPath, vuelve a firmarlos para el actualizador y los publica.
 
 ## Requisitos para compilar
 
