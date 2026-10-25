@@ -82,21 +82,33 @@ const toastAction = $<HTMLButtonElement>("#toast-action");
 let toastTimer = 0;
 let onToastAction: (() => void) | null = null;
 
+/** Hides the notice. */
+const hideToast = () => toastEl.matches(":popover-open") && toastEl.hidePopover();
+
+/** Shows the notice over the stage's corner. It is a popover, so it lands above any open dialog too. */
+function raiseToast() {
+  const r = $(".stage__view").getBoundingClientRect();
+  toastEl.style.right = `${Math.max(16, window.innerWidth - r.right + 16)}px`;
+  toastEl.style.bottom = `${Math.max(16, window.innerHeight - r.bottom + 16)}px`;
+  hideToast();
+  toastEl.showPopover();
+}
+
 /** A visible notice on the stage. Errors stay until closed; the rest fade after 8 s. */
 function toast(message: string, kind: "ok" | "error" = "ok", action?: { label: string; run: () => void }, sticky = false) {
   window.clearTimeout(toastTimer);
   bind("toast", message);
   toastEl.dataset.kind = kind;
   toastEl.setAttribute("role", kind === "error" ? "alert" : "status");
-  toastEl.hidden = false;
+  raiseToast();
   onToastAction = action?.run ?? null;
   toastAction.hidden = !action;
   if (action) toastAction.textContent = action.label;
-  if (kind !== "error" && !sticky) toastTimer = window.setTimeout(() => (toastEl.hidden = true), 8000);
+  if (kind !== "error" && !sticky) toastTimer = window.setTimeout(hideToast, 8000);
 }
-$("#toast-close").addEventListener("click", () => (toastEl.hidden = true));
+$("#toast-close").addEventListener("click", hideToast);
 toastAction.addEventListener("click", () => {
-  toastEl.hidden = true;
+  hideToast();
   onToastAction?.();
 });
 
@@ -148,6 +160,8 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     measured.push(p.map((v, i) => v / st[i]) as Vec3);
     syncMeasure();
   },
+  distance: (a, b) => t("measure.short", { d: nf(Math.hypot(...a.map((v, i) => v - b[i])) * (summary?.size.previewScale ?? 1), 2) }),
+  resize: (axis, v) => resizeAxis(axis, v),
 });
 
 /** Points in preview units for the current size. */
@@ -306,7 +320,8 @@ const SIZE_MIN = 1;
 const SIZE_MAX = 1000;
 let locked = true;
 
-const uniform = (k: number[]) => k.every((v) => Math.abs(v - k[0]) < 1e-5 * Math.max(1, k[0]));
+// Sizes are kept to hundredths of a millimetre, so equal factors can differ by that much.
+const uniform = (k: number[]) => k.every((v) => Math.abs(v - k[0]) < 5e-4 * k[0]);
 
 function syncLock() {
   lockBtn.setAttribute("aria-pressed", String(locked));
@@ -322,6 +337,8 @@ function renderSize(s: Summary) {
   bind("scaleHelp", even
     ? t("size.scaleHelp")
     : t("size.stretched", { x: nf(z.axisScale[0] * 100, 1), y: nf(z.axisScale[1] * 100, 1), z: nf(z.axisScale[2] * 100, 1) }));
+  viewer.setSizeValues(z.targetMm);
+  viewer.setPlate(s.plate, z.previewScale);
   bind("sizeOriginal", dims(z.originalMm, 2));
   bind("sizeResult", dims(s.sizeMm, 2));
   bind("dims", dims(s.sizeMm, 1));
@@ -344,19 +361,21 @@ function requestSize(next: number[], field?: HTMLInputElement) {
   void apply(() => api.setSize(next.map((v) => Math.round(v * 100) / 100) as Vec3));
 }
 
-axisInputs.forEach((el, axis) => el.addEventListener("change", () => {
+/** One axis typed in the panel or on the view; locked, the other two follow. */
+function resizeAxis(axis: number, v: number, field?: HTMLInputElement) {
   if (!summary) return;
-  const v = Number(el.value);
   const now = summary.size.targetMm;
-  if (!(v > 0)) return requestSize([NaN, NaN, NaN], el);
-  // Locked, the other two follow; unlocked, only this axis changes.
-  requestSize(locked ? now.map((x) => (x * v) / now[axis]) : now.map((x, i) => (i === axis ? v : x)), el);
-}));
+  if (!(v > 0)) return requestSize([NaN, NaN, NaN], field);
+  requestSize(locked ? now.map((x) => (x * v) / now[axis]) : now.map((x, i) => (i === axis ? v : x)), field);
+}
+axisInputs.forEach((el, axis) => el.addEventListener("change", () => resizeAxis(axis, Number(el.value), el)));
 
-lockBtn.addEventListener("click", () => {
+function toggleLock() {
   locked = !locked;
   syncLock();
-});
+  if (app.dataset.tool === "size") bind("hint", t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }));
+}
+lockBtn.addEventListener("click", toggleLock);
 
 /** A uniform scale against the original: it brings back the original proportions. */
 function scaleTo(pct: number) {
@@ -630,6 +649,7 @@ function fillFlushTable(s: Summary) {
       <tbody>${s.slots.map((_, i) => `<tr><th scope="row" title="${t("slot.name", { n: i + 1 })}">${swatch(i)}</th>${s.slots.map((_, j) => (i === j
         ? `<td class="flush__self" aria-hidden="true">—</td>`
         : `<td><input class="input flush__cell${w.flushSet[i * n + j] ? " is-set" : ""}" type="number" inputmode="numeric" min="0" max="2000" step="10"
+            style="--heat:${Math.min(1, Math.max(0, (w.flushMm3Matrix[i * n + j] - 107) / 693)).toFixed(2)}"
             data-from="${i}" data-to="${j}" value="${Math.round(w.flushMm3Matrix[i * n + j])}"
             aria-label="${t("wasteForm.flushCell", { from: i + 1, to: j + 1 })}"></td>`)).join("")}</tr>`).join("")}</tbody>`;
   }
@@ -711,7 +731,7 @@ async function openFile(path: string) {
   if (!lower.endsWith(".blend")) return setState("error", { key: "error.notBlend", params: { name } });
   step = { key: "blender", name: "" };
   setState("converting");
-  toastEl.hidden = true;
+  hideToast();
   unlistenProgress?.();
   unlistenProgress = await listen<Progress>("progress", (e) => {
     step = e.payload;
@@ -1145,7 +1165,6 @@ async function deletePrinter(p: PrinterProfile) {
   }
 }
 
-$("#open-printers").addEventListener("click", () => openPrinterDialog());
 $("#printer-new").addEventListener("click", () => {
   fillPrinterForm(null);
   pf.name.focus();
@@ -1176,9 +1195,58 @@ function setTool(tool: Tool) {
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
-  bind("hint", t(`hint.${tool}`));
+  bind("hint", tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
   syncMeasure();
 }
+
+// The plate in the view, remembered between sessions.
+const bedBtn = $<HTMLButtonElement>("#toggle-bed");
+const BED_KEY = "blendparser.bed";
+let bedOn = true;
+try {
+  bedOn = localStorage.getItem(BED_KEY) !== "0";
+} catch {
+  // Storage blocked: the plate shows.
+}
+function setBed(on: boolean) {
+  bedOn = on;
+  bedBtn.setAttribute("aria-pressed", String(on));
+  viewer.setBedVisible(on);
+  try {
+    localStorage.setItem(BED_KEY, on ? "1" : "0");
+  } catch {
+    // Not remembered; it still applies now.
+  }
+}
+bedBtn.addEventListener("click", () => setBed(!bedOn));
+setBed(bedOn);
+
+// The tool shelf shows icons; expanded, also their names. Remembered too.
+const toolbar = $<HTMLDivElement>("#toolbar");
+const expandBtn = $<HTMLButtonElement>("#toolbar-expand");
+const SHELF_KEY = "blendparser.toolNames";
+function setExpanded(on: boolean) {
+  toolbar.dataset.expanded = String(on);
+  expandBtn.setAttribute("aria-expanded", String(on));
+  const label = on ? t("stage.collapse") : t("stage.expand");
+  bind("toolbarExpand", label);
+  expandBtn.title = label;
+  expandBtn.setAttribute("aria-label", label);
+  try {
+    localStorage.setItem(SHELF_KEY, on ? "1" : "0");
+  } catch {
+    // Not remembered.
+  }
+}
+expandBtn.addEventListener("click", () => setExpanded(toolbar.dataset.expanded !== "true"));
+let shelfOpen = false;
+try {
+  shelfOpen = localStorage.getItem(SHELF_KEY) === "1";
+} catch {
+  // Collapsed by default.
+}
+setExpanded(shelfOpen);
+viewer.setSizeLabels(["X", "Y", "Z"].map((axis) => t("size.axisLabel", { axis })));
 
 document.querySelectorAll<HTMLButtonElement>("button[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view as View)));
 document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.addEventListener("click", () => setTool(b.dataset.tool as Tool)));
@@ -1199,6 +1267,9 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "b") setTool("brush");
   else if (e.key === "o") setTool("orbit");
   else if (e.key === "m") setTool("measure");
+  else if (e.key === "s") setTool("size");
+  else if (e.key === "p") setBed(!bedOn);
+  else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
   else if (e.key === "Escape" && measured.length) {
     measured = [];
@@ -1321,12 +1392,29 @@ onLangChange(() => {
   }
   setState(state);
   setTool((app.dataset.tool as Tool) ?? "orbit");
+  setExpanded(toolbar.dataset.expanded === "true");
+  viewer.setSizeLabels(["X", "Y", "Z"].map((axis) => t("size.axisLabel", { axis })));
   syncLock();
   syncOutputs();
   bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
   if (summary) render(summary);
   syncBrush();
-  if (!toastEl.hidden && toastEl.dataset.kind !== "error") toastEl.hidden = true;
+  if (toastEl.dataset.kind !== "error") hideToast();
+});
+
+// A click outside a dialog's box closes it, like Esc. The press has to start
+// outside too, so dragging a selection out of a field does not close it.
+document.querySelectorAll("dialog").forEach((d) => {
+  let fromOutside = false;
+  const outside = (e: MouseEvent) => {
+    const r = d.getBoundingClientRect();
+    return e.target === d && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom);
+  };
+  d.addEventListener("pointerdown", (e) => (fromOutside = outside(e)));
+  d.addEventListener("click", (e) => {
+    if (fromOutside && outside(e)) d.close();
+    fromOutside = false;
+  });
 });
 
 // ---- start -------------------------------------------------------------------------------

@@ -19,8 +19,6 @@
         <ul class="menu" role="menu" hidden>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="open"><span data-i18n="menu.open"></span> <kbd>Ctrl+O</kbd></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+S</kbd></button></li>
-          <li role="separator" class="menu__sep"></li>
-          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="printers"><span data-i18n="menu.printers"></span></button></li>
         </ul>
       </li>
       <li>
@@ -29,6 +27,7 @@
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undo"><span data-i18n="menu.undo"></span> <kbd>Ctrl+Z</kbd></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undoSize"><span data-i18n="menu.undoSize"></span></button></li>
           <li role="separator" class="menu__sep"></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="printers"><span data-i18n="menu.printers"></span></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="waste"><span data-i18n="menu.waste"></span></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="prefs"><span data-i18n="menu.prefs"></span> <kbd>Ctrl+,</kbd></button></li>
         </ul>
@@ -49,7 +48,6 @@
       <select class="select" id="nozzle" name="nozzle" title="Diámetro de la boquilla" data-i18n-attr="title:bar.nozzleTitle">
         <option value="0.4">0,4 mm</option>
       </select>
-      <button class="btn btn--quiet" type="button" id="open-printers" data-i18n="bar.myPrinters">Mis impresoras</button>
       <!-- Oculto hasta que la exportación por piezas sólidas esté completa (PR #1). -->
       <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" hidden data-i18n="bar.byColour">Por color (.zip)</button>
       <button class="btn btn--primary" type="button" id="export" aria-disabled="true"><span class="btn__warn" aria-hidden="true"></span><span data-bind="exportLabel">Exportar .3mf</span></button>
@@ -236,16 +234,21 @@
             <button type="button" data-view="filament" aria-pressed="true" data-i18n="stage.result">Resultado</button>
             <button type="button" data-view="texture" aria-pressed="false" data-i18n="stage.original">Original</button>
           </div>
-          <div class="seg" role="group" aria-label="Herramienta" data-i18n-attr="aria-label:stage.tool">
-            <button type="button" data-tool="orbit" aria-pressed="true" title="Orbitar (O)" data-i18n-attr="title:stage.orbitTitle"><span data-i18n="stage.orbit">Orbitar</span> <kbd>O</kbd></button>
-            <button type="button" data-tool="brush" aria-pressed="false" title="Pincel (B)" data-i18n-attr="title:stage.brushTitle"><span data-i18n="stage.brush">Pincel</span> <kbd>B</kbd></button>
-            <button type="button" data-tool="measure" aria-pressed="false" title="Medir (M)" data-i18n-attr="title:stage.measureTitle"><span data-i18n="stage.measure">Medir</span> <kbd>M</kbd></button>
-          </div>
           <button class="btn btn--quiet btn--sm" type="button" id="undo" disabled data-i18n="stage.undo">Deshacer</button>
         </div>
       </div>
       <div class="stage__view">
         <canvas id="viewport" aria-label="Vista 3D del modelo. Arrastra para orbitar, rueda para acercar." data-i18n-attr="aria-label:stage.canvas"></canvas>
+        <div class="toolbar" id="toolbar" role="toolbar" aria-orientation="vertical" data-i18n-attr="aria-label:stage.tool" data-expanded="false">
+          <button class="toolbar__btn" type="button" data-tool="orbit" aria-pressed="true" data-i18n-attr="title:stage.orbitTitle;aria-label:stage.orbitTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9.5a8 8 0 0 1 13.8-3.2"/><path d="M19.5 14.5a8 8 0 0 1-13.8 3.2"/><path d="M18.6 2.8v3.7h-3.7"/><path d="M5.4 21.2v-3.7h3.7"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg><span class="toolbar__label" data-i18n="stage.orbit"></span><kbd>O</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="brush" aria-pressed="false" data-i18n-attr="title:stage.brushTitle;aria-label:stage.brushTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4.5 19.5 9.5 11 18l-5-5z"/><path d="M6 13c-2 0-3 1.5-3 3.5S2 20 2 20s2.5.5 4.5-.5S10 17 10 15.5"/></svg><span class="toolbar__label" data-i18n="stage.brush"></span><kbd>B</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="measure" aria-pressed="false" data-i18n-attr="title:stage.measureTitle;aria-label:stage.measureTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5 15.5 3l5.5 5.5L8.5 21z"/><path d="M7.5 11l2 2M10.5 8l1.5 1.5M13.5 5l2 2M5 14l1.5 1.5"/></svg><span class="toolbar__label" data-i18n="stage.measure"></span><kbd>M</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="size" aria-pressed="false" data-i18n-attr="title:stage.sizeTitle;aria-label:stage.sizeTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 15v5h-5"/><path d="M4 4l6 6M20 20l-6-6"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg><span class="toolbar__label" data-i18n="stage.size"></span><kbd>S</kbd></button>
+          <span class="toolbar__sep" aria-hidden="true"></span>
+          <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
+          <span class="toolbar__sep" aria-hidden="true"></span>
+          <button class="toolbar__btn toolbar__expand" type="button" id="toolbar-expand" aria-expanded="false"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg><span class="toolbar__label" data-bind="toolbarExpand"></span></button>
+        </div>
         <div class="banner" id="fit-banner" hidden>
           <p data-bind="fitBanner"></p>
           <button class="btn btn--quiet btn--sm" type="button" id="fit" data-i18n="size.fit">Ajustar a la placa</button>
@@ -253,7 +256,7 @@
         <span class="busybar" aria-hidden="true"></span>
         <p class="stage__empty" data-i18n="stage.empty">La vista previa aparece cuando sueltas un archivo.</p>
         <p class="stage__busy" data-bind="step"></p>
-        <div class="toast" id="toast" role="status" hidden>
+        <div class="toast" id="toast" role="status" popover="manual">
           <p data-bind="toast"></p>
           <button class="btn btn--quiet btn--sm" type="button" id="toast-action" hidden></button>
           <button class="toast__close" type="button" id="toast-close" aria-label="Cerrar aviso" data-i18n-attr="aria-label:toast.closeLabel" data-i18n="toast.close">Cerrar</button>
@@ -336,63 +339,83 @@
     </form>
   </dialog>
 
-  <dialog class="dialog dialog--wide" id="waste-dialog" aria-labelledby="h-waste-dialog">
-    <form class="dialog__body" id="waste-form" novalidate>
-      <h2 id="h-waste-dialog" data-i18n="wasteForm.title">Ajustes del desperdicio</h2>
-      <p class="help" data-i18n="wasteForm.help">Se guardan para los próximos modelos. Vacía un campo opcional para volver al valor automático.</p>
-      <div class="grid2">
-        <div class="field">
-          <label for="w-layer" data-i18n="wasteForm.layer">Altura de capa</label>
-          <div class="field__unit"><input class="input" id="w-layer" type="number" inputmode="decimal" min="0.04" max="1" step="0.01" aria-describedby="w-layer-help"><span>mm</span></div>
-          <p class="help" id="w-layer-help" data-bind="layerHelp"></p>
-        </div>
-        <div class="field">
-          <span class="field__label" data-i18n="wasteForm.nozzle">Boquilla</span>
-          <p class="num field__static" data-bind="wasteNozzle"></p>
-          <p class="help" data-i18n="wasteForm.nozzleHelp">La de la impresora elegida en la barra.</p>
-        </div>
-        <div class="field">
-          <label for="w-material" data-i18n="wasteForm.material">Material</label>
-          <select class="select" id="w-material"></select>
-        </div>
-        <div class="field">
-          <label for="w-density" data-i18n="wasteForm.density">Densidad</label>
-          <div class="field__unit"><input class="input" id="w-density" type="number" inputmode="decimal" min="0.5" max="3" step="0.01"><span>g/cm³</span></div>
-        </div>
-        <div class="field">
-          <label for="w-diameter" data-i18n="wasteForm.diameter">Diámetro del filamento</label>
-          <div class="field__unit"><input class="input" id="w-diameter" type="number" inputmode="decimal" min="1" max="3.5" step="0.01"><span>mm</span></div>
-        </div>
-        <div class="field">
-          <label for="w-multiplier" data-i18n="wasteForm.multiplier">Multiplicador de purga</label>
-          <div class="field__unit"><input class="input" id="w-multiplier" type="number" inputmode="decimal" min="0.1" max="3" step="0.05"><span>×</span></div>
-        </div>
-        <div class="field">
-          <label for="w-start" data-i18n="wasteForm.start">Purga inicial</label>
-          <div class="field__unit"><input class="input" id="w-start" type="number" inputmode="decimal" min="0" max="2000" step="5"><span>mm³</span></div>
-        </div>
-        <div class="field">
-          <label for="w-prime" data-i18n="wasteForm.prime">Cebado en la torre por cambio</label>
-          <div class="field__unit"><input class="input" id="w-prime" type="number" inputmode="decimal" min="0" max="500" step="1"><span>mm³</span></div>
-        </div>
-        <div class="field">
-          <label for="w-reuse" data-i18n="wasteForm.reuse">Purga aprovechada en relleno o soportes</label>
-          <div class="field__unit"><input class="input" id="w-reuse" type="number" inputmode="numeric" min="0" max="90" step="5" aria-describedby="w-reuse-help"><span>%</span></div>
-          <p class="help" id="w-reuse-help" data-i18n="wasteForm.reuseHelp">Un supuesto: depende del relleno y los soportes que genere el laminador. Con más de 0 %, el 3MF activa «purgar en el relleno».</p>
-        </div>
+  <dialog class="dialog dialog--sheet" id="waste-dialog" aria-labelledby="h-waste-dialog">
+    <form class="sheet" id="waste-form" novalidate>
+      <header class="sheet__head">
+        <h2 id="h-waste-dialog" data-i18n="wasteForm.title">Ajustes del desperdicio</h2>
+        <p class="help" data-i18n="wasteForm.help"></p>
+      </header>
+      <div class="sheet__body">
+        <section class="sheet__section" aria-labelledby="h-wf-print">
+          <h3 id="h-wf-print" data-i18n="wasteForm.print"></h3>
+          <div class="grid3">
+          <div class="field">
+            <label for="w-layer" data-i18n="wasteForm.layer"></label>
+            <div class="unit-input"><input class="input" id="w-layer" type="number" inputmode="decimal" min="0.04" max="1" step="0.01" aria-describedby="w-layer-help"><span aria-hidden="true">mm</span></div>
+            <p class="help" id="w-layer-help" data-bind="layerHelp"></p>
+          </div>
+          <div class="field">
+            <span class="field__label" data-i18n="wasteForm.nozzle"></span>
+            <p class="chip num" data-bind="wasteNozzle"></p>
+            <p class="help" data-i18n="wasteForm.nozzleHelp"></p>
+          </div>
+          </div>
+        </section>
+        <section class="sheet__section" aria-labelledby="h-wf-filament">
+          <h3 id="h-wf-filament" data-i18n="wasteForm.filament"></h3>
+          <div class="grid3">
+          <div class="field">
+            <label for="w-material" data-i18n="wasteForm.material"></label>
+            <select class="select" id="w-material"></select>
+          </div>
+          <div class="field">
+            <label for="w-density" data-i18n="wasteForm.density"></label>
+            <div class="unit-input"><input class="input" id="w-density" type="number" inputmode="decimal" min="0.5" max="3" step="0.01"><span aria-hidden="true">g/cm³</span></div>
+          </div>
+          <div class="field">
+            <label for="w-diameter" data-i18n="wasteForm.diameter"></label>
+            <div class="unit-input"><input class="input" id="w-diameter" type="number" inputmode="decimal" min="1" max="3.5" step="0.01"><span aria-hidden="true">mm</span></div>
+          </div>
+          </div>
+        </section>
+        <section class="sheet__section" aria-labelledby="h-wf-purge">
+          <h3 id="h-wf-purge" data-i18n="wasteForm.purge"></h3>
+          <div class="grid2">
+          <div class="field">
+            <label for="w-multiplier" data-i18n="wasteForm.multiplier"></label>
+            <div class="unit-input"><input class="input" id="w-multiplier" type="number" inputmode="decimal" min="0.1" max="3" step="0.05"><span aria-hidden="true">×</span></div>
+          </div>
+          <div class="field">
+            <label for="w-start" data-i18n="wasteForm.start"></label>
+            <div class="unit-input"><input class="input" id="w-start" type="number" inputmode="decimal" min="0" max="2000" step="5"><span aria-hidden="true">mm³</span></div>
+          </div>
+          <div class="field">
+            <label for="w-prime" data-i18n="wasteForm.prime"></label>
+            <div class="unit-input"><input class="input" id="w-prime" type="number" inputmode="decimal" min="0" max="500" step="1"><span aria-hidden="true">mm³</span></div>
+          </div>
+          <div class="field">
+            <label for="w-reuse" data-i18n="wasteForm.reuse"></label>
+            <div class="unit-input"><input class="input" id="w-reuse" type="number" inputmode="numeric" min="0" max="90" step="5" aria-describedby="w-reuse-help"><span aria-hidden="true">%</span></div>
+            <p class="help" id="w-reuse-help" data-i18n="wasteForm.reuseHelp"></p>
+          </div>
+          </div>
+        </section>
+        <section class="sheet__section" aria-labelledby="h-wf-flush">
+          <div class="sheet__row">
+            <h3 id="h-wf-flush" data-i18n="wasteForm.flushTitle"></h3>
+            <button class="link" type="button" id="flush-reset" data-i18n="wasteForm.flushReset"></button>
+          </div>
+          <p class="help" data-bind="flushHelp"></p>
+          <div class="flush" id="flush-table"></div>
+        </section>
+        <p class="form-error" id="waste-error" role="alert" hidden></p>
       </div>
-
-      <h3 data-i18n="wasteForm.flushTitle">Purga por cambio de color</h3>
-      <p class="help" data-bind="flushHelp"></p>
-      <div class="flush" id="flush-table"></div>
-      <button class="link" type="button" id="flush-reset" data-i18n="wasteForm.flushReset">Volver a los volúmenes calculados por color</button>
-
-      <p class="form-error" id="waste-error" role="alert" hidden></p>
-      <div class="dialog__actions">
-        <button class="btn btn--quiet" type="button" id="waste-defaults" data-i18n="wasteForm.defaults">Restablecer valores</button>
-        <button class="btn btn--quiet" type="button" id="waste-close" data-i18n="common.close">Cerrar</button>
-        <button class="btn btn--primary" type="submit" id="waste-save" data-i18n="wasteForm.save">Guardar ajustes</button>
-      </div>
+      <footer class="sheet__foot">
+        <button class="link" type="button" id="waste-defaults" data-i18n="wasteForm.defaults"></button>
+        <span class="sheet__spacer"></span>
+        <button class="btn btn--quiet" type="button" id="waste-close" data-i18n="common.close"></button>
+        <button class="btn btn--primary" type="submit" id="waste-save" data-i18n="wasteForm.save"></button>
+      </footer>
     </form>
   </dialog>
 

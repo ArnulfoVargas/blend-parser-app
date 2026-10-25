@@ -1,16 +1,18 @@
 // The 3D preview: orbit / pan / zoom with OrbitControls, the painted mesh with
-// one colour per leaf triangle, the brush and the measuring tape. Picking and
-// painting run in Rust; this file only turns pointer positions into rays and
-// recolours what changed.
+// one colour per leaf triangle, the brush, the measuring tape, the size handles
+// and the printer's plate. Picking and painting run in Rust; this file only
+// turns pointer positions into rays, recolours what changed and keeps the HTML
+// labels over the canvas in step with the camera.
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { Hit, PaintResult, PreviewMesh, Vec3 } from "./api";
+import type { Hit, PaintResult, Plate, PreviewMesh, Vec3 } from "./api";
 
 // Colours are shown exactly as the filament swatches, without tone mapping.
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
-export type Tool = "orbit" | "brush" | "measure";
+export type Tool = "orbit" | "brush" | "measure" | "size";
+export type Axis = 0 | 1 | 2;
 
 export interface BrushHandlers {
   pick(origin: Vec3, dir: Vec3): Promise<Hit | null>;
@@ -18,6 +20,10 @@ export interface BrushHandlers {
   endStroke(): void;
   /** A click on the model with the measuring tool. */
   measure(point: Vec3): void;
+  /** How the tape reads the distance between two preview points. */
+  distance(a: Vec3, b: Vec3): string;
+  /** A size typed on one of the handles, in final millimetres. */
+  resize(axis: Axis, mm: number): void;
 }
 
 /** Resolves a CSS colour token (oklch included) through a 1×1 canvas. */
@@ -44,6 +50,19 @@ export class Viewer {
   private cursorFill: THREE.MeshBasicMaterial;
   private plate: THREE.Mesh;
   private tape = new THREE.Group();
+  private tapePoints: Vec3[] = [];
+  /** Where the pointer is on the model while measuring. */
+  private hover: Vec3 | null = null;
+  private hoverDot = new THREE.Group();
+  private rubber: THREE.Line;
+  private sizeBox: THREE.LineSegments;
+  private sizeValues: number[] | null = null;
+  private bed = new THREE.Group();
+  private bedPlate: { plate: Plate; scale: number } | null = null;
+  private showBed = false;
+  private overlay: HTMLDivElement;
+  private tapeLabel: HTMLDivElement;
+  private sizeChips: HTMLLabelElement[];
   private down: { x: number; y: number } | null = null;
   private ray = new THREE.Raycaster();
   private pending = false;
@@ -95,13 +114,63 @@ export class Viewer {
     this.tape.renderOrder = 20;
     this.scene.add(this.tape);
 
+    // Measuring: a dot under the pointer, and a dashed line from the first point to it.
+    const solid = (name: string) => new THREE.MeshBasicMaterial({ color: cssColor(name), depthTest: false, transparent: true });
+    const ring = new THREE.Mesh(new THREE.SphereGeometry(1.45, 16, 12), solid("--glint"));
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), solid("--color-accent-deep"));
+    ring.renderOrder = 23;
+    dot.renderOrder = 24;
+    this.hoverDot.add(ring, dot);
+    this.hoverDot.visible = false;
+    this.scene.add(this.hoverDot);
+    this.rubber = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineDashedMaterial({ color: cssColor("--color-accent-deep"), dashSize: 1, gapSize: 0.6, depthTest: false, transparent: true }),
+    );
+    this.rubber.renderOrder = 22;
+    this.rubber.visible = false;
+    this.scene.add(this.rubber);
+
+    // Size handles: the model's box, with an input per axis over it.
+    this.sizeBox = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+      new THREE.LineBasicMaterial({ color: cssColor("--color-accent-deep"), depthTest: false, transparent: true, opacity: 0.7 }),
+    );
+    this.sizeBox.renderOrder = 19;
+    this.sizeBox.visible = false;
+    this.scene.add(this.sizeBox);
+    this.bed.visible = false;
+    this.scene.add(this.bed);
+
+    this.overlay = Object.assign(document.createElement("div"), { className: "overlay" });
+    canvas.after(this.overlay);
+    this.tapeLabel = Object.assign(document.createElement("div"), { className: "tape-label", hidden: true });
+    this.tapeLabel.setAttribute("aria-hidden", "true");
+    this.sizeChips = ([0, 1, 2] as Axis[]).map((axis) => {
+      const chip = Object.assign(document.createElement("label"), { className: "size-chip", hidden: true });
+      chip.innerHTML = `<span class="size-chip__axis">${"XYZ"[axis]}</span><input type="number" inputmode="decimal" min="1" max="1000" step="0.1"><span class="size-chip__unit">mm</span>`;
+      const input = chip.querySelector("input")!;
+      input.addEventListener("change", () => {
+        const v = Number(input.value);
+        if (v > 0) this.handlers.resize(axis, v);
+      });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && this.sizeValues) {
+          input.value = String(Math.round(this.sizeValues[axis] * 100) / 100);
+          input.blur();
+        } else if (e.key === "Enter") input.blur();
+      });
+      return chip;
+    });
+    this.overlay.append(this.tapeLabel, ...this.sizeChips);
+
     new ResizeObserver(() => this.resize()).observe(canvas);
     canvas.addEventListener("pointermove", (e) => this.onMove(e));
     canvas.addEventListener("pointerdown", (e) => this.onDown(e));
     window.addEventListener("pointerup", (e) => this.onUp(e));
     canvas.addEventListener("pointerleave", () => {
       this.cursor.visible = false;
-      this.requestRender();
+      this.setHover(null);
     });
     this.setTool("orbit");
     this.loop();
@@ -112,6 +181,7 @@ export class Viewer {
     // Damping needs a few frames after the user lets go.
     if (this.controls.update() || this.frame > 0) {
       this.renderer.render(this.scene, this.camera);
+      this.placeOverlay();
       this.frame = Math.max(0, this.frame - 1);
     }
   };
@@ -151,7 +221,10 @@ export class Viewer {
     const sphere = geo.boundingSphere!;
     this.plate.position.set(sphere.center.x, sphere.center.y, box.min.z - 0.01);
     this.plate.scale.setScalar(Math.max(box.max.x - box.min.x, box.max.y - box.min.y) * 0.75);
-    this.plate.visible = true;
+    this.sizeBox.position.copy(box.getCenter(new THREE.Vector3()));
+    this.sizeBox.scale.copy(box.getSize(new THREE.Vector3()));
+    this.sizeBox.visible = this.tool === "size";
+    this.buildBed();
     if (frame) this.frameAll();
     this.requestRender();
   }
@@ -199,6 +272,8 @@ export class Viewer {
       this.cursor.visible = false;
       this.canvas.style.cursor = "";
     }
+    if (t !== "measure") this.setHover(null);
+    this.sizeBox.visible = t === "size" && this.mesh !== null;
     this.requestRender();
   }
 
@@ -271,6 +346,18 @@ export class Viewer {
   }
 
   private async onMove(e: PointerEvent) {
+    // Measuring: the point under the pointer, and the tape stretched to it.
+    if (this.tool === "measure" && this.mesh && !this.pending && e.buttons === 0) {
+      this.pending = true;
+      const [o, d] = this.rayFrom(e);
+      try {
+        const hit = await this.handlers.pick(o, d);
+        this.setHover(hit ? hit.point : null);
+      } finally {
+        this.pending = false;
+      }
+      return;
+    }
     if (this.tool !== "brush" || !this.mesh || this.pending) return;
     this.pending = true;
     const [o, d] = this.rayFrom(e);
@@ -286,10 +373,144 @@ export class Viewer {
     }
   }
 
+  /** Final sizes the handles show, in millimetres; null hides them. */
+  setSizeValues(mm: number[] | null) {
+    this.sizeValues = mm;
+    this.sizeChips.forEach((chip, i) => {
+      const input = chip.querySelector("input")!;
+      if (mm && document.activeElement !== input) input.value = String(Math.round(mm[i] * 100) / 100);
+    });
+    this.requestRender();
+  }
+
+  /** Accessible names of the size inputs, in the interface language. */
+  setSizeLabels(labels: string[]) {
+    this.sizeChips.forEach((chip, i) => chip.querySelector("input")!.setAttribute("aria-label", labels[i]));
+  }
+
+  /** The printer's plate under the model; `scale` turns preview units into millimetres. */
+  setPlate(plate: Plate, scale: number) {
+    this.bedPlate = { plate, scale };
+    this.buildBed();
+  }
+
+  /** Shows the printer's plate, or just a soft shadow under the model. */
+  setBedVisible(on: boolean) {
+    this.showBed = on;
+    this.buildBed();
+  }
+
+  private buildBed() {
+    this.bed.clear();
+    const box = this.mesh?.geometry.boundingBox;
+    const on = this.showBed && this.bedPlate !== null && box !== undefined && box !== null;
+    this.bed.visible = on;
+    this.plate.visible = !on && this.mesh !== null;
+    if (!on) return this.requestRender();
+    const { plate, scale } = this.bedPlate!;
+    // The model's centre sits on the plate's centre, as the 3MF places it.
+    const c = box.getCenter(new THREE.Vector3());
+    const mx = (plate.model.x0 + plate.model.x1) / 2;
+    const my = (plate.model.y0 + plate.model.y1) / 2;
+    const z = box.min.z - 0.02 / scale;
+    const flat = (r: { x0: number; y0: number; x1: number; y1: number }, color: string, opacity: number, lift: number) => {
+      const w = (r.x1 - r.x0) / scale;
+      const d = (r.y1 - r.y0) / scale;
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(Math.max(w, 1e-3), Math.max(d, 1e-3)),
+        new THREE.MeshBasicMaterial({ color: cssColor(color), transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide }),
+      );
+      mesh.position.set(c.x + ((r.x0 + r.x1) / 2 - mx) / scale, c.y + ((r.y0 + r.y1) / 2 - my) / scale, z + lift / scale);
+      mesh.renderOrder = 1;
+      this.bed.add(mesh);
+      const edge = new THREE.LineSegments(
+        new THREE.EdgesGeometry(mesh.geometry),
+        new THREE.LineBasicMaterial({ color: cssColor(color === "--color-paper-3" ? "--color-muted" : color), transparent: true, opacity: 0.9 }),
+      );
+      edge.position.copy(mesh.position);
+      this.bed.add(edge);
+    };
+    flat(plate.area, "--color-paper-3", 0.9, 0);
+    plate.excluded.forEach((e) => flat(e, "--color-ink-2", 0.35, 0.01));
+    if (plate.tower) {
+      const g = plate.prefs.towerGapMm;
+      const t = plate.tower;
+      flat({ x0: t.x0 - g, y0: t.y0 - g, x1: t.x1 + g, y1: t.y1 + g }, "--color-warn", 0.25, 0.02);
+      flat(t, "--color-warn", 0.85, 0.03);
+    }
+    this.requestRender();
+  }
+
+  private markerSize() {
+    return (this.mesh?.geometry.boundingSphere?.radius ?? 50) * 0.012;
+  }
+
+  private setHover(p: Vec3 | null) {
+    this.hover = p;
+    this.hoverDot.visible = p !== null;
+    const r = this.markerSize();
+    if (p) {
+      this.hoverDot.position.set(...p);
+      this.hoverDot.scale.setScalar(r);
+    }
+    // From the first point to the pointer while the second is still to come.
+    const from = this.tapePoints.length === 1 ? this.tapePoints[0] : null;
+    this.rubber.visible = p !== null && from !== null;
+    if (p && from) {
+      this.rubber.geometry.setFromPoints([new THREE.Vector3(...from), new THREE.Vector3(...p)]);
+      const mat = this.rubber.material as THREE.LineDashedMaterial;
+      mat.dashSize = r * 2;
+      mat.gapSize = r * 1.2;
+      this.rubber.computeLineDistances();
+    }
+    this.requestRender();
+  }
+
+  /** Puts the HTML labels where their 3D anchors land on screen. */
+  private placeOverlay() {
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    const screen = (v: THREE.Vector3) => {
+      const p = v.clone().project(this.camera);
+      return p.z > 1 ? null : { x: ((p.x + 1) / 2) * w, y: ((1 - p.y) / 2) * h };
+    };
+    const put = (el: HTMLElement, at: { x: number; y: number } | null) => {
+      el.hidden = at === null;
+      if (at) el.style.transform = `translate(${at.x}px, ${at.y}px) translate(-50%, -50%)`;
+    };
+
+    const pts = this.tapePoints;
+    const pair = pts.length === 2 ? [pts[0], pts[1]] : pts.length === 1 && this.hover ? [pts[0], this.hover] : null;
+    if (pair) {
+      const [a, b] = pair.map((p) => new THREE.Vector3(...p));
+      this.tapeLabel.textContent = this.handlers.distance(pair[0], pair[1]);
+      this.tapeLabel.classList.toggle("is-live", pts.length === 1);
+      put(this.tapeLabel, screen(a.add(b).multiplyScalar(0.5)));
+    } else put(this.tapeLabel, null);
+
+    const box = this.mesh?.geometry.boundingBox;
+    if (this.tool !== "size" || !box || !this.sizeValues) {
+      this.sizeChips.forEach((chip) => put(chip, null));
+      return;
+    }
+    // Each handle sits on the edge of its axis nearest the camera.
+    const cam = this.camera.position;
+    const near = (axis: number) =>
+      (Math.abs(cam.getComponent(axis) - box.min.getComponent(axis)) < Math.abs(cam.getComponent(axis) - box.max.getComponent(axis)) ? box.min : box.max).getComponent(axis);
+    const c = box.getCenter(new THREE.Vector3());
+    const edges = [
+      new THREE.Vector3(c.x, near(1), box.min.z),
+      new THREE.Vector3(near(0), c.y, box.min.z),
+      new THREE.Vector3(near(0), near(1), c.z),
+    ];
+    this.sizeChips.forEach((chip, i) => put(chip, screen(edges[i])));
+  }
+
   /** Shows the measured points (preview units) and the line between them. */
   setMeasure(points: Vec3[]) {
+    this.tapePoints = points;
     this.tape.clear();
-    const r = (this.mesh?.geometry.boundingSphere?.radius ?? 50) * 0.012;
+    const r = this.markerSize();
     const mat = (name: string) => new THREE.MeshBasicMaterial({ color: cssColor(name), depthTest: false, transparent: true });
     const dot = new THREE.SphereGeometry(r, 16, 12);
     const ring = new THREE.SphereGeometry(r * 1.45, 16, 12);
@@ -308,7 +529,7 @@ export class Viewer {
       line.renderOrder = 22;
       this.tape.add(line);
     }
-    this.requestRender();
+    this.setHover(this.tool === "measure" ? this.hover : null);
   }
 
   private onDown(e: PointerEvent) {
