@@ -30,6 +30,8 @@ export interface Summary {
   paintedTriangles: number;
 }
 
+export interface KitOptions { voxelMm: number; depthMm: number; coreSlot: number | null; minPieceMm3: number }
+export interface KitResult { pieces: number; plates: number; oversize: number }
 export interface Hit { point: Vec3; normal: Vec3 }
 export interface PaintResult extends Hit { tris: number[] }
 
@@ -76,5 +78,5 @@ export const api = {
   endStroke: () => invoke<Summary>("end_stroke"),
   undo: () => invoke<Summary>("undo"),
   export3mf: (path: string) => invoke<void>("export_3mf", { path }),
-  exportColorZip: (path: string, thicknessMm: number, mainSolid: boolean) => invoke<number>("export_color_zip", { path, thicknessMm, mainSolid }),
+  exportColorZip: (path: string, o: KitOptions) => invoke<KitResult>("export_color_zip", { path, ...o }),
 };

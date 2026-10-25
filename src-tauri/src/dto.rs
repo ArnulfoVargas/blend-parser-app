@@ -4,6 +4,16 @@
 use bp_core::{ColorOps, MeshOps, Project};
 use serde::Serialize;
 
+/// What the colour kit export produced.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitDto {
+    pub pieces: usize,
+    pub plates: usize,
+    /// Pieces larger than the plate.
+    pub oversize: usize,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartDto {

@@ -160,6 +160,34 @@ impl Bvh {
         best
     }
 
+    /// Every crossing of the ray, unsorted: its distance and +1 when the ray
+    /// enters the surface (against the triangle normal) or -1 when it leaves.
+    pub fn ray_crossings(&self, soup: &TriSoup, o: Vec3, d: Vec3, out: &mut Vec<(f32, i8)>) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
+        let mut stack = vec![0usize];
+        while let Some(ni) = stack.pop() {
+            let node = self.nodes[ni];
+            if node.bounds.ray(o, inv, f32::MAX).is_none() {
+                continue;
+            }
+            if node.count == 0 {
+                stack.push(node.start as usize);
+                stack.push(node.start as usize + 1);
+                continue;
+            }
+            for &t in &self.order[node.start as usize..(node.start + node.count) as usize] {
+                let c = &soup.corners[t as usize];
+                if let Some((dist, _)) = geom::ray_triangle(o, d, c) {
+                    let n = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+                    out.push((dist, if geom::dot(n, d) < 0.0 { 1 } else { -1 }));
+                }
+            }
+        }
+    }
+
     /// Triangles with any corner or their centroid inside the sphere.
     pub fn sphere(&self, soup: &TriSoup, center: Vec3, r: f32, out: &mut Vec<u32>) {
         if self.nodes.is_empty() {
