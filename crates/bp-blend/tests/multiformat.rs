@@ -73,12 +73,19 @@ fn real_multicolor_imports_and_missing_resources() {
             name: "fixture",
             parts: parts
                 .iter()
-                .map(|p| bp_3mf::Part { name: &p.name, positions: &p.positions, tris: &p.tris, paint: &p.paint })
+                .map(|p| bp_3mf::Part {
+                    name: &p.name,
+                    positions: &p.positions,
+                    tris: &p.tris,
+                    paint: &p.paint,
+                    object: p.object,
+                })
                 .collect(),
             filaments: project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect(),
             printer: bp_3mf::Printer::default(),
             flush: Default::default(),
             layer_mm: None,
+            offset_mm: [0.0; 2],
         };
         let mut out = std::io::Cursor::new(Vec::new());
         bp_3mf::write(&mut out, &model).unwrap();

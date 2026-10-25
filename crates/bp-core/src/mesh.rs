@@ -249,9 +249,10 @@ impl Mesh {
                     let o = if x == ti { y } else { x };
                     let ot = w.tris[o];
                     // The face across has to run the edge the other way.
-                    let Some(m) = (0..3).find(|&m| id[ot[m] as usize] == id[t[(k + 1) % 3] as usize]
-                        && id[ot[(m + 1) % 3] as usize] == id[t[k] as usize])
-                    else {
+                    let Some(m) = (0..3).find(|&m| {
+                        id[ot[m] as usize] == id[t[(k + 1) % 3] as usize]
+                            && id[ot[(m + 1) % 3] as usize] == id[t[k] as usize]
+                    }) else {
                         continue;
                     };
                     if touched[o] {
@@ -260,7 +261,8 @@ impl Mesh {
                     let (b, a, d) = (ot[m], ot[(m + 1) % 3], ot[(m + 2) % 3]);
                     let (pa, pb) = (w.positions[a as usize], w.positions[b as usize]);
                     let ab = geom::sub(pb, pa);
-                    let along = geom::dot(geom::sub(w.positions[apex as usize], pa), ab) / geom::dot(ab, ab).max(f32::MIN_POSITIVE);
+                    let along = geom::dot(geom::sub(w.positions[apex as usize], pa), ab)
+                        / geom::dot(ab, ab).max(f32::MIN_POSITIVE);
                     for part in [&mut *s, &mut *w] {
                         part.tris[ti] = [apex, a, d];
                         part.tris[o] = [apex, d, b];

@@ -327,6 +327,7 @@ fn read_dump(dir: &Path) -> Result<ImportResult, BlendError> {
             sources,
             uv_layers,
             color_layers,
+            object: 0,
         });
     }
     if parts.is_empty() {
@@ -425,12 +426,19 @@ mod tests {
             name: "spider",
             parts: parts
                 .iter()
-                .map(|p| bp_3mf::Part { name: &p.name, positions: &p.positions, tris: &p.tris, paint: &p.paint })
+                .map(|p| bp_3mf::Part {
+                    name: &p.name,
+                    positions: &p.positions,
+                    tris: &p.tris,
+                    paint: &p.paint,
+                    object: p.object,
+                })
                 .collect(),
             filaments,
             printer: bp_3mf::Printer::default(),
             flush: bp_3mf::Flush { volumes_mm3: matrix, ..Default::default() },
             layer_mm: None,
+            offset_mm: [0.0; 2],
         };
         let out = std::env::temp_dir().join("blendparser-integration.3mf");
         bp_3mf::write(std::fs::File::create(&out).unwrap(), &model).unwrap();

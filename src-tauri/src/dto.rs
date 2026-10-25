@@ -107,6 +107,14 @@ pub struct PlateDto {
     /// Tower footprint, brim included, and whether its depth is the estimate.
     pub tower_mm: [f32; 2],
     pub tower_estimated: bool,
+    /// Where the model's centre sits from the plate's centre.
+    pub offset_mm: [f32; 2],
+    /// The model is turned from the file's orientation.
+    pub rotated: bool,
+    /// The last cut can be undone.
+    pub can_undo_cut: bool,
+    /// Printed objects: the model and the pieces cut off it that were kept.
+    pub objects: usize,
 }
 
 #[derive(Serialize)]
@@ -163,6 +171,26 @@ pub struct Summary {
     pub undo_label: Option<String>,
     /// Triangles painted by hand; a new colour detection discards them.
     pub painted_triangles: usize,
+}
+
+/// A turn: the new summary and, when the preview could follow as it is,
+/// `p' = matrix · p + shift` for its positions.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnDto {
+    pub summary: Summary,
+    pub rigid: Option<RigidDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RigidDto {
+    pub matrix: [[f32; 3]; 3],
+    pub shift: [f32; 3],
+}
+
+pub fn turn(doc: &Document, prefs: &Prefs, rigid: Option<bp_core::project::RigidMove>) -> TurnDto {
+    TurnDto { summary: summary(doc, prefs), rigid: rigid.map(|m| RigidDto { matrix: m.matrix, shift: m.shift }) }
 }
 
 #[derive(Serialize)]
@@ -267,7 +295,7 @@ pub fn waste_and_plate(
         tower_gap_mm: prefs.plate.tower_gap_mm,
         margin_mm: prefs.plate.margin_mm,
     };
-    let check = bp_3mf::plate::check(&doc.printer, [size[0], size[1]], &reserve);
+    let check = bp_3mf::plate::check_at(&doc.printer, [size[0], size[1]], doc.offset_mm, &reserve);
     let plate = PlateDto {
         fits: check.fits(),
         check,
@@ -275,6 +303,10 @@ pub fn waste_and_plate(
         needs_tower,
         tower_mm,
         tower_estimated: prefs.plate.tower_depth_mm.is_none(),
+        offset_mm: doc.offset_mm,
+        rotated: doc.project.is_rotated(),
+        can_undo_cut: doc.project.can_undo_cut(),
+        objects: doc.project.object_count(),
     };
     (waste, plate)
 }

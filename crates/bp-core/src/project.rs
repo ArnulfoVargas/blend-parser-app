@@ -3,6 +3,7 @@
 
 use crate::bvh::{Bvh, RayHit, TriSoup};
 use crate::color::{to_u8, Classifier, Rgb};
+use crate::cut;
 use crate::encode;
 use crate::estimate::{self, SwapEstimate};
 use crate::field::ColorField;
@@ -11,7 +12,7 @@ use crate::mesh::{Mesh, MeshOps, RepairReport};
 use crate::optimize;
 use crate::paint::{self, Node, PaintParams};
 use crate::palette;
-use crate::scene::Scene;
+use crate::scene::{Part, Scene};
 use crate::split::{self, ColorPiece};
 
 /// Colour settings, in final millimetres.
@@ -56,6 +57,8 @@ pub struct Preview {
 
 pub struct ExportPart {
     pub name: String,
+    /// The printed object it belongs to (see [`Part::object`]).
+    pub object: u32,
     /// Final millimetres, base on Z = 0, centred on XY.
     pub positions: Vec<Vec3>,
     pub tris: Vec<[u32; 3]>,
@@ -114,6 +117,47 @@ fn mat_vec(m: Mat3, v: Vec3) -> Vec3 {
 
 fn mat_mul(a: Mat3, b: Mat3) -> Mat3 {
     std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+}
+
+/// The inverse of a rotation.
+fn transpose(m: &Mat3) -> Mat3 {
+    std::array::from_fn(|r| std::array::from_fn(|c| m[c][r]))
+}
+
+/// How a turn moved the preview's positions, `p' = matrix · p + shift`, when
+/// it could be applied to them as they are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigidMove {
+    pub matrix: Mat3,
+    pub shift: Vec3,
+}
+
+/// What a cut replaced, to undo it.
+#[derive(Clone)]
+struct CutSnapshot {
+    parts: Vec<Part>,
+    unrotated: Vec<Vec<Vec3>>,
+}
+
+/// Turn of `degrees` about X, Y or Z, counter-clockwise looking down the axis.
+/// Quarter turns are exact, so turning back leaves no drift.
+fn axis_turn(axis: usize, degrees: f32) -> Mat3 {
+    let quarter = degrees / 90.0;
+    let (s, c) = if (quarter - quarter.round()).abs() < 1e-6 {
+        match (quarter.round() as i64).rem_euclid(4) {
+            0 => (0.0, 1.0),
+            1 => (1.0, 0.0),
+            2 => (0.0, -1.0),
+            _ => (-1.0, 0.0),
+        }
+    } else {
+        degrees.to_radians().sin_cos()
+    };
+    match axis {
+        0 => [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]],
+        1 => [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]],
+        _ => [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+    }
 }
 
 /// The rotation taking unit `d` to straight down (-Z), turning about `d × -Z`.
@@ -215,6 +259,10 @@ pub struct Project {
     unrotated: Vec<Vec<Vec3>>,
     /// Rows of the rotation applied to the model as loaded.
     rotation: Mat3,
+    /// Where the rotated positions were moved to sit on the plate.
+    placement: Vec3,
+    /// Parts before each cut, for undo.
+    cut_history: Vec<CutSnapshot>,
     mesh_ops: MeshOps,
     color_ops: ColorOps,
     print_ops: PrintOps,
@@ -244,6 +292,8 @@ impl Project {
         let mut p = Self {
             unrotated: source_positions.clone(),
             rotation: IDENTITY,
+            placement: [0.0; 3],
+            cut_history: vec![],
             scene,
             source_positions,
             source_size,
@@ -308,6 +358,10 @@ impl Project {
         self.rotation
     }
 
+    pub fn is_rotated(&self) -> bool {
+        self.rotation != IDENTITY
+    }
+
     /// Turns the model as loaded by `r` (absolute, not added to the current
     /// turn) and places it back on the plate at the same scale, as one undoable
     /// step. Hand painting survives: the triangles stay the same.
@@ -319,22 +373,207 @@ impl Project {
         let history = std::mem::take(&mut self.undo);
         let mut previous = self.clone();
         previous.undo = history;
-        self.rotation = r;
-        for (part, src) in self.scene.parts.iter_mut().zip(&self.unrotated) {
-            part.positions = src.iter().map(|&p| mat_vec(r, p)).collect();
-        }
-        self.scene.place_on_plate();
-        self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
-        self.source_size =
-            self.scene.bounds().map_or([1.0; 3], |(lo, hi)| std::array::from_fn(|i| (hi[i] - lo[i]).max(1e-6)));
-        self.source_height = self.source_size[2];
         // A stretch was along the old axes; the turned model keeps its scale only.
+        let stretched = self.stretch != [1.0; 3];
         self.stretch = [1.0; 3];
-        self.size_mm = self.source_size.map(|v| v * self.scale);
-        self.size_history.clear();
-        self.rebuild_geometry_keep_paint();
-        self.rebuild_paint();
+        self.turn_to(r, stretched);
         self.undo.push(UndoEntry::Geometry(Box::new(previous)));
+    }
+
+    // ---- orientation ------------------------------------------------------
+
+    /// Turns the model `degrees` about the X, Y or Z axis through its centre;
+    /// it lands back on the plate, centred, its lowest point on Z = 0.
+    pub fn rotate(&mut self, axis: usize, degrees: f32) -> Option<RigidMove> {
+        if axis > 2 || !degrees.is_finite() || degrees.rem_euclid(360.0).abs() < 1e-6 {
+            return None;
+        }
+        self.turn_to(mat_mul(axis_turn(axis, degrees), self.rotation), false)
+    }
+
+    /// Back to the orientation the file has.
+    pub fn reset_rotation(&mut self) -> Option<RigidMove> {
+        self.turn_to(IDENTITY, false)
+    }
+
+    /// The scale and per-axis stretch stay as they are, so the model keeps its
+    /// size along each plate axis as far as the new bounds allow. Earlier sizes
+    /// belong to the old orientation, so they can no longer be undone.
+    ///
+    /// Unstretched and with no flattened base, the model turns as a whole: its
+    /// triangles, colours and hand painting stay and only positions move, and
+    /// the move comes back so the preview can follow without being sent again.
+    /// `rebuild` when the scene's positions no longer match the current
+    /// stretch, so they cannot simply be moved.
+    fn turn_to(&mut self, rotation: Mat3, rebuild: bool) -> Option<RigidMove> {
+        if rotation == self.rotation {
+            return None;
+        }
+        // Pieces dropped to the plate fell along the old down, and a flattened base was cut along it.
+        if !rebuild && self.stretch == [1.0; 3] && self.mesh_ops.flatten_mm <= 0.0 && !self.mesh_ops.drop_floating {
+            let turn = mat_mul(rotation, transpose(&self.rotation));
+            for part in &mut self.scene.parts {
+                for v in &mut part.positions {
+                    *v = mat_vec(turn, *v);
+                }
+            }
+            let shift = self.scene.place_on_plate();
+            for mesh in [&mut self.shape, &mut self.work] {
+                for v in mesh.parts.iter_mut().flat_map(|p| p.positions.iter_mut()) {
+                    *v = geom::add(mat_vec(turn, *v), shift);
+                }
+            }
+            self.rotation = rotation;
+            self.placement = geom::add(mat_vec(turn, self.placement), shift);
+            self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
+            self.measure_source();
+            let soup = self.work.soup();
+            self.picker = (Bvh::build(&soup), soup);
+            return Some(RigidMove { matrix: turn, shift });
+        }
+        self.rotation = rotation;
+        self.place_from_file();
+        let before: Vec<usize> = self.work.parts.iter().map(|p| p.tris.len()).collect();
+        self.rebuild_geometry_keep_paint();
+        if self.work.parts.iter().map(|p| p.tris.len()).ne(before) {
+            self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
+        }
+        self.rebuild_paint();
+        None
+    }
+
+    /// Scene positions from the file's, turned by the rotation and set on the plate, then stretched.
+    fn place_from_file(&mut self) {
+        let rotation = self.rotation;
+        for (part, file) in self.scene.parts.iter_mut().zip(&self.unrotated) {
+            part.positions = file.iter().map(|&v| mat_vec(rotation, v)).collect();
+        }
+        self.placement = self.scene.place_on_plate();
+        self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
+        self.measure_source();
+        self.apply_stretch();
+    }
+
+    /// Size before resizing from the placed positions; the size asked for keeps the scale and stretch.
+    fn measure_source(&mut self) {
+        let mut it = self.source_positions.iter().flatten().copied();
+        let bounds = it.next().map(|first| {
+            it.fold((first, first), |(lo, hi), p| {
+                (std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn(|i| hi[i].max(p[i])))
+            })
+        });
+        self.source_size =
+            bounds.map_or([1.0; 3], |(lo, hi): (Vec3, Vec3)| std::array::from_fn(|i| (hi[i] - lo[i]).max(1e-6)));
+        self.source_height = self.source_size[2];
+        self.size_mm = std::array::from_fn(|i| self.source_size[i] * self.scale * self.stretch[i]);
+        self.size_history.clear();
+    }
+
+    fn apply_stretch(&mut self) {
+        let stretch = self.stretch;
+        for (part, src) in self.scene.parts.iter_mut().zip(&self.source_positions) {
+            part.positions = src.iter().map(|s| std::array::from_fn(|i| s[i] * stretch[i])).collect();
+        }
+    }
+
+    // ---- cutting ----------------------------------------------------------
+
+    /// Cuts the model where `t` of the way along `axis` falls on the preview (0
+    /// at its low end) and keeps the low side, or the high one. With
+    /// `keep_other` the other side stays too, as an object of its own resting
+    /// on its cut face beside the model. Both openings are capped. Hand painting
+    /// goes, as the triangles change. False when the plane misses the model.
+    pub fn cut(&mut self, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> bool {
+        let (Some((lo, hi)), Some((_, shape_hi))) = (self.work.bounds(), self.shape.bounds()) else { return false };
+        if axis > 2 || !t.is_finite() {
+            return false;
+        }
+        // The preview is the final shape: a flattened base moved it down from where the scene is.
+        let at = lo[axis] + (hi[axis] - lo[axis]) * t.clamp(0.0, 1.0) + (shape_hi[axis] - hi[axis]);
+        let value = at / self.stretch[axis];
+        let eps = geom::len(self.source_size) * 1e-6;
+        let (mut kept, mut other) = (vec![], vec![]);
+        for (part, src) in self.scene.parts.iter().zip(&self.source_positions) {
+            let whole = Part { positions: src.clone(), ..part.clone() };
+            let [low, high] = cut::split(&whole, axis, value, eps);
+            let (k, o) = if keep_low { (low, high) } else { (high, low) };
+            kept.extend((!k.tris.is_empty()).then_some(k));
+            other.extend((!o.tris.is_empty()).then_some(o));
+        }
+        if kept.is_empty() || other.is_empty() {
+            return false;
+        }
+        let parts = std::mem::take(&mut self.scene.parts);
+        self.cut_history.push(CutSnapshot { parts, unrotated: self.unrotated.clone() });
+        if keep_other {
+            // Its cut face looks back at the kept side; turned to face the plate.
+            let sign = if keep_low { -1.0 } else { 1.0 };
+            let turn = match axis {
+                0 => axis_turn(1, 90.0 * sign),
+                1 => axis_turn(0, -90.0 * sign),
+                _ if keep_low => IDENTITY,
+                _ => axis_turn(0, 180.0),
+            };
+            let first_new = kept.iter().chain(&other).map(|p| p.object).max().unwrap_or(0) + 1;
+            for p in &mut other {
+                p.object += first_new;
+                p.name = format!("{} ({})", p.name, p.object + 1);
+                for v in &mut p.positions {
+                    *v = mat_vec(turn, *v);
+                }
+            }
+            let bounds = |ps: &[Part]| {
+                let mut it = ps.iter().flat_map(|p| p.positions.iter().copied());
+                let first = it.next().unwrap_or([0.0; 3]);
+                it.fold((first, first), |(lo, hi), p| {
+                    (std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn::<f32, 3, _>(|i| hi[i].max(p[i])))
+                })
+            };
+            let ((klo, khi), (olo, ohi)) = (bounds(&kept), bounds(&other));
+            // Beside the model along X, 5 mm apart, centred with it on Y and on the plate.
+            let gap = 5.0 / self.scale;
+            let shift = [khi[0] + gap - olo[0], (klo[1] + khi[1] - olo[1] - ohi[1]) / 2.0, klo[2] - olo[2]];
+            for v in other.iter_mut().flat_map(|p| p.positions.iter_mut()) {
+                *v = geom::add(*v, shift);
+            }
+            kept.append(&mut other);
+        }
+        self.scene.parts = kept;
+        let shift = self.scene.place_on_plate();
+        self.placement = geom::add(self.placement, shift);
+        self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
+        let back = transpose(&self.rotation);
+        let placement = self.placement;
+        self.unrotated = self
+            .source_positions
+            .iter()
+            .map(|ps| ps.iter().map(|&v| mat_vec(back, geom::sub(v, placement))).collect())
+            .collect();
+        self.measure_source();
+        self.apply_stretch();
+        self.rebuild_geometry();
+        self.rebuild_paint();
+        true
+    }
+
+    pub fn can_undo_cut(&self) -> bool {
+        !self.cut_history.is_empty()
+    }
+
+    /// Printed objects: 1 for the model, more once pieces cut off it are kept.
+    pub fn object_count(&self) -> usize {
+        self.scene.parts.iter().map(|p| p.object as usize + 1).max().unwrap_or(1)
+    }
+
+    /// Puts back what the last cut took, in the orientation the model has now.
+    pub fn undo_cut(&mut self) -> bool {
+        let Some(s) = self.cut_history.pop() else { return false };
+        self.scene.parts = s.parts;
+        self.unrotated = s.unrotated;
+        self.place_from_file();
+        self.rebuild_geometry();
+        self.rebuild_paint();
+        true
     }
 
     /// The rotation (absolute, like [`Self::set_rotation`]) that leaves the least
@@ -861,8 +1100,10 @@ impl Project {
             .parts
             .iter()
             .zip(&self.trees)
-            .map(|(part, nodes)| ExportPart {
+            .zip(&self.scene.parts)
+            .map(|((part, nodes), src)| ExportPart {
                 name: part.name.clone(),
+                object: src.object,
                 positions: part.positions.iter().map(|&v| geom::scale(v, self.scale)).collect(),
                 tris: part.tris.clone(),
                 paint: nodes.iter().map(encode::encode).collect(),
@@ -896,6 +1137,7 @@ mod tests {
             sources: vec![ColorSource::Flat([0.9, 0.1, 0.1]), ColorSource::Flat([0.1, 0.1, 0.9])],
             uv_layers: vec![],
             color_layers: vec![],
+            object: 0,
         };
         Scene { parts: vec![part], ..Default::default() }
     }
@@ -1020,6 +1262,112 @@ mod tests {
     }
 
     #[test]
+    fn rotation_turns_the_size_and_lands_on_the_plate() {
+        let mut p = Project::new(scene(), 2);
+        p.set_height_mm(40.0);
+        let painted_before = p.export_parts()[0].paint.clone();
+        // A quarter turn about Y lays the 20 mm tall quad on its side.
+        p.rotate(1, 90.0);
+        assert!(p.is_rotated());
+        let s = p.stats().size_mm;
+        assert!((s[0] - 40.0).abs() < 1e-3 && (s[2] - 20.0).abs() < 1e-3, "{s:?}");
+        assert!(p.size_mm().iter().zip(&s).all(|(a, b)| (a - b).abs() < 1e-3));
+        assert!(!p.can_undo_size());
+        let lowest = p.export_parts()[0].positions.iter().map(|v| v[2]).fold(f32::MAX, f32::min);
+        assert!(lowest.abs() < 1e-4);
+        // The painting follows the triangles.
+        assert_eq!(p.export_parts()[0].paint, painted_before);
+
+        p.rotate(1, -90.0);
+        assert_eq!(p.rotation(), IDENTITY);
+        p.rotate(2, 30.0);
+        p.reset_rotation();
+        assert!(!p.is_rotated());
+        assert!((p.stats().size_mm[2] - 40.0).abs() < 1e-3);
+    }
+
+    /// A closed 10 × 10 × 20 box, its bottom half red and its top half blue.
+    fn tower() -> Scene {
+        let c = |i: usize| [(i & 1) as f32 * 10.0, ((i >> 1) & 1) as f32 * 10.0, (i >> 2) as f32 * 10.0];
+        let positions: Vec<Vec3> = (0..12).map(c).collect();
+        // Two stacked cubes sharing the middle ring of vertices (4..8).
+        let mut tris = vec![];
+        for (lo, hi) in [(0u32, 4u32), (4, 8)] {
+            let q = |a: u32, b: u32, cc: u32, d: u32| [[a, b, cc], [a, cc, d]];
+            let side = [
+                q(lo, lo + 1, hi + 1, hi),
+                q(lo + 2, hi + 2, hi + 3, lo + 3),
+                q(lo, hi, hi + 2, lo + 2),
+                q(lo + 1, lo + 3, hi + 3, hi + 1),
+            ];
+            tris.extend(side.into_iter().flatten());
+        }
+        tris.extend([[0, 2, 3], [0, 3, 1], [8, 9, 11], [8, 11, 10]]);
+        let n = tris.len() as u32;
+        let tri_source = tris.iter().map(|t: &[u32; 3]| u16::from(t.iter().any(|&v| v >= 8))).collect();
+        let part = Part {
+            name: "t".into(),
+            positions,
+            tri_loops: (0..n).map(|i| [i * 3, i * 3 + 1, i * 3 + 2]).collect(),
+            tris,
+            tri_source,
+            sources: vec![ColorSource::Flat([0.9, 0.1, 0.1]), ColorSource::Flat([0.1, 0.1, 0.9])],
+            ..Default::default()
+        };
+        Scene { parts: vec![part], ..Default::default() }
+    }
+
+    #[test]
+    fn an_unstretched_turn_moves_positions_and_keeps_the_painting() {
+        let mut p = Project::new(tower(), 2);
+        p.paint([0.0, -10.0, 3.0], [0.0, 1.0, 0.0], 0.5, 1).unwrap();
+        p.end_stroke();
+        let painted = p.painted_count();
+        let before = p.preview().positions;
+        let m = p.rotate(0, 90.0).expect("a whole-model turn");
+        assert_eq!(p.painted_count(), painted);
+        assert!(p.can_undo(), "the stroke can still be undone");
+        // The preview it had, moved as reported, is the preview it has.
+        let after = p.preview().positions;
+        for (b, a) in before.chunks(3).zip(after.chunks(3)) {
+            let moved = geom::add(mat_vec(m.matrix, [b[0], b[1], b[2]]), m.shift);
+            assert!((0..3).all(|i| (moved[i] - a[i]).abs() < 1e-4), "{moved:?} vs {a:?}");
+        }
+        let s = p.stats().size_mm;
+        assert!((s[1] - 20.0).abs() < 1e-3 && (s[2] - 10.0).abs() < 1e-3, "{s:?}");
+        // A stretched model is rebuilt instead.
+        p.set_size_mm([20.0, 20.0, 10.0]);
+        assert!(p.rotate(2, 90.0).is_none());
+    }
+
+    #[test]
+    fn a_cut_keeps_one_side_or_both_as_two_objects_and_can_be_undone() {
+        let mut p = Project::new(tower(), 2);
+        assert!(!p.cut(2, 1.5, true, false), "a plane past the model cuts nothing");
+        assert!(p.cut(2, 0.25, true, false));
+        let s = p.stats().size_mm;
+        assert!((s[2] - 5.0).abs() < 1e-3, "{s:?}");
+        assert_eq!(p.object_count(), 1);
+        assert!(p.undo_cut());
+        assert!((p.stats().size_mm[2] - 20.0).abs() < 1e-3);
+
+        // Keeping the top too: it rests on its cut face beside the bottom.
+        assert!(p.cut(2, 0.25, true, true));
+        assert_eq!(p.object_count(), 2);
+        let parts = p.export_parts();
+        let top = parts.iter().find(|x| x.object == 1).unwrap();
+        let low = top.positions.iter().map(|v| v[2]).fold(f32::MAX, f32::min);
+        let high = top.positions.iter().map(|v| v[2]).fold(f32::MIN, f32::max);
+        assert!(low.abs() < 1e-3 && (high - 15.0).abs() < 1e-3, "{low} {high}");
+        let s = p.stats().size_mm;
+        assert!((s[0] - 25.0).abs() < 1e-3 && (s[2] - 15.0).abs() < 1e-3, "{s:?}");
+        // The cut face of the kept piece is closed: the bottom keeps its red, the top its blue.
+        assert!(parts.iter().all(|x| x.tris.len() == x.paint.len()));
+        assert!(p.undo_cut() && !p.can_undo_cut());
+        assert_eq!(p.object_count(), 1);
+    }
+
+    #[test]
     fn preview_offsets_cover_all_leaves() {
         let p = Project::new(scene(), 2);
         let pv = p.preview();
@@ -1064,12 +1412,28 @@ mod tests {
     #[test]
     fn a_flattened_base_leaves_no_degenerate_faces() {
         let positions = vec![
-            [0., 0., 0.], [10., 0., 0.], [10., 10., 0.], [0., 10., 0.],
-            [0., 0., 10.], [10., 0., 10.], [10., 10., 10.], [0., 10., 10.],
+            [0., 0., 0.],
+            [10., 0., 0.],
+            [10., 10., 0.],
+            [0., 10., 0.],
+            [0., 0., 10.],
+            [10., 0., 10.],
+            [10., 10., 10.],
+            [0., 10., 10.],
         ];
         let tris = vec![
-            [0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4],
-            [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7],
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
         ];
         let part = Part {
             name: "box".into(),
@@ -1085,7 +1449,11 @@ mod tests {
             p.set_mesh_ops(MeshOps { flatten_mm: 0.8, deep_clean, ..p.mesh_ops() });
             let r = p.printability(crate::printability::Params::for_nozzle(0.4));
             for code in ["degenerate", "openEdges", "nonManifoldEdges", "winding"] {
-                assert_eq!(r.checks.iter().find(|c| c.code == code).unwrap().count, 0, "{code}, deep clean {deep_clean}");
+                assert_eq!(
+                    r.checks.iter().find(|c| c.code == code).unwrap().count,
+                    0,
+                    "{code}, deep clean {deep_clean}"
+                );
             }
             assert_eq!(p.preview().labels.len() * 9, p.preview().positions.len());
         }

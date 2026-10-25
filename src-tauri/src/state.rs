@@ -21,6 +21,8 @@ pub struct Document {
     /// Flush volumes the user typed for a swap, by `#RRGGBB` of the old and the
     /// new colour, so they follow the colours when slots move.
     pub flush: HashMap<(String, String), f32>,
+    /// Where the model's centre sits from the plate's centre, in millimetres.
+    pub offset_mm: [f32; 2],
 }
 
 #[derive(Default)]

@@ -3,6 +3,7 @@
 
 pub mod bvh;
 pub mod color;
+pub mod cut;
 pub mod encode;
 pub mod estimate;
 pub mod field;

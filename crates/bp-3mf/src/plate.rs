@@ -1,6 +1,6 @@
 //! Room on the plate: the printable area, the zones the printer excludes and
-//! the space a prime tower will take. The model sits centred, where the 3MF
-//! puts it; the tower stays where the 3MF already tells Bambu Studio to put it.
+//! the space a prime tower will take. The model sits centred, or moved by the
+//! user from there, where the 3MF puts it; the tower stays where the 3MF already tells Bambu Studio to put it.
 //! Nothing here changes the export: the reservation only answers whether the
 //! model fits, and how large it can be, once that space is set aside.
 
@@ -90,9 +90,16 @@ impl PlateCheck {
 
 /// Lays out a model `footprint_mm` wide and deep, centred on the plate.
 pub fn check(printer: &Printer, footprint_mm: [f32; 2], reserve: &Reserve) -> PlateCheck {
+    check_at(printer, footprint_mm, [0.0; 2], reserve)
+}
+
+/// Lays out a model `footprint_mm` wide and deep with its centre `offset_mm`
+/// from the plate's centre. The fit factor grows it from where it sits.
+pub fn check_at(printer: &Printer, footprint_mm: [f32; 2], offset_mm: [f32; 2], reserve: &Reserve) -> PlateCheck {
     let area = printer.printable_area();
     let excluded = printer.excluded_areas();
     let (cx, cy) = printer.plate_centre();
+    let (cx, cy) = (cx + offset_mm[0], cy + offset_mm[1]);
     let [w, d] = footprint_mm.map(|v| v.max(1e-3));
     let model = Rect::centred(cx, cy, w, d);
     let tower = reserve.tower.then(|| {
@@ -178,6 +185,18 @@ mod tests {
         assert!(big.off_plate && big.in_margin);
         let edge = check(&a1, [250.0, 100.0], &Reserve { tower: false, ..Default::default() });
         assert!(!edge.off_plate && edge.in_margin);
+    }
+
+    #[test]
+    fn a_moved_model_is_checked_where_it_sits() {
+        let a1 = printer("Bambu Lab A1");
+        let r = Reserve { tower: false, ..Default::default() };
+        let centred = check(&a1, [100.0, 100.0], &r);
+        let moved = check_at(&a1, [100.0, 100.0], [75.0, 0.0], &r);
+        assert_eq!(moved.model.x0, centred.model.x0 + 75.0);
+        assert!(centred.fits() && !moved.fits() && moved.in_margin && !moved.off_plate);
+        // Off centre it has less room to grow before the nearest edge.
+        assert!(moved.fit_factor < centred.fit_factor);
     }
 
     #[test]

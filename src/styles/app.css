@@ -469,7 +469,26 @@ details.group[open] .group__sum { visibility: hidden; }
 .toolbar__expand { color: var(--color-muted); }
 .toolbar__expand .toolbar__icon { transition: transform var(--dur-short) var(--ease-out); }
 .toolbar[data-expanded="true"] .toolbar__expand .toolbar__icon { transform: rotate(180deg); }
-.app[data-tool="measure"] .brush, .app[data-tool="size"] .brush { display: none; }
+.app[data-tool="measure"] .brush, .app[data-tool="size"] .brush, .app[data-tool="move"] .brush, .app[data-tool="rotate"] .brush, .app[data-tool="section"] .brush { display: none; }
+/* The cut stays on with other tools: its button says so, as the plate's does. */
+.toolbar__btn[data-on="true"]:not([aria-pressed="true"]) { background: var(--color-accent-soft); color: var(--color-ink); }
+.toolbar__icon .cut { fill: color-mix(in oklab, currentColor 22%, transparent); }
+
+/* What moving, turning and the cut need, under the view */
+.place { display: none; flex: none; align-items: center; gap: var(--space-xs); font-size: var(--text-sm); color: var(--color-ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.app[data-tool="move"] .place[data-for="move"], .app[data-tool="rotate"] .place[data-for="rotate"], .app[data-tool="section"] .place[data-for="section"] { display: flex; }
+.place .range { width: 120px; }
+/* The cut's controls come in groups, set apart by a rule; they wrap a whole group at a time. */
+.place[data-for="section"] { flex: 1 1 auto; flex-wrap: wrap; row-gap: var(--space-xs); column-gap: 0; }
+.place__group { display: flex; flex: none; align-items: center; gap: var(--space-xs); padding: 0 var(--space-sm); }
+.place__group:first-child { padding-left: 0; }
+.place__group + .place__group { border-left: 1px solid var(--color-rule); }
+.place .check { min-height: 36px; }
+.app[data-tool="section"] .stage__foot { flex-wrap: wrap; row-gap: var(--space-xs); }
+.app[data-tool="section"] .stage__hint { flex-basis: 100%; text-align: left; }
+.seg--sm button { min-height: 30px; padding: 0 var(--space-sm); }
+#cut-flip[aria-pressed="true"] { background: var(--color-accent-soft); color: var(--color-ink); }
+@media (max-width: 75rem) { .place .range { width: 100px; } }
 
 /* Etiquetas sobre la vista: la medida y las medidas editables */
 .overlay { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }
