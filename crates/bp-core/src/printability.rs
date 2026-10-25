@@ -354,12 +354,14 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         collect(floating.into_iter()),
     ));
     let mut contact = 0.0;
+    let mut resting = vec![];
     let mut overhang = vec![];
     for c in &soup.corners {
         let normal = geom::normalize(geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0])));
         if c.iter().all(|p| p[2] <= lo[2] + params.tolerance_mm) {
             if normal[2] < 0.0 {
                 contact += geom::area(c);
+                resting.push(center(c));
             }
         } else if normal[2] < 0.0 && (-normal[2]).asin().to_degrees() > params.overhang_deg {
             overhang.push(center(c));
@@ -372,7 +374,8 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         "warning",
         Some(contact),
         Some(params.contact_mm2),
-        vec![[0.0, 0.0, lo[2]]],
+        // Where the model does touch; with no contact there is nothing to point at.
+        collect(resting.into_iter()),
     ));
     checks.push(Check::new(
         "overhang",
@@ -495,6 +498,7 @@ mod tests {
             assert_eq!(check(&r, code).severity, "pass", "{code}");
         }
         assert_eq!(check(&r, "contact").measurement, Some(200.));
+        assert!(check(&r, "contact").locations.iter().all(|p| p[2] == 0.));
         assert_eq!(r.size_mm, [10., 20., 30.]);
         assert_eq!(r.thickness.len(), 12);
         assert!(r.thickness.iter().all(|s| s.mm.is_some_and(|mm| (10.0..=30.001).contains(&mm))));

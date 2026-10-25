@@ -47,6 +47,11 @@ function cssColor(name: string): THREE.Color {
   return new THREE.Color(r / 255, g / 255, b / 255);
 }
 
+/** Finding marker colours (linear RGB): match the panel's error, its accent and its muted grey. */
+const FINDING = [0.85, 0.12, 0.06];
+const ENOUGH = [0.05, 0.45, 0.3];
+const UNMEASURED = [0.45, 0.47, 0.46];
+
 export class Viewer {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
@@ -713,7 +718,8 @@ export class Viewer {
     this.sizeChips.forEach((chip, i) => put(chip, screen(edges[i])));
   }
 
-  /** Bounded diagnostic markers; final-to-preview scaling is supplied by the caller. */
+  /** Diagnostic markers in preview units, drawn over the model. With `values`, each point is
+   *  coloured against `threshold` (a thickness map); without, the view pans to the findings. */
   setFindings(points: Vec3[], values?: (number | null)[], threshold = 0) {
     for (const child of this.findings.children) {
       if (child instanceof THREE.Points) { child.geometry.dispose(); (child.material as THREE.Material).dispose(); }
@@ -721,11 +727,19 @@ export class Viewer {
     this.findings.clear();
     if (points.length) {
       const geometry = new THREE.BufferGeometry().setFromPoints(points.map(p => new THREE.Vector3(...p)));
-      const colors = points.flatMap((_, i) => values ? values[i] === null ? [0.6, 0.6, 0.6] : values[i]! < threshold ? [1, 0.15, 0.05] : [0.05, 0.75, 0.9] : [1, 0.3, 0.05]);
-      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-      const markers = new THREE.Points(geometry, new THREE.PointsMaterial({ size: 8, sizeAttenuation: false, vertexColors: true, depthTest: false }));
-      markers.renderOrder = 30; this.findings.add(markers);
-      if (!values) this.controls.target.set(...points[0]);
+      const tone = (v: number | null | undefined) => v === undefined ? FINDING : v === null ? UNMEASURED : v < threshold ? FINDING : ENOUGH;
+      geometry.setAttribute("color", new THREE.Float32BufferAttribute(points.flatMap((_, i) => tone(values ? values[i] : undefined)), 3));
+      const markers = new THREE.Points(geometry, new THREE.PointsMaterial({ size: 9, sizeAttenuation: false, vertexColors: true, depthTest: false, transparent: true }));
+      markers.renderOrder = 30;
+      this.findings.add(markers);
+      if (!values) {
+        // Pan, keeping the angle and distance the user chose.
+        geometry.computeBoundingBox();
+        const center = geometry.boundingBox!.getCenter(new THREE.Vector3());
+        this.camera.position.add(center.clone().sub(this.controls.target));
+        this.controls.target.copy(center);
+        this.controls.update();
+      }
     }
     this.requestRender();
   }

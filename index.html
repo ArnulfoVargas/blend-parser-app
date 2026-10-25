@@ -223,17 +223,22 @@
           </div>
         </details>
         <details class="group" id="printability">
-          <summary><h2 data-i18n="printability.title">Viabilidad de impresion</h2></summary>
+          <summary><h2 data-i18n="printability.title">Viabilidad de impresión</h2><span class="group__sum pa-sum"></span></summary>
           <div class="group__body">
-            <p class="help" data-i18n="printability.intro"></p>
-            <details><summary data-i18n="printability.parameters"></summary><div class="printability__params"></div>
-              <button class="link" type="button" id="printability-reset" data-i18n="printability.reset"></button>
+            <p class="help" data-i18n="printability.intro">Revisión geométrica FDM al tamaño final y con el perfil actual.</p>
+            <div class="pa-actions">
+              <button class="btn btn--sm" type="button" id="printability-run" data-i18n="printability.run" disabled>Analizar modelo</button>
+              <button class="link" type="button" id="printability-hide" data-i18n="printability.hide" hidden>Ocultar marcadores</button>
+            </div>
+            <p class="help pa-status" role="status" aria-live="polite"></p>
+            <div class="pa-results"></div>
+            <button class="link" type="button" id="printability-cleanup" data-i18n="printability.cleanup" disabled>Previsualizar limpieza reversible</button>
+            <details class="pa-params">
+              <summary data-i18n="printability.parameters">Parámetros del análisis</summary>
+              <div class="pa-params__grid"></div>
               <p class="help" data-i18n="printability.defaults"></p>
+              <button class="link" type="button" id="printability-reset" data-i18n="printability.reset">Restablecer para la boquilla actual</button>
             </details>
-            <button class="btn btn--quiet" type="button" id="printability-run" data-i18n="printability.run" disabled></button>
-            <p class="help printability__status" role="status" aria-live="polite"></p>
-            <div class="printability__results"></div>
-            <button class="link" type="button" id="printability-cleanup" data-i18n="printability.cleanup" disabled></button>
           </div>
         </details>
       </form>
@@ -480,18 +485,25 @@
     </div>
   </dialog>
 
+  <dialog class="dialog dialog--wide" id="printability-dialog" aria-labelledby="h-printability-dialog">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-printability-dialog" data-i18n="printability.preview">Limpieza de malla: antes y después</h2>
+      <p data-i18n="printability.cleanupHelp"></p>
+      <table class="pa-compare">
+        <thead><tr><th scope="col" data-i18n="printability.compare.metric">Medida</th><th scope="col" data-i18n="printability.compare.before">Antes</th><th scope="col" data-i18n="printability.compare.after">Después</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="help" data-i18n="printability.compare.unchanged"></p>
+      <p class="note" data-i18n="printability.colorWarning"></p>
+      <div class="dialog__actions">
+        <button class="btn" type="submit" value="cancel" data-i18n="printability.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="submit" value="apply" data-i18n="printability.apply">Aplicar y analizar de nuevo</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="drop-veil" aria-hidden="true"><p data-i18n="tray.veil">Suelta el .blend para convertirlo</p></div>
   <p class="visually-hidden" aria-live="polite" id="live"></p>
 </div>
-  <dialog id="printability-dialog" class="dialog">
-    <form method="dialog" class="dialog__body">
-      <h2 data-i18n="printability.preview"></h2>
-      <p data-i18n="printability.cleanupHelp"></p>
-      <p class="help" data-i18n="printability.colorWarning"></p>
-      <div class="printability__comparison"></div>
-      <button class="btn btn--quiet" value="cancel" data-i18n="printability.cancel"></button>
-      <button class="btn" value="apply" data-i18n="printability.apply"></button>
-    </form>
-  </dialog>
 </body>
 </html>

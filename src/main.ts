@@ -241,9 +241,8 @@ function fitProblem(s: Summary): string | null {
 }
 
 function render(s: Summary) {
-  const changed = summary !== s;
   summary = s;
-  if (changed) printability.invalidate();
+  printability.update(s);
   bind("fileName", s.fileName);
   bind("fileMeta", t("file.meta", { mb: nf(s.fileSize / 1048576, 1), count: s.materials.length, n: s.materials.length }));
 

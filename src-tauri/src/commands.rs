@@ -507,9 +507,10 @@ fn printability_for_doc(
         "checked",
         usize::from(!fits),
         "error",
-        Some(report.size_mm[2]),
-        Some(d.printer.max_height_mm()),
-        vec![[0.0; 3]],
+        // Footprint, margin, tower and height all decide this; one number would mislead.
+        None,
+        None,
+        vec![],
     ));
     report
 }
