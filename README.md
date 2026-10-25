@@ -36,6 +36,13 @@ El catálogo es `crates/bp-3mf/src/catalog.json`, generado desde `resources/prof
 node scripts/sync-printers.mjs [commit]
 ```
 
+La build de Cargo convierte el JSON versionado en una tabla Rust dentro de `OUT_DIR`.
+La tabla queda embebida en el ejecutable: la app no consulta GitHub ni parsea el JSON
+al arrancar. El bake es offline, se repite al cambiar el JSON o el generador y valida
+identificadores, volumen, boquillas y presets antes de compilar. El script de arriba
+solo se ejecuta manualmente para actualizar los datos desde Bambu Studio; no forma
+parte de la build. Guarda el JSON actualizado en Git para reproducir el mismo bake.
+
 Para cada impresora y boquilla, el 3MF nombra el preset de máquina de Bambu Studio, su proceso
 por defecto (o el compatible con la capa más cercana a media boquilla) y un PLA para ella. Una
 impresora propia sin perfil lleva en el 3MF su volumen (`printable_area`, `printable_height`),

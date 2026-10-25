@@ -1,3 +1,5 @@
+// Manual maintenance command (network required); never run by the build or app.
+// Cargo bakes the resulting versioned JSON into Rust constants offline.
 // Rebuilds crates/bp-3mf/src/catalog.json from Bambu Studio's own printer profiles,
 // so every printer the app offers names presets Bambu Studio really ships.
 //
