@@ -15,6 +15,7 @@ pub struct Document {
     pub project: Project,
     pub file_name: String,
     pub file_size: u64,
+    pub import_warnings: Vec<bp_blend::ImportWarning>,
     /// A copy of the store's pick, kept in step by the printer commands.
     pub printer: Printer,
     /// Flush volumes the user typed for a swap, by `#RRGGBB` of the old and the

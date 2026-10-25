@@ -26,6 +26,7 @@ import {
 import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, onLangChange, setLang, t, tKey, volume, type Key, type Lang } from "./i18n";
 import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
+import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { Viewer, type Tool, type View } from "./viewer";
 
@@ -38,6 +39,9 @@ const nf = (n: number, d = 0) => num(n, d);
 /** Millimetres as a printer spec reads them: 0,4, 0,25, 256. */
 const mm = (n: number) => num(n, 2, false);
 const dims = (v: number[], d = 1) => `${v.map((x) => nf(x, d)).join(" × ")} mm`;
+/** What Blender can import for us; `bp_blend::INPUT_EXTENSIONS` is the same list. */
+const MODEL_EXTENSIONS = ["blend", "obj", "fbx", "gltf", "glb", "ply"];
+const MODEL_EXT = new RegExp(`\\.(${MODEL_EXTENSIONS.join("|")})$`, "i");
 
 let summary: Summary | null = null;
 let printers: Printers | null = null;
@@ -239,6 +243,57 @@ function fitProblem(s: Summary): string | null {
   return null;
 }
 
+/** Notices that inform rather than warn: shown as a plain line under the warnings. */
+const IMPORT_INFO = new Set(["units", "blendTextures"]);
+
+/** Import notices grouped by kind, a few names each; units are information, not a warning. */
+function renderImportWarnings(s: Summary) {
+  const box = $("#import-warnings");
+  const info = s.importWarnings.filter((w) => IMPORT_INFO.has(w.code));
+  const groups = new Map<string, string[]>();
+  for (const w of s.importWarnings) if (!IMPORT_INFO.has(w.code)) groups.set(w.code, [...(groups.get(w.code) ?? []), w.detail]);
+  const nodes: HTMLElement[] = [];
+  const total = [...groups.values()].reduce((n, d) => n + d.length, 0);
+  if (total) {
+    const head = document.createElement("p");
+    head.className = "import-warnings__head";
+    head.textContent = t("import.warnings", { count: total });
+    nodes.push(head);
+    for (const [code, details] of groups) {
+      const group = document.createElement("div");
+      group.className = "import-warnings__group";
+      const title = document.createElement("strong");
+      title.textContent = tKey(`import.${code}`, {}, code);
+      const names = document.createElement("ul");
+      const SHOWN = 3;
+      for (const detail of details.slice(0, SHOWN)) {
+        const li = document.createElement("li");
+        // Paths read best by file name; the whole path stays one hover away.
+        li.textContent = detail.split(/[\\/]/).pop() || detail;
+        li.title = detail;
+        names.append(li);
+      }
+      if (details.length > SHOWN) {
+        const li = document.createElement("li");
+        li.className = "import-warnings__more";
+        li.textContent = t("import.more", { count: details.length - SHOWN });
+        li.title = details.slice(SHOWN).join("\n");
+        names.append(li);
+      }
+      const help = document.createElement("p");
+      help.className = "help";
+      help.textContent = tKey(`import.${code}Help`);
+      group.append(title, names, help);
+      nodes.push(group);
+    }
+  }
+  box.hidden = !total;
+  box.replaceChildren(...nodes);
+  const unitNote = $("#import-units");
+  unitNote.hidden = !info.length;
+  unitNote.textContent = info.map((w) => tKey(`import.${w.code}`, { detail: w.detail }, w.detail)).join(" ");
+}
+
 function render(s: Summary) {
   summary = s;
   bind("fileName", s.fileName);
@@ -294,6 +349,7 @@ function render(s: Summary) {
 
   renderWaste(s);
   renderSlots(s);
+  renderImportWarnings(s);
   const mats = $<HTMLDListElement>("#materials");
   mats.replaceChildren(...s.materials.flatMap((m) => {
     const dt = document.createElement("dt");
@@ -749,11 +805,14 @@ function renderSlots(s: Summary) {
 
 let unlistenProgress: (() => void) | null = null;
 
-async function openFile(path: string) {
+/** `extras`: files dropped with the model, offered for what it references. */
+async function openFile(path: string, extras: string[] = []) {
   const lower = path.toLowerCase();
   const name = path.split(/[\\/]/).pop() ?? path;
   if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
-  if (!lower.endsWith(".blend")) return setState("error", { key: "error.notBlend", params: { name } });
+  if (!MODEL_EXT.test(lower)) return setState("error", { key: "error.notBlend", params: { name } });
+  const added = await gatherCompanions(path, extras);
+  if (added === null) return;
   step = { key: "blender", name: "" };
   setState("converting");
   hideToast();
@@ -765,7 +824,7 @@ async function openFile(path: string) {
   try {
     previousSwaps = null;
     measured = [];
-    render(await api.openBlend(path));
+    render(await api.openBlend(path, added));
     await reloadMesh(true);
     setState("ready");
     // Start both panels at the top once layout has settled.
@@ -780,7 +839,7 @@ async function openFile(path: string) {
 }
 
 $("#choose").addEventListener("click", async () => {
-  const path = await open({ multiple: false, directory: false, filters: [{ name: "Blender", extensions: ["blend"] }] });
+  const path = await open({ multiple: false, directory: false, filters: [{ name: t("import.formats"), extensions: MODEL_EXTENSIONS }] });
   if (typeof path === "string") await openFile(path);
 });
 
@@ -799,9 +858,21 @@ $("#find-blender").addEventListener("click", async () => {
 
 void getCurrentWebview().onDragDropEvent((e) => {
   const p = e.payload;
-  if (p.type === "enter" || p.type === "over") app.classList.add("is-dragging");
+  const over = p.type === "enter" || p.type === "over";
+  // The model files dialog takes what is dropped while it is open.
+  const into = companionsDrop.active;
+  if (into) {
+    $("#files-dialog").classList.toggle("is-dropping", over);
+    if (p.type === "drop" && p.paths.length) into(p.paths);
+    return;
+  }
+  if (over) app.classList.add("is-dragging");
   else app.classList.remove("is-dragging");
-  if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") void openFile(p.paths[0]);
+  if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") {
+    // A model dropped with its .mtl, .bin or textures: the rest go along with it.
+    const model = p.paths.find((f) => MODEL_EXT.test(f) || /\.blend\d+$/i.test(f)) ?? p.paths[0];
+    void openFile(model, p.paths.filter((f) => f !== model));
+  }
 });
 
 // ---- export ------------------------------------------------------------------------------
@@ -821,7 +892,7 @@ $("#export").addEventListener("click", async () => {
   const btn = $<HTMLButtonElement>("#export");
   if (app.dataset.state !== "ready" || !summary || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
-  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
   if (!path) return;
   btn.setAttribute("aria-busy", "true");
   btn.setAttribute("aria-disabled", "true");
@@ -855,7 +926,7 @@ $("#export-zip").addEventListener("click", async () => {
   zipDialog.close();
   if (!(await confirmOversize())) return;
   const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
-  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
   await work(async () => {
     const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());

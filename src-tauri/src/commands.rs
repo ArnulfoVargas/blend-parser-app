@@ -80,10 +80,26 @@ pub fn blender_status(app: AppHandle) -> Option<String> {
     blender_path(&app).ok().map(|p| p.display().to_string())
 }
 
-/// A `.blend` passed on the command line ("Open with…"), if any.
+/// Files the model references and whether each is at hand, with `extras` the
+/// files and folders the user added. Reads the model only; Blender is not started.
+#[tauri::command]
+pub async fn inspect_model(
+    path: String,
+    extras: Vec<String>,
+    library: Option<String>,
+) -> CmdResult<Vec<bp_blend::companions::Companion>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let extras: Vec<PathBuf> = extras.into_iter().map(PathBuf::from).collect();
+        Ok(bp_blend::companions::inspect_with(Path::new(&path), &extras, library.as_deref().map(Path::new)))
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// A supported model passed on the command line ("Open with…"), if any.
 #[tauri::command]
 pub fn initial_file() -> Option<String> {
-    std::env::args().skip(1).find(|a| a.to_lowercase().ends_with(".blend"))
+    std::env::args().skip(1).find(|a| bp_blend::supports(Path::new(a)))
 }
 
 #[tauri::command]
@@ -97,7 +113,14 @@ pub fn set_blender_path(app: AppHandle, path: String) -> CmdResult<String> {
 }
 
 #[tauri::command]
-pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
+pub async fn open_blend(
+    app: AppHandle,
+    path: String,
+    extras: Option<Vec<String>>,
+    textures: Option<Vec<(String, String)>>,
+    library: Option<String>,
+    blend: Option<String>,
+) -> CmdResult<Summary> {
     let blender = blender_path(&app)?;
     let printer = with_store(&app, |s| Ok(s.printer()))?;
     let handle = app.clone();
@@ -110,9 +133,15 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
             let _ = handle.emit("progress", ProgressDto { key: key.to_string(), name: name.to_string() });
         };
         emit("blender");
-        let scene = bp_blend::extract(&blender, file, &mut |m| emit(m))?;
+        let additions = bp_blend::Additions {
+            files: extras.unwrap_or_default().into_iter().map(PathBuf::from).collect(),
+            textures: textures.unwrap_or_default().into_iter().map(|(m, p)| (m, PathBuf::from(p))).collect(),
+            library: library.map(PathBuf::from),
+            blend: blend.map(PathBuf::from),
+        };
+        let imported = bp_blend::extract_with_files(&blender, file, &additions, &mut |m| emit(m))?;
         emit("palette");
-        let mut project = bp_core::Project::new(scene, 4);
+        let mut project = bp_core::Project::new(imported.scene, 4);
         let state = handle.state::<AppState>();
         let prefs = state.prefs.lock()?;
         project.set_print_ops(print_ops(&printer, &prefs));
@@ -120,6 +149,7 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
             project,
             file_name: file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path.clone()),
             file_size: size,
+            import_warnings: imported.warnings,
             printer,
             flush: Default::default(),
         };

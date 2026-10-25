@@ -1,9 +1,11 @@
 # BlendParser
 
-App de escritorio (Tauri 2 + Rust) que convierte un `.blend` con materiales y
+App de escritorio (Tauri 2 + Rust) que convierte modelos `.blend`, OBJ, FBX, glTF/GLB y PLY con materiales y
 texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
 
 - Carga por arrastrar y soltar, por el diálogo o con "Abrir con…".
+- Importación multicolor mediante Blender, con avisos persistentes de recursos faltantes y
+  aproximaciones de color. Consulta [formatos, unidades y limitaciones](docs/importacion.md).
 - Materiales a pintura por triángulo (`paint_color`), con bordes subdivididos como hace Bambu.
 - Colores objetivo editables por ranura del AMS, o sugeridos de nuevo con 2 a 12 filamentos.
 - Reducción de colores por cercanía (ΔE en Lab): de 10 a 5 uniendo los más parecidos, o
