@@ -19,6 +19,11 @@ pub enum Kind {
     /// glTF geometry buffers: without them there is no mesh at all.
     Buffers,
     Textures,
+    /// An OBJ material that names no texture although the mesh has UVs and the
+    /// material kept the exporter's default grey: its texture was probably packed
+    /// in the source file and lost on export. `name` is the material; the user
+    /// can give it an image.
+    Unmapped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -93,13 +98,26 @@ pub fn inspect(model: &Path, extras: &[PathBuf]) -> Vec<Companion> {
     };
     match ext.as_str() {
         "obj" => {
-            for library in obj_libraries(model) {
+            let (libraries, has_uv) = obj_scan(model);
+            let mut unmapped = vec![];
+            for library in libraries {
                 if let Some(mtl) = add(Kind::Materials, library, dir, false) {
                     let base = mtl.parent().unwrap_or(dir).to_path_buf();
                     for texture in mtl_textures(&mtl) {
                         add(Kind::Textures, texture, &base, false);
                     }
+                    if has_uv {
+                        unmapped.extend(mtl_untextured(&mtl));
+                    }
                 }
+            }
+            for material in unmapped {
+                out.entry((Kind::Unmapped, material.clone())).or_insert(Companion {
+                    kind: Kind::Unmapped,
+                    name: material,
+                    found: false,
+                    required: false,
+                });
             }
         }
         "gltf" => {
@@ -139,12 +157,15 @@ pub fn inspect(model: &Path, extras: &[PathBuf]) -> Vec<Companion> {
     out.into_values().collect()
 }
 
-/// `mtllib` names. A name with spaces is taken whole when that file exists.
-pub fn obj_libraries(obj: &Path) -> Vec<String> {
+/// `mtllib` names, and whether the OBJ has texture coordinates. A name with
+/// spaces is taken whole when that file exists.
+pub fn obj_scan(obj: &Path) -> (Vec<String>, bool) {
     let dir = obj.parent().unwrap_or(Path::new("."));
     let text = String::from_utf8_lossy(&std::fs::read(obj).unwrap_or_default()).into_owned();
     let mut names = vec![];
+    let mut has_uv = false;
     for line in text.lines() {
+        has_uv = has_uv || line.starts_with("vt ");
         let Some(rest) = directive(line, "mtllib") else { continue };
         if dir.join(rest).is_file() || !rest.contains(char::is_whitespace) {
             names.push(rest.to_string());
@@ -152,7 +173,37 @@ pub fn obj_libraries(obj: &Path) -> Vec<String> {
             names.extend(rest.split_whitespace().map(str::to_string));
         }
     }
-    names
+    (names, has_uv)
+}
+
+/// Materials with no colour map whose diffuse is the default grey or white an
+/// exporter writes when it could not express the texture.
+pub fn mtl_untextured(mtl: &Path) -> Vec<String> {
+    let text = String::from_utf8_lossy(&std::fs::read(mtl).unwrap_or_default()).into_owned();
+    let mut out = vec![];
+    let mut current: Option<(String, bool, bool)> = None; // name, has map, default colour
+    let mut flush = |m: Option<(String, bool, bool)>| {
+        if let Some((name, mapped, default)) = m {
+            if !mapped && default {
+                out.push(name);
+            }
+        }
+    };
+    for line in text.lines() {
+        if let Some(name) = directive(line, "newmtl") {
+            flush(current.take());
+            current = Some((name.to_string(), false, true));
+        } else if let Some(m) = current.as_mut() {
+            if directive(line, "map_Kd").is_some() {
+                m.1 = true;
+            } else if let Some(kd) = directive(line, "Kd") {
+                let rgb: Vec<f32> = kd.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+                m.2 = rgb.len() == 3 && [0.8, 1.0].iter().any(|g| rgb.iter().all(|c| (c - g).abs() < 1e-3));
+            }
+        }
+    }
+    flush(current);
+    out
 }
 
 /// Colour maps of an MTL, without the options that may precede the file name.
@@ -289,6 +340,24 @@ mod tests {
         std::fs::write(textures.join("sub").join("body color.png"), b"png").unwrap();
         let done = inspect(&obj, &[mtl, textures]);
         assert!(done.iter().all(|c| c.found), "{done:?}");
+    }
+
+    #[test]
+    fn grey_untextured_materials_of_a_uv_mapped_obj_can_take_an_image() {
+        let dir = temp("unmapped");
+        let obj = dir.join("spider.obj");
+        std::fs::write(&obj, "mtllib spider.mtl\nv 0 0 0\nvt 0 0\n").unwrap();
+        std::fs::write(
+            dir.join("spider.mtl"),
+            "newmtl pmat_Base\nKd 0.8 0.8 0.8\nnewmtl Red\nKd 1 0 0\nnewmtl Skin\nKd 0.8 0.8 0.8\nmap_Kd skin.png\nnewmtl Plain\n",
+        )
+        .unwrap();
+        let unmapped: Vec<_> =
+            inspect(&obj, &[]).into_iter().filter(|c| c.kind == Kind::Unmapped).map(|c| c.name).collect();
+        assert_eq!(unmapped, vec!["Plain", "pmat_Base"]);
+        // Without UVs an image could not be placed, so nothing is offered.
+        std::fs::write(&obj, "mtllib spider.mtl\nv 0 0 0\n").unwrap();
+        assert!(inspect(&obj, &[]).iter().all(|c| c.kind != Kind::Unmapped));
     }
 
     #[test]

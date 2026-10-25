@@ -111,7 +111,8 @@ fn real_multicolor_imports_and_missing_resources() {
     assert_eq!(missing(&[mats.join("colors.mtl")]), vec![Kind::Textures]);
     let extras = [mats.join("colors.mtl"), maps.clone()];
     assert!(missing(&extras).is_empty());
-    let imported = bp_blend::extract_with_files(&blender, &obj, &extras, &mut |_| {}).unwrap();
+    let added = bp_blend::Additions { files: extras.to_vec(), ..Default::default() };
+    let imported = bp_blend::extract_with_files(&blender, &obj, &added, &mut |_| {}).unwrap();
     assert!(
         !imported.warnings.iter().any(|w| w.code.starts_with("missing")),
         "added files still reported missing: {:?}",
@@ -135,7 +136,8 @@ fn real_multicolor_imports_and_missing_resources() {
     std::fs::rename(&buffer, &moved).unwrap();
     let result = bp_blend::extract_with_report(&blender, &dir.join("colors.gltf"), &mut |_| {});
     assert!(matches!(result, Err(bp_blend::BlendError::Blender(_))), "missing glTF geometry must fail explicitly");
-    let found = bp_blend::extract_with_files(&blender, &dir.join("colors.gltf"), &[moved], &mut |_| {}).unwrap();
+    let added = bp_blend::Additions { files: vec![moved], ..Default::default() };
+    let found = bp_blend::extract_with_files(&blender, &dir.join("colors.gltf"), &added, &mut |_| {}).unwrap();
     assert_eq!(found.scene.triangle_count(), 24, "added glTF buffer not used");
     eprintln!("gltf: buffer added from another folder");
     std::fs::remove_dir_all(&dir).unwrap();

@@ -31,3 +31,14 @@
 .files__actions { align-items: center; }
 .files__spacer { flex: 1; }
 @media (max-width: 520px) { .files__label { display: none; } }
+
+.files__list--assign li { gap: var(--space-sm); }
+.files__material { flex: 0 1 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); font-weight: 500; }
+.files__list--assign .files__name { font-family: var(--font-body); color: var(--color-ink-2); }
+.files__list--assign li[data-found="false"] .files__name { color: var(--color-muted); font-style: italic; }
+.files__list--assign .link { min-height: 24px; font-size: var(--text-xs); }
+.files__clear { flex-shrink: 0; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: var(--color-muted); font-size: var(--text-md); cursor: pointer; }
+@media (hover: hover) { .files__clear:hover { background: var(--color-paper-3); color: var(--color-ink); } }
+.files__clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.files__tip { font-size: var(--text-xs); }
+.files__list--assign { max-height: 260px; }

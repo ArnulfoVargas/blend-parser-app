@@ -109,7 +109,12 @@ pub fn set_blender_path(app: AppHandle, path: String) -> CmdResult<String> {
 }
 
 #[tauri::command]
-pub async fn open_blend(app: AppHandle, path: String, extras: Option<Vec<String>>) -> CmdResult<Summary> {
+pub async fn open_blend(
+    app: AppHandle,
+    path: String,
+    extras: Option<Vec<String>>,
+    textures: Option<Vec<(String, String)>>,
+) -> CmdResult<Summary> {
     let blender = blender_path(&app)?;
     let printer = with_store(&app, |s| Ok(s.printer()))?;
     let handle = app.clone();
@@ -122,8 +127,11 @@ pub async fn open_blend(app: AppHandle, path: String, extras: Option<Vec<String>
             let _ = handle.emit("progress", ProgressDto { key: key.to_string(), name: name.to_string() });
         };
         emit("blender");
-        let extras: Vec<PathBuf> = extras.unwrap_or_default().into_iter().map(PathBuf::from).collect();
-        let imported = bp_blend::extract_with_files(&blender, file, &extras, &mut |m| emit(m))?;
+        let additions = bp_blend::Additions {
+            files: extras.unwrap_or_default().into_iter().map(PathBuf::from).collect(),
+            textures: textures.unwrap_or_default().into_iter().map(|(m, p)| (m, PathBuf::from(p))).collect(),
+        };
+        let imported = bp_blend::extract_with_files(&blender, file, &additions, &mut |m| emit(m))?;
         emit("palette");
         let mut project = bp_core::Project::new(imported.scene, 4);
         let state = handle.state::<AppState>();

@@ -807,8 +807,8 @@ async function openFile(path: string, extras: string[] = []) {
   const name = path.split(/[\\/]/).pop() ?? path;
   if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
   if (!MODEL_EXT.test(lower)) return setState("error", { key: "error.notBlend", params: { name } });
-  const files = await gatherCompanions(path, extras);
-  if (files === null) return;
+  const added = await gatherCompanions(path, extras);
+  if (added === null) return;
   step = { key: "blender", name: "" };
   setState("converting");
   hideToast();
@@ -820,7 +820,7 @@ async function openFile(path: string, extras: string[] = []) {
   try {
     previousSwaps = null;
     measured = [];
-    render(await api.openBlend(path, files));
+    render(await api.openBlend(path, added.files, added.textures));
     await reloadMesh(true);
     setState("ready");
     // Start both panels at the top once layout has settled.

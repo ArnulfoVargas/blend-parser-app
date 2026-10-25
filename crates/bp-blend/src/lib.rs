@@ -142,15 +142,23 @@ pub fn extract_with_report(
     source: &Path,
     progress: &mut dyn FnMut(&str),
 ) -> Result<ImportResult, BlendError> {
-    extract_with_files(blender, source, &[], progress)
+    extract_with_files(blender, source, &Additions::default(), progress)
 }
 
-/// As [`extract_with_report`], with files the user added for what the model
-/// references (see [`companions`]); folders stand for the files inside them.
+/// What the user added before converting (see [`companions`]).
+#[derive(Clone, Debug, Default)]
+pub struct Additions {
+    /// Files for what the model references; folders stand for the files inside them.
+    pub files: Vec<PathBuf>,
+    /// An image for each named material whose texture the model does not name.
+    pub textures: Vec<(String, PathBuf)>,
+}
+
+/// As [`extract_with_report`], with what the user added.
 pub fn extract_with_files(
     blender: &Path,
     source: &Path,
-    extras: &[PathBuf],
+    additions: &Additions,
     progress: &mut dyn FnMut(&str),
 ) -> Result<ImportResult, BlendError> {
     if !supports(source) {
@@ -160,8 +168,13 @@ pub fn extract_with_files(
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("blendparser-{}-{stamp}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    let extras = companions::expand(extras);
-    let result = run(blender, &source, &extras, &dir, progress).and_then(|_| read_dump(&dir));
+    let extras = companions::expand(&additions.files);
+    let textures: serde_json::Map<String, serde_json::Value> =
+        additions.textures.iter().map(|(m, p)| (m.clone(), p.display().to_string().into())).collect();
+    let result = std::fs::write(dir.join("textures.json"), serde_json::Value::Object(textures).to_string())
+        .map_err(BlendError::from)
+        .and_then(|_| run(blender, &source, &extras, &dir, progress))
+        .and_then(|_| read_dump(&dir));
     let _ = std::fs::remove_dir_all(&dir);
     result
 }

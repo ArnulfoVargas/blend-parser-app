@@ -23,6 +23,12 @@ EXTRAS = [os.path.abspath(p) for p in ARGS[2:]]
 BY_NAME = {os.path.basename(p).lower(): p for p in EXTRAS}
 EXT = os.path.splitext(SOURCE)[1].lower()
 STAGE = None
+# Images the user gave to materials whose texture the model does not name.
+try:
+    with open(os.path.join(OUT, "textures.json"), encoding="utf-8") as f:
+        ASSIGNED = json.load(f)
+except (OSError, ValueError):
+    ASSIGNED = {}
 warnings = []
 
 
@@ -238,6 +244,11 @@ def base_color_socket(mat):
 
 def resolve(mat, me):
     """('image', bpy.types.Image, uv_name|None) | ('vcol', attr_name) | ('flat', srgb)"""
+    if mat is not None and mat.name in ASSIGNED:
+        try:
+            return ("image", bpy.data.images.load(ASSIGNED[mat.name], check_existing=True), None)
+        except RuntimeError:
+            warn("missingTexture", ASSIGNED[mat.name])
     if mat is None:
         if me.color_attributes.active_color:
             return ("vcol", me.color_attributes.active_color.name)

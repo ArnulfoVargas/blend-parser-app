@@ -57,6 +57,14 @@ Agregar un `.mtl` vuelve a leerlo y puede descubrir las texturas que pide. En Te
 puede elegir una carpeta (cuenta su contenido y el de sus subcarpetas directas). Soltar el
 modelo junto con sus archivos también los usa. Si no falta nada, no aparece el diálogo.
 
+Un OBJ puede traer su `.mtl` y aun así haber perdido las texturas: si el original las
+tenía empaquetadas (por ejemplo, en un `.blend`), el exportador escribe materiales grises
+sin `map_Kd`. Cuando el OBJ tiene coordenadas UV y un material no tiene mapa y conserva el
+gris (0,8) o el blanco por defecto, el paso **Asignar texturas** permite darle una imagen.
+Si se eligen varias imágenes a la vez, se emparejan por nombre sin prefijos ni sufijos
+habituales (`proj_Leg_L1.png` → `pmat_Leg_L1`). El paso también recomienda abrir el `.blend`,
+que conserva las texturas empaquetadas.
+
 Al importar, los archivos agregados se pasan al extractor. Si el `.mtl` o el `.bin` vienen
 de otra carpeta, se importa una copia del modelo desde una carpeta temporal que los tiene
 con el nombre que el modelo espera; las imágenes que no cargaron se vuelven a enlazar por
