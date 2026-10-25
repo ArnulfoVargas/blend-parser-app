@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BlendParser</title>
-<meta name="description" content="Convierte un .blend con materiales en un 3MF pintado para Bambu Studio." data-i18n-attr="content:meta.description">
+<meta name="description" content="Convierte un modelo con materiales en un 3MF pintado para Bambu Studio." data-i18n-attr="content:meta.description">
 <script type="module" src="/src/main.ts"></script>
 </head>
 <body>
@@ -60,8 +60,8 @@
       <div class="tray">
         <button class="tray__drop" type="button" id="choose">
           <span class="tray__empty">
-            <strong data-i18n="tray.drop">Suelta un .blend aquí</strong>
-            <span data-i18n="tray.dropHelp">Con sus materiales y texturas. Lo convierto en un 3MF pintado.</span>
+            <strong data-i18n="tray.drop">Suelta un modelo aquí</strong>
+            <span data-i18n="tray.dropHelp">BLEND, OBJ, FBX, glTF/GLB o PLY, con sus materiales y texturas.</span>
             <span class="btn btn--quiet" data-i18n="tray.choose">Elegir archivo</span>
           </span>
           <span class="label tray__ready">
@@ -199,9 +199,11 @@
               <input class="range" id="island" name="island" type="range" min="0" max="50" step="1" value="0">
               <p class="help" data-i18n="colour.islandsHelp">Las manchas pequeñas toman el color vecino: menos cambios de filamento.</p>
             </div>
-            <div class="note" id="detail-note" role="status" hidden>
-              <p data-bind="detailNote"></p>
-              <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix"></button>
+            <div class="reveal is-gone" id="detail-note">
+              <div><div class="note" role="status">
+                <p data-bind="detailNote"></p>
+                <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix"></button>
+              </div></div>
             </div>
           </div>
         </details>
@@ -220,6 +222,24 @@
               <input class="range" id="keep" name="keep" type="range" min="5" max="100" step="5" value="100">
               <p class="help" data-bind="triangles"></p>
             </div>
+          </div>
+        </details>
+        <details class="group" id="printability">
+          <summary><h2 data-i18n="printability.title">Viabilidad de impresión</h2><span class="group__sum pa-sum"></span></summary>
+          <div class="group__body">
+            <p class="help" data-i18n="printability.intro">Revisión geométrica FDM al tamaño final y con el perfil actual.</p>
+            <div class="pa-actions">
+              <button class="btn btn--sm" type="button" id="printability-run" data-i18n="printability.run" disabled>Analizar modelo</button>
+              <button class="link" type="button" id="printability-hide" data-i18n="printability.hide" hidden>Ocultar marcadores</button>
+            </div>
+            <p class="help pa-status" role="status" aria-live="polite"></p>
+            <div class="pa-results"></div>
+            <details class="pa-params">
+              <summary data-i18n="printability.parameters">Parámetros del análisis</summary>
+              <div class="pa-params__grid"></div>
+              <p class="help" data-i18n="printability.defaults"></p>
+              <button class="link" type="button" id="printability-reset" data-i18n="printability.reset">Restablecer para la boquilla actual</button>
+            </details>
           </div>
         </details>
       </form>
@@ -244,6 +264,9 @@
           <button class="toolbar__btn" type="button" data-tool="brush" aria-pressed="false" data-i18n-attr="title:stage.brushTitle;aria-label:stage.brushTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4.5 19.5 9.5 11 18l-5-5z"/><path d="M6 13c-2 0-3 1.5-3 3.5S2 20 2 20s2.5.5 4.5-.5S10 17 10 15.5"/></svg><span class="toolbar__label" data-i18n="stage.brush"></span><kbd>B</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="measure" aria-pressed="false" data-i18n-attr="title:stage.measureTitle;aria-label:stage.measureTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5 15.5 3l5.5 5.5L8.5 21z"/><path d="M7.5 11l2 2M10.5 8l1.5 1.5M13.5 5l2 2M5 14l1.5 1.5"/></svg><span class="toolbar__label" data-i18n="stage.measure"></span><kbd>M</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="size" aria-pressed="false" data-i18n-attr="title:stage.sizeTitle;aria-label:stage.sizeTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 15v5h-5"/><path d="M4 4l6 6M20 20l-6-6"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg><span class="toolbar__label" data-i18n="stage.size"></span><kbd>S</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="move" aria-pressed="false" data-i18n-attr="title:stage.moveTitle;aria-label:stage.moveTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5 12 3l2.5 2.5M9.5 18.5 12 21l2.5-2.5M5.5 9.5 3 12l2.5 2.5M18.5 9.5 21 12l-2.5 2.5"/></svg><span class="toolbar__label" data-i18n="stage.move"></span><kbd>G</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="rotate" aria-pressed="false" data-i18n-attr="title:stage.rotateTitle;aria-label:stage.rotateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.8 3.5v4h-4"/><ellipse cx="12" cy="12" rx="7.5" ry="2.6"/></svg><span class="toolbar__label" data-i18n="stage.rotate"></span><kbd>R</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="section" aria-pressed="false" data-on="false" data-i18n-attr="title:stage.sectionTitle;aria-label:stage.sectionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M2.5 12.5 12 7.5l9.5 5-9.5 5z" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.section"></span><kbd>C</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
@@ -268,6 +291,36 @@
           <label for="radius" data-i18n="stage.radius">Radio</label>
           <input class="range" id="radius" type="range" min="0.5" max="20" step="0.5" value="3">
           <output for="radius" class="num" data-bind="radiusOut">3&nbsp;mm</output>
+        </div>
+        <div class="place" data-for="move">
+          <span class="num" data-bind="placeOffset"></span>
+          <button class="btn btn--quiet btn--sm" type="button" id="place-centre" data-i18n="place.centre">Centrar en la placa</button>
+        </div>
+        <div class="place" data-for="rotate">
+          <span data-i18n="place.quarter">Girar 90°:</span>
+          <button class="btn btn--quiet btn--sm" type="button" data-turn="0">X</button>
+          <button class="btn btn--quiet btn--sm" type="button" data-turn="1">Y</button>
+          <button class="btn btn--quiet btn--sm" type="button" data-turn="2">Z</button>
+          <button class="btn btn--quiet btn--sm" type="button" id="rotate-reset" data-i18n="place.resetRotation">Orientación original</button>
+        </div>
+        <div class="place" data-for="section">
+          <div class="place__group">
+            <div class="seg seg--sm" role="group" aria-label="Eje del corte" data-i18n-attr="aria-label:cut.axis">
+              <button type="button" data-cut-axis="0" aria-pressed="false">X</button>
+              <button type="button" data-cut-axis="1" aria-pressed="false">Y</button>
+              <button type="button" data-cut-axis="2" aria-pressed="true">Z</button>
+            </div>
+            <input class="range" id="cut-pos" type="range" min="0" max="100" step="0.5" value="50" aria-label="Posición del corte" data-i18n-attr="aria-label:cut.position">
+            <button class="btn btn--quiet btn--sm" type="button" id="cut-flip" aria-pressed="false" data-i18n="cut.flip">Invertir</button>
+          </div>
+          <div class="place__group">
+            <label class="check" data-i18n-attr="title:cut.keepOtherHelp"><input type="checkbox" id="cut-keep-other"> <span data-i18n="cut.keepOther">Conservar la otra parte</span></label>
+            <button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Cortar aquí</button>
+          </div>
+          <div class="place__group">
+            <button class="btn btn--quiet btn--sm" type="button" id="cut-undo" disabled data-i18n="cut.undo">Deshacer corte</button>
+            <button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.off">Quitar corte</button>
+          </div>
         </div>
         <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
         <p class="stage__hint" data-bind="hint"></p>
@@ -303,6 +356,8 @@
 
       <section class="mats" aria-labelledby="h-mats">
         <h2 id="h-mats" data-i18n="materials.title">Materiales</h2>
+        <div id="import-warnings" class="import-warnings" role="status" hidden></div>
+        <p id="import-units" class="help" hidden></p>
         <dl id="materials"></dl>
       </section>
     </aside>
@@ -318,6 +373,40 @@
       </div>
       <div class="dialog__actions">
         <button class="btn btn--primary" type="submit" value="close" data-i18n="common.close">Cerrar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="fix-all-dialog" aria-labelledby="h-fix-all">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-fix-all" data-i18n="printability.fixAll">Corregir todo</h2>
+      <p class="help" data-i18n="printability.fixAllIntro">Se intentará corregir:</p>
+      <ul class="fix-all__list" data-bind="problems"></ul>
+      <p class="help" data-i18n="printability.fixAllEffects">Para ello puede:</p>
+      <ul class="fix-all__list" data-bind="effects"></ul>
+      <p class="help fix-all__warn" data-bind="paint" data-i18n="printability.fixAllPaint" hidden>Reparar la malla quita la pintura manual; Revertir todo la recupera.</p>
+      <p class="help" data-i18n="printability.fixAllUndo">Revertir todo lo deshace todo a la vez.</p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="submit" value="ok" data-i18n="printability.fixAll">Corregir todo</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog dialog--wide" id="files-dialog" aria-labelledby="h-files">
+    <form method="dialog" class="dialog__body">
+      <div>
+        <h2 id="h-files" data-i18n="files.title">Archivos del modelo</h2>
+        <p class="help mono files__model"></p>
+      </div>
+      <ol class="files__steps"></ol>
+      <section class="files__panel" aria-live="polite"></section>
+      <div class="dialog__actions files__actions">
+        <button class="btn" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <span class="files__spacer"></span>
+        <button class="link" type="button" id="files-now" data-i18n="files.now">Convertir ya</button>
+        <button class="btn" type="button" id="files-back" data-i18n="files.back">Atrás</button>
+        <button class="btn btn--primary" type="button" id="files-next">Siguiente</button>
       </div>
     </form>
   </dialog>
@@ -466,7 +555,7 @@
     </div>
   </dialog>
 
-  <div class="drop-veil" aria-hidden="true"><p data-i18n="tray.veil">Suelta el .blend para convertirlo</p></div>
+  <div class="drop-veil" aria-hidden="true"><p data-i18n="tray.veil">Suelta el modelo para convertirlo</p></div>
   <p class="visually-hidden" aria-live="polite" id="live"></p>
 </div>
 </body>

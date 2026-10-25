@@ -1,9 +1,11 @@
 # BlendParser
 
-App de escritorio (Tauri 2 + Rust) que convierte un `.blend` con materiales y
+App de escritorio (Tauri 2 + Rust) que convierte modelos `.blend`, OBJ, FBX, glTF/GLB y PLY con materiales y
 texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
 
 - Carga por arrastrar y soltar, por el diálogo o con "Abrir con…".
+- Importación multicolor mediante Blender, con avisos persistentes de recursos faltantes y
+  aproximaciones de color. Consulta [formatos, unidades y limitaciones](docs/importacion.md).
 - Materiales a pintura por triángulo (`paint_color`), con bordes subdivididos como hace Bambu.
 - Colores objetivo editables por ranura del AMS, o sugeridos de nuevo con 2 a 12 filamentos.
 - Reducción de colores por cercanía (ΔE en Lab): de 10 a 5 uniendo los más parecidos, o
@@ -259,3 +261,102 @@ con Blender unos 2,5 s.
   detectados a 5 bajó los cambios estimados de 1 472 a 641.
 - **Aplanar base**: corta la base en un plano (la malla sigue cerrada) para dar más
   contacto con la placa y evitar soportes o despegues.
+
+### Diagnóstico local de viabilidad FDM (alcance inicial de #7)
+
+En **Viabilidad de impresión**, pulsa **Analizar modelo** después de elegir el tamaño final,
+la impresora, boquilla y altura de capa. El análisis usa la geometría de trabajo actual,
+con su escala por eje, simplificación y base aplanada; no la escena sin transformar.
+El informe registra dimensiones, impresora, boquilla, capa y todos los umbrales usados.
+No hay una puntuación de éxito: cada comprobación distingue **comprobado**, **estimado**
+y **no evaluado**. Cualquier cambio de documento, geometría, tamaño, perfil o umbral
+invalida el informe; hay que ejecutarlo de nuevo. El idioma no lo invalida.
+
+- **Comprobado:** bordes abiertos (no un conteo de agujeros), aristas con más de dos caras,
+  continuidad del abanico de caras de cada vértice, caras duplicadas y degeneradas,
+  orientación entre caras, signo del volumen por componente cerrado y límites de la
+  impresora con margen y reserva de torre del panel Placa. La topología se comprueba
+  por objeto después de soldar posiciones mediante una cuadrícula de tolerancia en mm;
+  posiciones muy próximas a lados distintos de una celda pueden seguir separadas.
+- **Estimado:** componentes separados o pequeños, detalle fino por la menor dimensión de
+  cada componente, componentes que no tocan la placa ni otra pieza apoyada (por caja
+  envolvente), voladizos y área de contacto.
+  Las piezas separadas pueden ser intencionales; nunca se eliminan automáticamente por
+  un hallazgo. Convención angular: **0° = pared vertical; 90° = cara inferior horizontal**.
+  El contacto es el área de caras inferiores dentro de la tolerancia del mínimo Z.
+- **Espesor muestreado:** rayos desde centroides hacia dentro de la malla, en mm finales;
+  sólo se calcula con superficies cerradas, orientadas y sin los defectos topológicos
+  detectados. El umbral efectivo es el mayor entre pared mínima y ancho de extrusión
+  por perímetros objetivo. El mapa usa rojo para muestras finas, cian para muestras sobre
+  el umbral y gris cuando el rayo no encuentra una pared. No constituye un mapa continuo:
+  puede omitir paredes o detalles locales, acertar otra envolvente o ser engañoso ante
+  intersecciones. Ausencia de muestras finas no significa aprobación de toda la superficie.
+
+Los valores iniciales son editables y restaurables: ancho de extrusión = 1,1 veces la
+boquilla, pared = dos anchos, ángulo = 45°, contacto = 4 mm² y componente = 2 mm de
+**diagonal de caja**. Son puntos de partida para calibración FDM, no límites universales
+ni umbrales de un proveedor externo. La tolerancia admite 0,00001–0,1 mm, la calidad
+16–4096 muestras, el ancho 0,05–3 mm, pared/detalle 0,05–20 mm y 1–20 perímetros.
+La tecnología inicial es FDM; el análisis no modela un material ni los ajustes del laminador.
+
+Cada hallazgo ofrece **Localizar** con hasta 32 marcadores sobre el modelo. Las mediciones
+usan las unidades indicadas en el título: aristas/caras/componentes, mm, mm² o grados.
+En modelos grandes, las comprobaciones topológicas recorren vértices y caras y el BVH
+cuesta aproximadamente O(T log T); los rayos se limitan por la calidad elegida. No hay
+comparación de todos los pares de triángulos. Una referencia de 24.000 triángulos en los
+tests comprueba que las muestras y marcadores siguen acotados; no es un benchmark de
+rendimiento ni una garantía de memoria para modelos arbitrarios. El análisis se ejecuta
+bajo demanda en un trabajador del backend; cada corrección conserva una copia
+completa del proyecto y puede consumir memoria adicional en modelos grandes.
+
+**Corregir** aparece junto a **Localizar** en los hallazgos que el núcleo sabe arreglar.
+Cada corrección activa operaciones de malla deterministas y vuelve a analizar:
+
+| Hallazgo | Corrección |
+| --- | --- |
+| Caras degeneradas o duplicadas, aristas no manifold | Limpieza a fondo: soldar vértices a 0,001 mm, eliminar caras degeneradas y duplicadas y quitar caras sueltas que cuelgan de una sola arista (grupos de hasta una décima parte de la superficie principal) |
+| Orientación inconsistente, volumen invertido | Propagar la orientación entre caras vecinas y dar la vuelta a envolventes con volumen negativo |
+| Bordes abiertos | Limpieza a fondo y cerrar cada agujero con un abanico plano desde su centro, del color de la cara vecina |
+| Piezas pequeñas | Eliminar piezas sueltas bajo el umbral |
+| Poco contacto con la placa | Aplanar la base (dos capas, mínimo 0,4 mm) |
+| Vértices no manifold | Limpieza a fondo y dar a cada grupo de caras su propia copia del vértice, a 0,02 mm |
+| Piezas sin contacto con la placa | Bajar hasta la placa las piezas que no se apoyan en nada |
+| Caras en voladizo | Probar unas cincuenta orientaciones (ejes, aristas, esquinas y las caras más grandes) y girar a la de menor área en voladizo entre las que se sostienen solas: el centro de masa debe caer dentro de la huella de apoyo |
+| No cabe en la placa | Reducir el tamaño sin deformar hasta que quepa con margen y torre |
+
+Girar y ajustar el tamaño conservan la pintura manual; un giro descarta el estiramiento
+por ejes que hubiera, porque los ejes cambian, y **Revertir** lo devuelve. Las piezas
+separadas se informan sin aviso: son normales en modelos de varios objetos. Bajar piezas mueve solo la malla final: los
+colores se siguen leyendo donde estaban.
+
+Una vez aplicada, la tarjeta queda como **Corregido** con el conteo antes/ahora y el botón
+pasa a **Revertir**, que devuelve esas operaciones a sus valores previos. Cada corrección o
+reversión es un paso de **Deshacer** que restaura geometría, ajustes, materiales, paleta y
+pintura. Si hay pintura manual, se pide confirmación, porque rehacer la malla la retira.
+Las tapas de agujeros grandes o curvos son planas: revísalas antes de exportar.
+
+**Pendiente / no evaluado:** autointersecciones robustas (incluidas caras coplanares),
+puentes, inicios locales de capas sin apoyo, distancias entre piezas y fragilidad mecánica.
+No se ofrecen engrosado local ni remallado; la orientación automática solo prueba un
+conjunto fijo de direcciones.
+El cierre de agujeros no reconstruye superficies curvas. El diagnóstico tampoco mide la desviación
+respecto a la geometría anterior a simplificar: vuelve a revisar la geometría resultante,
+pero no certifica que todos los detalles originales sobrevivan.
+
+Pruebas de referencia cubren caja cerrada, agujero, cara invertida, volumen invertido,
+caras degeneradas/duplicadas, aristas no manifold, vértice que une dos envolventes,
+pared fina, componente pequeño/aislado, geometría elevada sin contacto y dos cajas
+intersectadas. Este último caso comprueba expresamente que **autointersecciones** aparece
+como **no evaluado**, nunca como aprobado. También se verifica la coherencia al cambiar
+escala/boquilla/umbrales y la restauración del color al deshacer una corrección.
+
+La comparación antes/después en Bambu Studio u otro laminador **no está automatizada ni
+verificada en esta entrega**: exporta ambos 3MF, selecciona el mismo proceso/material y
+compara continuidad de capas, detalles, soportes y adhesión en la vista laminada antes de
+imprimir. La ausencia de hallazgos no garantiza que la pieza se imprima sin defectos.
+
+El volumen y espesor de modelos con envolventes de signos mixtos quedan **no evaluados**:
+una envolvente interior invertida puede ser una cavidad correcta y este alcance no
+implementa una prueba robusta de anidamiento. Una envolvente aislada invertida sigue
+siendo un error. Deshacer una corrección conserva la altura de capa activa; cambiar la
+boquilla reconstruye la pintura e invalida ese historial, como los otros cambios de malla.

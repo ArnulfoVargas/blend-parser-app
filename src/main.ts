@@ -20,14 +20,17 @@ import {
   type Prefs,
   type Progress,
   type Summary,
+  type TurnResult,
   type Vec3,
   type WastePrefs,
 } from "./api";
 import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, onLangChange, setLang, t, tKey, volume, type Key, type Lang } from "./i18n";
 import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
+import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
-import { Viewer, type Tool, type View } from "./viewer";
+import { setupPrintability } from "./printability";
+import { Viewer, type Axis, type Section, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -38,6 +41,9 @@ const nf = (n: number, d = 0) => num(n, d);
 /** Millimetres as a printer spec reads them: 0,4, 0,25, 256. */
 const mm = (n: number) => num(n, 2, false);
 const dims = (v: number[], d = 1) => `${v.map((x) => nf(x, d)).join(" × ")} mm`;
+/** What Blender can import for us; `bp_blend::INPUT_EXTENSIONS` is the same list. */
+const MODEL_EXTENSIONS = ["blend", "obj", "fbx", "gltf", "glb", "ply"];
+const MODEL_EXT = new RegExp(`\\.(${MODEL_EXTENSIONS.join("|")})$`, "i");
 
 let summary: Summary | null = null;
 let printers: Printers | null = null;
@@ -178,6 +184,15 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     }
     return (await apply(() => api.setSize(next as Vec3))) !== undefined;
   },
+  // Moving changes no geometry: the plate is checked again, the mesh stays.
+  move: async (mm) => {
+    previousSwaps = summary?.estimate.swaps ?? null;
+    const s = summary ? await work(() => api.setOffset(mm)) : undefined;
+    if (s) render(s);
+    return s !== undefined;
+  },
+  rotate: async (axis, degrees) => (summary ? turn(() => api.rotate(axis, degrees)) : false),
+  section: (s) => syncSection(s),
 });
 
 /** Points in preview units for the current size. */
@@ -202,6 +217,81 @@ $("#measure-clear").addEventListener("click", () => {
   measured = [];
   syncMeasure();
 });
+
+// ---- placing on the plate, turning and the section cut -----------------------------
+
+function renderPlace(s: Summary) {
+  const [x, y] = s.plate.offsetMm;
+  bind("placeOffset", t("place.offset", { x: nf(x, 1), y: nf(y, 1) }));
+  $<HTMLButtonElement>("#place-centre").disabled = x === 0 && y === 0;
+  $<HTMLButtonElement>("#rotate-reset").disabled = !s.plate.rotated;
+  $<HTMLButtonElement>("#cut-undo").disabled = !s.plate.canUndoCut;
+}
+$("#place-centre").addEventListener("click", () => void work(() => api.setOffset([0, 0])).then((s) => s && render(s)));
+
+/**
+ * A turn. When the whole model turned as it is, the preview is moved where it
+ * stands rather than fetched again. The measured points belong to the old orientation.
+ */
+async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
+  measured = [];
+  previousSwaps = summary?.estimate.swaps ?? null;
+  const done = await work(async () => {
+    const r = await call();
+    render(r.summary);
+    if (r.rigid) {
+      viewer.moveMesh(r.rigid.matrix, r.rigid.shift);
+      syncBrush();
+      syncMeasure();
+    } else {
+      await reloadMesh();
+    }
+    return true;
+  });
+  return done === true;
+}
+document.querySelectorAll<HTMLButtonElement>("button[data-turn]").forEach((b) => b.addEventListener("click", () => void turn(() => api.rotate(Number(b.dataset.turn), 90))));
+$("#rotate-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
+
+const cutPos = $<HTMLInputElement>("#cut-pos");
+/** The cut's controls under the view, and the mark on its tool while it is on. */
+function syncSection(s: Section | null) {
+  $<HTMLButtonElement>('button[data-tool="section"]').dataset.on = String(s !== null);
+  document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) => b.setAttribute("aria-pressed", String(s !== null && Number(b.dataset.cutAxis) === s.axis)));
+  if (s) cutPos.value = String(Math.round(s.t * 1000) / 10);
+  $<HTMLButtonElement>("#cut-flip").setAttribute("aria-pressed", String(s?.flip ?? false));
+}
+function setSection(s: Section | null) {
+  viewer.setSection(s);
+  syncSection(s);
+}
+const currentCut = (): Section => viewer.getSection() ?? { axis: 2, t: 0.5, flip: false };
+cutPos.addEventListener("input", () => setSection({ ...currentCut(), t: Number(cutPos.value) / 100 }));
+document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) =>
+  b.addEventListener("click", () => setSection({ ...currentCut(), axis: Number(b.dataset.cutAxis) as Axis })));
+$("#cut-flip").addEventListener("click", () => setSection({ ...currentCut(), flip: !currentCut().flip }));
+$("#cut-off").addEventListener("click", () => {
+  setSection(null);
+  setTool("orbit");
+});
+// Cutting for real keeps the side the view shows.
+const keepOther = $<HTMLInputElement>("#cut-keep-other");
+$("#cut-apply").addEventListener("click", () => {
+  const s = viewer.getSection();
+  if (!s || !summary) return;
+  const both = keepOther.checked;
+  measured = [];
+  void apply(() => api.cutModel(s.axis, s.t, !s.flip, both), () => {
+    setSection(null);
+    setTool("orbit");
+    toast(t(both ? "cut.doneBoth" : "cut.doneKept"), "ok", { label: t("cut.undo"), run: undoCut });
+  });
+});
+function undoCut() {
+  measured = [];
+  void apply(() => api.undoCut(), () => toast(t("cut.undone")));
+}
+$("#cut-undo").addEventListener("click", undoCut);
 
 const radiusInput = $<HTMLInputElement>("#radius");
 const radiusMm = () => Number(radiusInput.value);
@@ -239,13 +329,66 @@ function fitProblem(s: Summary): string | null {
   return null;
 }
 
+/** Notices that inform rather than warn: shown as a plain line under the warnings. */
+const IMPORT_INFO = new Set(["units", "blendTextures"]);
+
+/** Import notices grouped by kind, a few names each; units are information, not a warning. */
+function renderImportWarnings(s: Summary) {
+  const box = $("#import-warnings");
+  const info = s.importWarnings.filter((w) => IMPORT_INFO.has(w.code));
+  const groups = new Map<string, string[]>();
+  for (const w of s.importWarnings) if (!IMPORT_INFO.has(w.code)) groups.set(w.code, [...(groups.get(w.code) ?? []), w.detail]);
+  const nodes: HTMLElement[] = [];
+  const total = [...groups.values()].reduce((n, d) => n + d.length, 0);
+  if (total) {
+    const head = document.createElement("p");
+    head.className = "import-warnings__head";
+    head.textContent = t("import.warnings", { count: total });
+    nodes.push(head);
+    for (const [code, details] of groups) {
+      const group = document.createElement("div");
+      group.className = "import-warnings__group";
+      const title = document.createElement("strong");
+      title.textContent = tKey(`import.${code}`, {}, code);
+      const names = document.createElement("ul");
+      const SHOWN = 3;
+      for (const detail of details.slice(0, SHOWN)) {
+        const li = document.createElement("li");
+        // Paths read best by file name; the whole path stays one hover away.
+        li.textContent = detail.split(/[\\/]/).pop() || detail;
+        li.title = detail;
+        names.append(li);
+      }
+      if (details.length > SHOWN) {
+        const li = document.createElement("li");
+        li.className = "import-warnings__more";
+        li.textContent = t("import.more", { count: details.length - SHOWN });
+        li.title = details.slice(SHOWN).join("\n");
+        names.append(li);
+      }
+      const help = document.createElement("p");
+      help.className = "help";
+      help.textContent = tKey(`import.${code}Help`);
+      group.append(title, names, help);
+      nodes.push(group);
+    }
+  }
+  box.hidden = !total;
+  box.replaceChildren(...nodes);
+  const unitNote = $("#import-units");
+  unitNote.hidden = !info.length;
+  unitNote.textContent = info.map((w) => tKey(`import.${w.code}`, { detail: w.detail }, w.detail)).join(" ");
+}
+
 function render(s: Summary) {
   summary = s;
+  printability.update(s);
   bind("fileName", s.fileName);
   bind("fileMeta", t("file.meta", { mb: nf(s.fileSize / 1048576, 1), count: s.materials.length, n: s.materials.length }));
 
   renderSize(s);
   renderPlate(s);
+  renderPlace(s);
 
   // Settings.
   const st = s.settings;
@@ -261,7 +404,6 @@ function render(s: Summary) {
 
   // Colour patches the nozzle cannot draw.
   const fixTo = Math.ceil(s.minDetailMm2);
-  $<HTMLDivElement>("#detail-note").hidden = s.smallIslands === 0;
   bind("detailNote", t("colour.smallIslands", { count: s.smallIslands, n: nf(s.smallIslands), area: mm(s.minDetailMm2), nozzle: mm(st.nozzleMm) }));
   bind("detailFix", t("colour.fixIslands", { area: nf(fixTo) }));
   document.querySelectorAll<HTMLInputElement>("#count input").forEach((i) => (i.checked = Number(i.value) === s.slots.length));
@@ -295,6 +437,7 @@ function render(s: Summary) {
 
   renderWaste(s);
   renderSlots(s);
+  renderImportWarnings(s);
   const mats = $<HTMLDListElement>("#materials");
   mats.replaceChildren(...s.materials.flatMap((m) => {
     const dt = document.createElement("dt");
@@ -325,6 +468,8 @@ function syncOutputs() {
   bind("detailOut", d === 0 ? t("colour.detailOff") : t("colour.detailLevel", { n: d }));
   const i = Number($<HTMLInputElement>("#island").value);
   bind("islandOut", i === 0 ? t("colour.islandsOff") : `${i} mm²`);
+  // The warning stays until islands are cleaned at the recommended size or more.
+  $<HTMLDivElement>("#detail-note").classList.toggle("is-gone", !summary || summary.smallIslands === 0 || i >= Math.ceil(summary.minDetailMm2));
 }
 
 // ---- size ------------------------------------------------------------------------------
@@ -748,11 +893,14 @@ function renderSlots(s: Summary) {
 
 let unlistenProgress: (() => void) | null = null;
 
-async function openFile(path: string) {
+/** `extras`: files dropped with the model, offered for what it references. */
+async function openFile(path: string, extras: string[] = []) {
   const lower = path.toLowerCase();
   const name = path.split(/[\\/]/).pop() ?? path;
   if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
-  if (!lower.endsWith(".blend")) return setState("error", { key: "error.notBlend", params: { name } });
+  if (!MODEL_EXT.test(lower)) return setState("error", { key: "error.notBlend", params: { name } });
+  const added = await gatherCompanions(path, extras);
+  if (added === null) return;
   step = { key: "blender", name: "" };
   setState("converting");
   hideToast();
@@ -764,7 +912,8 @@ async function openFile(path: string) {
   try {
     previousSwaps = null;
     measured = [];
-    render(await api.openBlend(path));
+    render(await api.openBlend(path, added));
+    setSection(null);
     await reloadMesh(true);
     setState("ready");
     // Start both panels at the top once layout has settled.
@@ -779,7 +928,7 @@ async function openFile(path: string) {
 }
 
 $("#choose").addEventListener("click", async () => {
-  const path = await open({ multiple: false, directory: false, filters: [{ name: "Blender", extensions: ["blend"] }] });
+  const path = await open({ multiple: false, directory: false, filters: [{ name: t("import.formats"), extensions: MODEL_EXTENSIONS }] });
   if (typeof path === "string") await openFile(path);
 });
 
@@ -798,9 +947,21 @@ $("#find-blender").addEventListener("click", async () => {
 
 void getCurrentWebview().onDragDropEvent((e) => {
   const p = e.payload;
-  if (p.type === "enter" || p.type === "over") app.classList.add("is-dragging");
+  const over = p.type === "enter" || p.type === "over";
+  // The model files dialog takes what is dropped while it is open.
+  const into = companionsDrop.active;
+  if (into) {
+    $("#files-dialog").classList.toggle("is-dropping", over);
+    if (p.type === "drop" && p.paths.length) into(p.paths);
+    return;
+  }
+  if (over) app.classList.add("is-dragging");
   else app.classList.remove("is-dragging");
-  if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") void openFile(p.paths[0]);
+  if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") {
+    // A model dropped with its .mtl, .bin or textures: the rest go along with it.
+    const model = p.paths.find((f) => MODEL_EXT.test(f) || /\.blend\d+$/i.test(f)) ?? p.paths[0];
+    void openFile(model, p.paths.filter((f) => f !== model));
+  }
 });
 
 // ---- export ------------------------------------------------------------------------------
@@ -820,7 +981,7 @@ $("#export").addEventListener("click", async () => {
   const btn = $<HTMLButtonElement>("#export");
   if (app.dataset.state !== "ready" || !summary || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
-  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
   if (!path) return;
   btn.setAttribute("aria-busy", "true");
   btn.setAttribute("aria-disabled", "true");
@@ -854,7 +1015,7 @@ $("#export-zip").addEventListener("click", async () => {
   zipDialog.close();
   if (!(await confirmOversize())) return;
   const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
-  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
   await work(async () => {
     const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());
@@ -1219,6 +1380,8 @@ function setTool(tool: Tool) {
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
+  // Picking the cut's tool turns the cut on.
+  syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
   syncMeasure();
 }
@@ -1291,6 +1454,9 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "o") setTool("orbit");
   else if (e.key === "m") setTool("measure");
   else if (e.key === "s") setTool("size");
+  else if (e.key === "g") setTool("move");
+  else if (e.key === "r") setTool("rotate");
+  else if (e.key === "c") setTool("section");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
@@ -1445,6 +1611,18 @@ document.querySelectorAll("dialog").forEach((d) => {
     if (fromOutside && outside(e)) d.close();
     fromOutside = false;
   });
+});
+
+const printability = setupPrintability({
+  summary: () => summary,
+  locate: (points, values, threshold) => viewer.setFindings(points.map(p => p.map(v => v / (summary?.size.previewScale ?? 1)) as Vec3), values, threshold),
+  fix: (fix) => apply(() => api.fixMesh(fix)),
+  orient: (deg) => apply(() => api.orientForPrint(deg)),
+  rotate: (rotation) => apply(() => api.setRotation(rotation)),
+  fitPlate: () => apply(() => api.fitToPlate()),
+  resize: (mm) => apply(() => api.setSize(mm)),
+  confirm: (message) => ask(message, { title: t("printability.title"), kind: "warning" }),
+  error: e => toast(errText(e), "error"),
 });
 
 // ---- start -------------------------------------------------------------------------------

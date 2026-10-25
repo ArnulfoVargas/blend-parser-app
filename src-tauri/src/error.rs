@@ -36,6 +36,7 @@ impl From<bp_blend::BlendError> for AppError {
     fn from(e: bp_blend::BlendError) -> Self {
         use bp_blend::BlendError as E;
         match e {
+            E::Unsupported(path) => Self::with("error.notBlend", json!({ "name": path })),
             E::BlenderNotFound => Self::new("error.blenderNotFound"),
             E::Io(e) => Self::with("error.io", json!({ "detail": e.to_string() })),
             E::Blender(log) => Self::with("error.blenderFailed", json!({ "detail": log })),
