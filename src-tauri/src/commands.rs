@@ -529,6 +529,8 @@ pub struct MeshFix {
     repair: Option<bool>,
     orient: Option<bool>,
     fill_holes: Option<bool>,
+    split_vertices: Option<bool>,
+    drop_floating: Option<bool>,
     min_piece_mm: Option<f32>,
     flatten_mm: Option<f32>,
 }
@@ -542,10 +544,36 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
             repair: fix.repair.unwrap_or(now.repair),
             orient: fix.orient.unwrap_or(now.orient),
             fill_holes: fix.fill_holes.unwrap_or(now.fill_holes),
+            split_vertices: fix.split_vertices.unwrap_or(now.split_vertices),
+            drop_floating: fix.drop_floating.unwrap_or(now.drop_floating),
             min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
             flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),
             ..now
         });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Turns the model to the orientation with the least overhang; one undoable step.
+#[tauri::command]
+pub async fn orient_for_print(app: AppHandle, overhang_deg: f32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        let r = d.project.best_rotation(overhang_deg.clamp(0.0, 90.0));
+        d.project.set_rotation(r);
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Sets the model's rotation from load (rows of a 3×3 matrix); reverts a turn.
+#[tauri::command]
+pub async fn set_rotation(app: AppHandle, rotation: bp_core::Mat3) -> CmdResult<Summary> {
+    if rotation.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, prefs| {
+        d.project.set_rotation(rotation);
         Ok(dto::summary(d, prefs))
     })
     .await

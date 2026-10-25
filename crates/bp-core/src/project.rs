@@ -104,6 +104,35 @@ enum UndoEntry {
 
 const NO_LABEL: u8 = u8::MAX;
 
+/// Rows of a 3×3 rotation.
+pub type Mat3 = [[f32; 3]; 3];
+pub const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+fn mat_vec(m: Mat3, v: Vec3) -> Vec3 {
+    m.map(|row| geom::dot(row, v))
+}
+
+fn mat_mul(a: Mat3, b: Mat3) -> Mat3 {
+    std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+}
+
+/// The rotation taking unit `d` to straight down (-Z), turning about `d × -Z`.
+fn onto_down(d: Vec3) -> Mat3 {
+    let down = [0.0, 0.0, -1.0];
+    let c = geom::dot(d, down);
+    if c > 1.0 - 1e-6 {
+        return IDENTITY;
+    }
+    if c < -1.0 + 1e-6 {
+        return [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
+    }
+    let v = geom::cross(d, down);
+    let k = 1.0 / (1.0 + c);
+    let x = [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]];
+    let xx = mat_mul(x, x);
+    std::array::from_fn(|i| std::array::from_fn(|j| IDENTITY[i][j] + x[i][j] + xx[i][j] * k))
+}
+
 #[derive(Clone)]
 pub struct Project {
     scene: Scene,
@@ -121,6 +150,10 @@ pub struct Project {
     size_mm: Vec3,
     /// Sizes before each resize, for undo.
     size_history: Vec<Vec3>,
+    /// Scene positions as loaded and placed, before `rotation`.
+    unrotated: Vec<Vec<Vec3>>,
+    /// Rows of the rotation applied to the model as loaded.
+    rotation: Mat3,
     mesh_ops: MeshOps,
     color_ops: ColorOps,
     print_ops: PrintOps,
@@ -146,8 +179,10 @@ impl Project {
         scene.place_on_plate();
         let source_size: Vec3 =
             scene.bounds().map_or([1.0; 3], |(lo, hi)| std::array::from_fn(|i| (hi[i] - lo[i]).max(1e-6)));
-        let source_positions = scene.parts.iter().map(|p| p.positions.clone()).collect();
+        let source_positions: Vec<Vec<Vec3>> = scene.parts.iter().map(|p| p.positions.clone()).collect();
         let mut p = Self {
+            unrotated: source_positions.clone(),
+            rotation: IDENTITY,
             scene,
             source_positions,
             source_size,
@@ -206,6 +241,104 @@ impl Project {
         previous.undo = history;
         self.set_mesh_ops(ops);
         self.undo.push(UndoEntry::Geometry(Box::new(previous)));
+    }
+
+    pub fn rotation(&self) -> Mat3 {
+        self.rotation
+    }
+
+    /// Turns the model as loaded by `r` (absolute, not added to the current
+    /// turn) and places it back on the plate at the same scale, as one undoable
+    /// step. Hand painting survives: the triangles stay the same.
+    pub fn set_rotation(&mut self, r: Mat3) {
+        if r == self.rotation {
+            return;
+        }
+        self.end_stroke();
+        let history = std::mem::take(&mut self.undo);
+        let mut previous = self.clone();
+        previous.undo = history;
+        self.rotation = r;
+        for (part, src) in self.scene.parts.iter_mut().zip(&self.unrotated) {
+            part.positions = src.iter().map(|&p| mat_vec(r, p)).collect();
+        }
+        self.scene.place_on_plate();
+        self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
+        self.source_size =
+            self.scene.bounds().map_or([1.0; 3], |(lo, hi)| std::array::from_fn(|i| (hi[i] - lo[i]).max(1e-6)));
+        self.source_height = self.source_size[2];
+        // A stretch was along the old axes; the turned model keeps its scale only.
+        self.stretch = [1.0; 3];
+        self.size_mm = self.source_size.map(|v| v * self.scale);
+        self.size_history.clear();
+        self.rebuild_geometry_keep_paint();
+        self.rebuild_paint();
+        self.undo.push(UndoEntry::Geometry(Box::new(previous)));
+    }
+
+    /// The rotation (absolute, like [`Self::set_rotation`]) that leaves the least
+    /// downward-facing area steeper than `overhang_deg` off the plate. It tries
+    /// resting on each axis, edge and corner direction and on the largest faces;
+    /// near-ties go to more plate contact. Returns the current rotation when
+    /// nothing is clearly better.
+    pub fn best_rotation(&self, overhang_deg: f32) -> Mat3 {
+        let tris: Vec<[Vec3; 3]> =
+            self.scene.parts.iter().flat_map(|p| (0..p.tris.len()).map(move |t| p.corners(t))).collect();
+        let Some((lo, hi)) = self.scene.bounds() else { return self.rotation };
+        let tol = geom::len(geom::sub(hi, lo)) * 1e-3;
+        let faces: Vec<(Vec3, f32)> = tris
+            .iter()
+            .map(|c| {
+                let n = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+                (geom::normalize(n), geom::len(n) * 0.5)
+            })
+            .collect();
+        let total: f32 = faces.iter().map(|f| f.1).sum();
+        let limit = overhang_deg.to_radians().sin();
+        // (overhang, contact) with `down` pointing at the plate.
+        let score = |down: Vec3| {
+            let up = geom::scale(down, -1.0);
+            let base = tris.iter().flatten().map(|&p| geom::dot(p, up)).fold(f32::MAX, f32::min);
+            let (mut overhang, mut contact) = (0.0, 0.0);
+            for (c, &(n, area)) in tris.iter().zip(&faces) {
+                let facing = geom::dot(n, up);
+                if c.iter().all(|&p| geom::dot(p, up) <= base + tol) {
+                    if facing < 0.0 {
+                        contact += area;
+                    }
+                } else if -facing > limit {
+                    overhang += area;
+                }
+            }
+            (overhang, contact)
+        };
+        let mut candidates: Vec<Vec3> = vec![];
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    if (x, y, z) != (0, 0, 0) {
+                        candidates.push(geom::normalize([x as f32, y as f32, z as f32]));
+                    }
+                }
+            }
+        }
+        let mut largest: Vec<&(Vec3, f32)> = faces.iter().filter(|f| f.1 > 0.0).collect();
+        largest.sort_by(|a, b| b.1.total_cmp(&a.1));
+        candidates.extend(largest.iter().take(24).map(|f| f.0));
+        let current = score([0.0, 0.0, -1.0]);
+        let mut best = ([0.0, 0.0, -1.0], current);
+        for d in candidates {
+            let s = score(d);
+            let near = (s.0 - best.1 .0).abs() <= total * 0.01;
+            if s.0 < best.1 .0 - total * 0.01 || (near && s.1 > best.1 .1 * 1.05) {
+                best = (d, s);
+            }
+        }
+        // Not worth turning for less than 1% of the surface.
+        if best.1 .0 >= current.0 - total * 0.01 && best.1 .1 <= current.1 * 1.05 {
+            return self.rotation;
+        }
+        mat_mul(onto_down(best.0), self.rotation)
     }
 
     pub fn scene(&self) -> &Scene {
@@ -415,7 +548,8 @@ impl Project {
             || ops.repair != self.mesh_ops.repair
             || (ops.min_piece_mm - self.mesh_ops.min_piece_mm).abs() > 1e-4
             || ops.orient != self.mesh_ops.orient
-            || ops.fill_holes != self.mesh_ops.fill_holes;
+            || ops.fill_holes != self.mesh_ops.fill_holes
+            || ops.split_vertices != self.mesh_ops.split_vertices;
         self.mesh_ops = ops;
         if topology_changes {
             self.rebuild_geometry();
@@ -820,6 +954,39 @@ mod tests {
         assert_eq!(*pv.offsets.last().unwrap() as usize, pv.labels.len());
         assert_eq!(pv.positions.len(), pv.labels.len() * 9);
     }
+    /// A wedge resting on its sloped side would overhang; on its wide flat side it does not.
+    #[test]
+    fn best_rotation_rests_the_model_on_its_flat_side_and_keeps_paint() {
+        let positions = vec![[0., 0., 0.], [20., 0., 0.], [20., 10., 0.], [0., 10., 0.], [0., 0., 10.], [0., 10., 10.]];
+        // Right triangular prism: the sloped face joins the far bottom edge to the top edge.
+        let tris = vec![[0, 2, 1], [0, 3, 2], [0, 1, 4], [3, 5, 2], [0, 4, 5], [0, 5, 3], [1, 2, 5], [1, 5, 4]];
+        let part = Part {
+            name: "wedge".into(),
+            tri_loops: tris.clone(),
+            tri_source: vec![0; tris.len()],
+            sources: vec![ColorSource::Flat([0.8; 3])],
+            positions,
+            tris,
+            ..Default::default()
+        };
+        let mut p = Project::new(Scene { parts: vec![part], ..Default::default() }, 1);
+        // Upside down: the wide base becomes the top and the slope hangs over the plate.
+        let flipped = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
+        p.set_rotation(flipped);
+        let labels = p.preview().labels;
+        let r = p.best_rotation(45.0);
+        assert_ne!(r, flipped);
+        p.set_rotation(r);
+        assert_eq!(p.preview().labels, labels, "turning keeps the triangles and their paint");
+        // Resting on a flat side nothing overhangs, so another search changes nothing.
+        assert_eq!(p.best_rotation(45.0), p.rotation());
+        let overhang = p.printability(crate::printability::Params::for_nozzle(0.4));
+        assert_eq!(overhang.checks.iter().find(|c| c.code == "overhang").unwrap().count, 0);
+        assert_eq!(p.undo_label(), Some("fix"));
+        assert!(p.undo());
+        assert_eq!(p.rotation(), flipped);
+    }
+
     #[test]
     fn fix_undo_restores_paint_and_geometry() {
         let mut p = Project::new(scene(), 2);

@@ -293,6 +293,14 @@ Cada corrección activa operaciones de malla deterministas y vuelve a analizar:
 | Bordes abiertos | Cerrar cada agujero con un abanico plano desde su centro, del color de la cara vecina |
 | Piezas pequeñas | Eliminar piezas sueltas bajo el umbral |
 | Poco contacto con la placa | Aplanar la base (dos capas, mínimo 0,4 mm) |
+| Vértices no manifold | Dar a cada grupo de caras su propia copia del vértice, a 0,02 mm |
+| Piezas sin contacto con la placa | Bajar cada pieza flotante hasta la placa |
+| Caras en voladizo | Probar unas cincuenta orientaciones (ejes, aristas, esquinas y las caras más grandes) y girar a la de menor área en voladizo |
+| No cabe en la placa | Reducir el tamaño sin deformar hasta que quepa con margen y torre |
+
+Girar y ajustar el tamaño conservan la pintura manual; un giro descarta el estiramiento
+por ejes que hubiera, porque los ejes cambian. Bajar piezas mueve solo la malla final: los
+colores se siguen leyendo donde estaban.
 
 Una vez aplicada, la tarjeta queda como **Corregido** con el conteo antes/ahora y el botón
 pasa a **Revertir**, que devuelve esas operaciones a sus valores previos. Cada corrección o
@@ -302,7 +310,8 @@ Las tapas de agujeros grandes o curvos son planas: revísalas antes de exportar.
 
 **Pendiente / no evaluado:** autointersecciones robustas (incluidas caras coplanares),
 puentes, inicios locales de capas sin apoyo, distancias entre piezas y fragilidad mecánica.
-No se ofrecen engrosado local, remallado ni búsqueda automática de orientación en la placa.
+No se ofrecen engrosado local ni remallado; la orientación automática solo prueba un
+conjunto fijo de direcciones.
 El cierre de agujeros no reconstruye superficies curvas. El diagnóstico tampoco mide la desviación
 respecto a la geometría anterior a simplificar: vuelve a revisar la geometría resultante,
 pero no certifica que todos los detalles originales sobrevivan.

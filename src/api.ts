@@ -7,7 +7,7 @@ export interface Slot { hex: string; triangles: number; nearest: [number, number
 export interface Repair { weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -143,6 +143,8 @@ export function decodePreview(buf: ArrayBuffer): PreviewMesh {
 export const api = {
   analyzePrintability: (params: PrintabilityParams) => invoke<PrintabilityReport>("analyze_printability", { params }),
   fixMesh: (fix: MeshFix) => invoke<Summary>("fix_mesh", { fix }),
+  orientForPrint: (overhangDeg: number) => invoke<Summary>("orient_for_print", { overhangDeg }),
+  setRotation: (rotation: number[][]) => invoke<Summary>("set_rotation", { rotation }),
   blenderStatus: () => invoke<string | null>("blender_status"),
   initialFile: () => invoke<string | null>("initial_file"),
   setBlenderPath: (path: string) => invoke<string>("set_blender_path", { path }),
@@ -180,7 +182,10 @@ export const api = {
 };
 
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */
-export interface MeshFix { repair?: boolean; orient?: boolean; fillHoles?: boolean; minPieceMm?: number; flattenMm?: number }
+export interface MeshFix {
+  repair?: boolean; orient?: boolean; fillHoles?: boolean; splitVertices?: boolean; dropFloating?: boolean;
+  minPieceMm?: number; flattenMm?: number;
+}
 export interface PrintabilityParams {
   extrusionMm: number; perimeters: number; wallMm: number; detailMm: number;
   componentMm: number; overhangDeg: number; contactMm2: number; toleranceMm: number; samples: number;

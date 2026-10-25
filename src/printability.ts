@@ -19,36 +19,85 @@ const UNITS: Record<string, string> = {
   contact: "mm²", thinWalls: "mm", smallComponents: "mm", smallDetails: "mm", overhang: "°",
 };
 
-/** A correction the core can make, as the mesh operations it turns on. Each one
- *  is a single undo step and is reverted by putting the previous values back. */
+/** How an applied fix is taken back, and whether the document still has it
+ *  (Ctrl+Z or the settings panel can undo it behind the panel's back). */
+interface Undo {
+  revert(): Promise<unknown>;
+  holds(s: Summary): boolean;
+}
+/** A correction the core can make. Each change is one undo step. */
 interface Fix {
   /** Whether it would change anything for this document. */
   available(s: Summary, r: PrintabilityReport): boolean;
-  patch(s: Summary, r: PrintabilityReport): MeshFix;
+  /** Rebuilding the mesh drops hand painting; turning or resizing does not. */
+  repaints: boolean;
   /** Value of `fixHelp.<id>`'s `{mm}`, when it has one. */
   mm?(s: Summary, r: PrintabilityReport): number;
+  /** Makes the change; null when it found nothing to change. */
+  apply(s: Summary, r: PrintabilityReport): Promise<Undo | null>;
 }
-const base = (s: Summary) => Math.max(0.4, Math.round(s.settings.layerMm * 2 * 100) / 100);
-const FIXES: Record<string, Fix> = {
-  clean: { available: (s) => !s.settings.repair, patch: () => ({ repair: true }) },
-  orient: { available: (s) => !s.settings.orient, patch: () => ({ repair: true, orient: true }) },
-  fillHoles: { available: (s) => !s.settings.fillHoles, patch: () => ({ repair: true, fillHoles: true }) },
-  removeSmall: {
-    available: (s, r) => s.settings.minPieceMm < r.params.componentMm,
-    patch: (_, r) => ({ minPieceMm: r.params.componentMm }),
-    mm: (_, r) => r.params.componentMm,
-  },
-  flattenBase: { available: (s) => s.settings.flattenMm === 0, patch: (s) => ({ flattenMm: base(s) }), mm: base },
-};
+/** What each fix asks of the app; each call applies and re-renders. */
+interface FixOps {
+  summary(): Summary | null;
+  fix(fix: MeshFix): Promise<unknown>;
+  orient(overhangDeg: number): Promise<unknown>;
+  rotate(rotation: number[][]): Promise<unknown>;
+  fitPlate(): Promise<unknown>;
+  resize(mm: Vec3): Promise<unknown>;
+}
 /** Which fix answers each check. Checks without one can only be located. */
 const FIX_OF: Record<string, string> = {
   degenerate: "clean", duplicate: "clean", winding: "orient", volume: "orient",
   openEdges: "fillHoles", smallComponents: "removeSmall", contact: "flattenBase",
+  buildVolume: "fitPlate", floating: "dropFloating", nonManifoldVertices: "splitVertices", overhang: "rotate",
 };
 /** Where a fix's mesh operations show in the summary, to tell whether it still holds. */
 const SETTING: Record<keyof MeshFix, keyof Summary["settings"]> = {
-  repair: "repair", orient: "orient", fillHoles: "fillHoles", minPieceMm: "minPieceMm", flattenMm: "flattenMm",
+  repair: "repair", orient: "orient", fillHoles: "fillHoles", splitVertices: "splitVertices",
+  dropFloating: "dropFloating", minPieceMm: "minPieceMm", flattenMm: "flattenMm",
 };
+const same = (a: number[] | number[][], b: number[] | number[][]) =>
+  a.flat().every((v, i) => Math.abs(v - b.flat()[i]) < 1e-5);
+const base = (s: Summary) => Math.max(0.4, Math.round(s.settings.layerMm * 2 * 100) / 100);
+
+function makeFixes(ops: FixOps): Record<string, Fix> {
+  /** Turns mesh operations on; reverting puts back the values they had. */
+  const mesh = (available: Fix["available"], patch: (s: Summary, r: PrintabilityReport) => MeshFix, mm?: Fix["mm"]): Fix => ({
+    available, mm, repaints: true,
+    async apply(s, r) {
+      const set = patch(s, r);
+      const keys = Object.keys(set) as (keyof MeshFix)[];
+      const previous = Object.fromEntries(keys.map((k) => [k, s.settings[SETTING[k]]])) as MeshFix;
+      const holds = (x: Summary) => keys.every((k) => x.settings[SETTING[k]] === set[k]);
+      await ops.fix(set);
+      const now = ops.summary();
+      return now && holds(now) ? { revert: () => ops.fix(previous), holds } : null;
+    },
+  });
+  /** A change read back from the summary: `value` before and after tells whether it happened. */
+  const measured = <T extends number[] | number[][]>(value: (s: Summary) => T, run: (r: PrintabilityReport) => Promise<unknown>, back: (v: T) => Promise<unknown>): Fix => ({
+    available: () => true, repaints: false,
+    async apply(s, r) {
+      const before = value(s);
+      await run(r);
+      const now = ops.summary();
+      if (!now || same(value(now), before)) return null;
+      const after = value(now);
+      return { revert: () => back(before), holds: (x) => same(value(x), after) };
+    },
+  });
+  return {
+    clean: mesh((s) => !s.settings.repair, () => ({ repair: true })),
+    orient: mesh((s) => !s.settings.orient, () => ({ repair: true, orient: true })),
+    fillHoles: mesh((s) => !s.settings.fillHoles, () => ({ repair: true, fillHoles: true })),
+    splitVertices: mesh((s) => !s.settings.splitVertices, () => ({ repair: true, splitVertices: true })),
+    dropFloating: mesh((s) => !s.settings.dropFloating, () => ({ repair: true, dropFloating: true })),
+    removeSmall: mesh((s, r) => s.settings.minPieceMm < r.params.componentMm, (_, r) => ({ minPieceMm: r.params.componentMm }), (_, r) => r.params.componentMm),
+    flattenBase: mesh((s) => s.settings.flattenMm === 0, (s) => ({ flattenMm: base(s) }), base),
+    rotate: measured((s) => s.settings.rotation, (r) => ops.orient(r.params.overhangDeg), (v) => ops.rotate(v)),
+    fitPlate: measured((s) => s.size.targetMm, () => ops.fitPlate(), (v) => ops.resize(v as Vec3)),
+  };
+}
 
 /** Same starting points as `Params::for_nozzle`. */
 function defaults(nozzle: number): PrintabilityParams {
@@ -75,9 +124,14 @@ export function setupPrintability(options: {
   summary(): Summary | null;
   locate(points: Vec3[], values?: (number | null)[], threshold?: number): void;
   fix(fix: MeshFix): Promise<unknown>;
+  orient(overhangDeg: number): Promise<unknown>;
+  rotate(rotation: number[][]): Promise<unknown>;
+  fitPlate(): Promise<unknown>;
+  resize(mm: Vec3): Promise<unknown>;
   confirm(message: string): Promise<boolean>;
   error(error: unknown): void;
 }) {
+  const FIXES = makeFixes(options);
   const panel = document.querySelector<HTMLElement>("#printability")!;
   const grid = panel.querySelector<HTMLElement>(".pa-params__grid")!;
   const output = panel.querySelector<HTMLElement>(".pa-results")!;
@@ -86,8 +140,8 @@ export function setupPrintability(options: {
   const analyze = panel.querySelector<HTMLButtonElement>("#printability-run")!;
   const hide = panel.querySelector<HTMLButtonElement>("#printability-hide")!;
   const inputs = new Map<keyof PrintabilityParams, HTMLInputElement>();
-  /** Fixes applied from this panel: what they set, what to put back, and the counts before. */
-  const applied = new Map<string, { patch: MeshFix; previous: MeshFix; before: Map<string, number> }>();
+  /** Fixes applied from this panel: how to take each back, and the counts before it. */
+  const applied = new Map<string, Undo & { before: Map<string, number> }>();
   let report: PrintabilityReport | null = null;
   let outdated = false;
   let token = 0;
@@ -173,10 +227,7 @@ export function setupPrintability(options: {
 
   /** Forgets fixes the document no longer has: undone, or changed in the settings panel. */
   function prune(s: Summary | null) {
-    for (const [id, a] of applied) {
-      const holds = s && (Object.keys(a.patch) as (keyof MeshFix)[]).every((k) => s.settings[SETTING[k]] === a.patch[k]);
-      if (!holds) applied.delete(id);
-    }
+    for (const [id, a] of applied) if (!s || !a.holds(s)) applied.delete(id);
   }
 
   /** Called with every summary; only a change that affects the geometry clears the report. */
@@ -369,19 +420,21 @@ export function setupPrintability(options: {
     const s = options.summary();
     if (!s || !report || busy) return;
     // Rebuilding the mesh drops hand painting; Revertir and Ctrl+Z bring it back.
-    if (s.paintedTriangles > 0 && !(await options.confirm(t("printability.fixPaint")))) return;
-    const patch = FIXES[id].patch(s, report);
-    const previous = Object.fromEntries((Object.keys(patch) as (keyof MeshFix)[]).map((k) => [k, s.settings[SETTING[k]]])) as MeshFix;
-    applied.set(id, { patch, previous, before: new Map(report.checks.map((c) => [c.code, c.count])) });
-    // A failed change leaves the settings as they were, and `prune` drops the entry.
-    await step(t("printability.fixing"), () => options.fix(patch), () => applied.has(id) ? t("printability.fixDone") : "");
+    if (FIXES[id].repaints && s.paintedTriangles > 0 && !(await options.confirm(t("printability.fixPaint")))) return;
+    const r = report;
+    const before = new Map(r.checks.map((c) => [c.code, c.count]));
+    // A failed or empty change leaves no entry, and the message says so.
+    await step(t("printability.fixing"), async () => {
+      const undo = await FIXES[id].apply(s, r);
+      if (undo) applied.set(id, { ...undo, before });
+    }, () => t(applied.has(id) ? "printability.fixDone" : `printability.fixNone.${id === "rotate" ? "rotate" : "any"}`));
   }
 
   async function revert(id: string) {
     const a = applied.get(id);
     if (!a || busy) return;
     applied.delete(id);
-    await step(t("printability.reverting"), () => options.fix(a.previous), () => t("printability.revertDone"));
+    await step(t("printability.reverting"), () => a.revert(), () => t("printability.revertDone"));
   }
 
   async function run() {

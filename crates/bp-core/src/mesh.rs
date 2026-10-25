@@ -92,11 +92,24 @@ pub struct MeshOps {
     pub orient: bool,
     /// Close holes with a flat fan that takes the colour of the face beside it.
     pub fill_holes: bool,
+    /// Give a vertex shared by separate fans of faces one copy per fan.
+    pub split_vertices: bool,
+    /// Lower every piece that floats above the plate until it touches it.
+    pub drop_floating: bool,
 }
 
 impl Default for MeshOps {
     fn default() -> Self {
-        Self { keep_ratio: 1.0, flatten_mm: 0.0, repair: true, min_piece_mm: 0.0, orient: false, fill_holes: false }
+        Self {
+            keep_ratio: 1.0,
+            flatten_mm: 0.0,
+            repair: true,
+            min_piece_mm: 0.0,
+            orient: false,
+            fill_holes: false,
+            split_vertices: false,
+            drop_floating: false,
+        }
     }
 }
 
@@ -110,6 +123,8 @@ pub struct RepairReport {
     pub loose_triangles: usize,
     pub filled_holes: usize,
     pub flipped_triangles: usize,
+    pub split_vertices: usize,
+    pub dropped_pieces: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -148,6 +163,10 @@ impl Mesh {
         if ops.orient {
             shape.orient();
         }
+        if ops.split_vertices {
+            // Far enough apart that the printability weld does not join them again.
+            shape.split_vertices(0.02 / scale);
+        }
         if ops.min_piece_mm > 0.0 {
             shape.remove_loose_pieces(ops.min_piece_mm / scale);
         }
@@ -160,6 +179,10 @@ impl Mesh {
         let mut work = shape.clone();
         if ops.flatten_mm > 0.0 {
             work.flatten(ops.flatten_mm / scale);
+        }
+        // Only the final shape moves: colours are still looked up where pieces were.
+        if ops.drop_floating {
+            work.drop_floating(1e-4 / scale);
         }
         (shape, work)
     }
@@ -379,6 +402,109 @@ impl Mesh {
                         origin[ti].1.swap(1, 2);
                     }
                     report.flipped_triangles += 1;
+                }
+            }
+        }
+        self.repair = report;
+    }
+
+    /// Unbinds non-manifold vertices: the faces around a vertex that do not
+    /// reach each other across an edge through it each get their own copy,
+    /// moved `nudge` towards their fan so a positional weld keeps them apart.
+    pub fn split_vertices(&mut self, nudge: f32) {
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            let mut around: Vec<Vec<usize>> = vec![vec![]; part.positions.len()];
+            for (ti, t) in part.tris.iter().enumerate() {
+                for &v in t {
+                    around[v as usize].push(ti);
+                }
+            }
+            for (v, faces) in around.iter().enumerate() {
+                if faces.len() < 2 {
+                    continue;
+                }
+                // Fans: faces joined through an edge that has `v` at one end.
+                let mut fan: Vec<usize> = (0..faces.len()).collect();
+                fn root(fan: &mut [usize], mut i: usize) -> usize {
+                    while fan[i] != i {
+                        fan[i] = fan[fan[i]];
+                        i = fan[i];
+                    }
+                    i
+                }
+                let others = |ti: usize| part.tris[ti].iter().copied().filter(|&w| w as usize != v).collect::<Vec<_>>();
+                for i in 0..faces.len() {
+                    for j in i + 1..faces.len() {
+                        let a = others(faces[i]);
+                        if others(faces[j]).iter().any(|w| a.contains(w)) {
+                            let (ri, rj) = (root(&mut fan, i), root(&mut fan, j));
+                            fan[rj] = ri;
+                        }
+                    }
+                }
+                let roots: Vec<usize> = (0..faces.len()).map(|i| root(&mut fan, i)).collect();
+                let mut distinct = roots.clone();
+                distinct.sort_unstable();
+                distinct.dedup();
+                if distinct.len() < 2 {
+                    continue;
+                }
+                let p = part.positions[v];
+                // The first fan keeps the vertex; each other fan gets a copy.
+                for &r in &distinct[1..] {
+                    let mine: Vec<usize> = (0..faces.len()).filter(|&i| roots[i] == r).map(|i| faces[i]).collect();
+                    let centre = mine.iter().fold([0.0; 3], |acc, &ti| {
+                        geom::add(
+                            acc,
+                            geom::scale(
+                                geom::add(geom::add(part.corners(ti)[0], part.corners(ti)[1]), part.corners(ti)[2]),
+                                1.0 / 3.0,
+                            ),
+                        )
+                    });
+                    let towards = geom::sub(geom::scale(centre, 1.0 / mine.len() as f32), p);
+                    let len = geom::len(towards);
+                    let copy =
+                        if len > 0.0 { geom::add(p, geom::scale(towards, nudge.min(len * 0.5) / len)) } else { p };
+                    let id = part.positions.len() as u32;
+                    part.positions.push(copy);
+                    for ti in mine {
+                        for w in part.tris[ti].iter_mut() {
+                            if *w as usize == v {
+                                *w = id;
+                            }
+                        }
+                    }
+                    report.split_vertices += 1;
+                }
+            }
+        }
+        self.repair = report;
+    }
+
+    /// Lowers each connected piece whose lowest point is above the lowest point
+    /// of the whole mesh by more than `tol`, until it rests at that height.
+    pub fn drop_floating(&mut self, tol: f32) {
+        let Some((lo, _)) = self.bounds() else { return };
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            let comp = part.components();
+            let n = comp.iter().copied().max().map_or(0, |m| m as usize + 1);
+            let mut bottom = vec![f32::MAX; n];
+            let mut piece_of = vec![u32::MAX; part.positions.len()];
+            for (ti, t) in part.tris.iter().enumerate() {
+                for &v in t {
+                    bottom[comp[ti] as usize] = bottom[comp[ti] as usize].min(part.positions[v as usize][2]);
+                    piece_of[v as usize] = comp[ti];
+                }
+            }
+            report.dropped_pieces += bottom.iter().filter(|&&b| b > lo[2] + tol).count();
+            for (v, p) in part.positions.iter_mut().enumerate() {
+                if let Some(&b) = bottom.get(piece_of[v] as usize) {
+                    if b > lo[2] + tol {
+                        p[2] -= b - lo[2];
+                    }
                 }
             }
         }
@@ -613,6 +739,36 @@ mod tests {
         assert!((signed_volume(&m) - 1.0).abs() < 1e-5);
         // Each corner keeps its own spot of the source: the origin swaps with it.
         assert_eq!(m.parts[0].origin.as_ref().unwrap()[0].1, [ROOT[0], ROOT[2], ROOT[1]]);
+    }
+
+    #[test]
+    fn split_vertices_unbinds_a_bow_tie_and_drop_floating_lands_pieces() {
+        // Two triangles touching only at vertex 0.
+        let positions = vec![[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [-1., 0., 0.], [-1., -1., 0.]];
+        let mut m = Mesh {
+            parts: vec![MeshPart { name: "bow".into(), positions, tris: vec![[0, 1, 2], [0, 3, 4]], origin: None }],
+            repair: RepairReport::default(),
+        };
+        m.split_vertices(0.01);
+        assert_eq!(m.repair.split_vertices, 1);
+        assert_eq!(m.parts[0].positions.len(), 6);
+        assert_ne!(m.parts[0].tris[0][0], m.parts[0].tris[1][0]);
+        assert!(geom::len(m.parts[0].positions[5]) <= 0.0101);
+        // A closed cube has no such vertex.
+        let mut cube = closed_cube();
+        cube.split_vertices(0.01);
+        assert_eq!(cube.repair.split_vertices, 0);
+
+        let mut m = closed_cube();
+        let raised: Vec<Vec3> = m.parts[0].positions.iter().map(|p| [p[0] + 3.0, p[1], p[2] + 5.0]).collect();
+        let offset = m.parts[0].positions.len() as u32;
+        let tris: Vec<[u32; 3]> = m.parts[0].tris.iter().map(|t| t.map(|v| v + offset)).collect();
+        m.parts[0].positions.extend(raised);
+        m.parts[0].tris.extend(tris);
+        m.parts[0].origin = None;
+        m.drop_floating(1e-4);
+        assert_eq!(m.repair.dropped_pieces, 1);
+        assert!(m.parts[0].positions.iter().all(|p| p[2] <= 1.0 + 1e-6));
     }
 
     #[test]
