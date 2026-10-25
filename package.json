@@ -1,7 +1,7 @@
 {
   "name": "blend-parser-app",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "De .blend con materiales a 3MF multicolor para Bambu Studio",
   "license": "MIT",
   "type": "module",
