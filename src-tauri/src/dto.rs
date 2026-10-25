@@ -120,6 +120,7 @@ pub struct SettingsDto {
     pub orient: bool,
     pub fill_holes: bool,
     pub split_vertices: bool,
+    pub deep_clean: bool,
     pub drop_floating: bool,
     /// Rows of the rotation applied to the model as loaded.
     pub rotation: bp_core::Mat3,
@@ -280,8 +281,17 @@ pub fn waste_and_plate(
 pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     let p: &Project = &doc.project;
     let stats = p.stats();
-    let MeshOps { keep_ratio, flatten_mm, repair, min_piece_mm, orient, fill_holes, split_vertices, drop_floating } =
-        p.mesh_ops();
+    let MeshOps {
+        keep_ratio,
+        flatten_mm,
+        repair,
+        min_piece_mm,
+        orient,
+        fill_holes,
+        split_vertices,
+        drop_floating,
+        deep_clean,
+    } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
     let min_detail = doc.printer.min_detail_mm2();
@@ -341,6 +351,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             orient,
             fill_holes,
             split_vertices,
+            deep_clean,
             drop_floating,
             rotation: p.rotation(),
             border_detail,

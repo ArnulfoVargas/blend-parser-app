@@ -326,7 +326,8 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         "components",
         "checked",
         components.len().saturating_sub(1),
-        "warning",
+        // Several objects are normal; floating and small pieces have their own checks.
+        "pass",
         Some(components.len() as f32),
         Some(1.0),
         collect(components.into_iter()),

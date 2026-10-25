@@ -289,18 +289,19 @@ Cada corrección activa operaciones de malla deterministas y vuelve a analizar:
 
 | Hallazgo | Corrección |
 | --- | --- |
-| Caras degeneradas o duplicadas | Soldar vértices y eliminar esas caras |
+| Caras degeneradas o duplicadas, aristas no manifold | Limpieza a fondo: soldar vértices a 0,001 mm, eliminar caras degeneradas y duplicadas y quitar caras sueltas que cuelgan de una sola arista (grupos de hasta una décima parte de la superficie principal) |
 | Orientación inconsistente, volumen invertido | Propagar la orientación entre caras vecinas y dar la vuelta a envolventes con volumen negativo |
-| Bordes abiertos | Cerrar cada agujero con un abanico plano desde su centro, del color de la cara vecina |
+| Bordes abiertos | Limpieza a fondo y cerrar cada agujero con un abanico plano desde su centro, del color de la cara vecina |
 | Piezas pequeñas | Eliminar piezas sueltas bajo el umbral |
 | Poco contacto con la placa | Aplanar la base (dos capas, mínimo 0,4 mm) |
-| Vértices no manifold | Dar a cada grupo de caras su propia copia del vértice, a 0,02 mm |
+| Vértices no manifold | Limpieza a fondo y dar a cada grupo de caras su propia copia del vértice, a 0,02 mm |
 | Piezas sin contacto con la placa | Bajar hasta la placa las piezas que no se apoyan en nada |
-| Caras en voladizo | Probar unas cincuenta orientaciones (ejes, aristas, esquinas y las caras más grandes) y girar a la de menor área en voladizo |
+| Caras en voladizo | Probar unas cincuenta orientaciones (ejes, aristas, esquinas y las caras más grandes) y girar a la de menor área en voladizo entre las que se sostienen solas: el centro de masa debe caer dentro de la huella de apoyo |
 | No cabe en la placa | Reducir el tamaño sin deformar hasta que quepa con margen y torre |
 
 Girar y ajustar el tamaño conservan la pintura manual; un giro descarta el estiramiento
-por ejes que hubiera, porque los ejes cambian. Bajar piezas mueve solo la malla final: los
+por ejes que hubiera, porque los ejes cambian, y **Revertir** lo devuelve. Las piezas
+separadas se informan sin aviso: son normales en modelos de varios objetos. Bajar piezas mueve solo la malla final: los
 colores se siguen leyendo donde estaban.
 
 Una vez aplicada, la tarjeta queda como **Corregido** con el conteo antes/ahora y el botón

@@ -47,14 +47,14 @@ interface FixOps {
 }
 /** Which fix answers each check. Checks without one can only be located. */
 const FIX_OF: Record<string, string> = {
-  degenerate: "clean", duplicate: "clean", winding: "orient", volume: "orient",
+  degenerate: "deepClean", duplicate: "deepClean", nonManifoldEdges: "deepClean", winding: "orient", volume: "orient",
   openEdges: "fillHoles", smallComponents: "removeSmall", contact: "flattenBase",
   buildVolume: "fitPlate", floating: "dropFloating", nonManifoldVertices: "splitVertices", overhang: "rotate",
 };
 /** Where a fix's mesh operations show in the summary, to tell whether it still holds. */
 const SETTING: Record<keyof MeshFix, keyof Summary["settings"]> = {
   repair: "repair", orient: "orient", fillHoles: "fillHoles", splitVertices: "splitVertices",
-  dropFloating: "dropFloating", minPieceMm: "minPieceMm", flattenMm: "flattenMm",
+  dropFloating: "dropFloating", minPieceMm: "minPieceMm", flattenMm: "flattenMm", deepClean: "deepClean",
 };
 const same = (a: number[] | number[][], b: number[] | number[][]) =>
   a.flat().every((v, i) => Math.abs(v - b.flat()[i]) < 1e-5);
@@ -87,10 +87,12 @@ function makeFixes(ops: FixOps): Record<string, Fix> {
     },
   });
   return {
-    clean: mesh((s) => !s.settings.repair, () => ({ repair: true })),
+    // Stray faces and slivers are what usually leave holes and shared vertices,
+    // so closing holes and splitting vertices clean them first.
+    deepClean: mesh((s) => !s.settings.deepClean, () => ({ repair: true, deepClean: true })),
     orient: mesh((s) => !s.settings.orient, () => ({ repair: true, orient: true })),
-    fillHoles: mesh((s) => !s.settings.fillHoles, () => ({ repair: true, fillHoles: true })),
-    splitVertices: mesh((s) => !s.settings.splitVertices, () => ({ repair: true, splitVertices: true })),
+    fillHoles: mesh((s) => !s.settings.fillHoles, () => ({ repair: true, deepClean: true, fillHoles: true })),
+    splitVertices: mesh((s) => !s.settings.splitVertices, () => ({ repair: true, deepClean: true, splitVertices: true })),
     dropFloating: mesh((s) => !s.settings.dropFloating, () => ({ repair: true, dropFloating: true })),
     removeSmall: mesh((s, r) => s.settings.minPieceMm < r.params.componentMm, (_, r) => ({ repair: true, minPieceMm: r.params.componentMm }), (_, r) => r.params.componentMm),
     flattenBase: mesh((s) => s.settings.flattenMm === 0, (s) => ({ flattenMm: base(s) }), base),

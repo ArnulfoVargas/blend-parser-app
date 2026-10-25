@@ -96,6 +96,9 @@ pub struct MeshOps {
     pub split_vertices: bool,
     /// Lower every piece that floats above the plate until it touches it.
     pub drop_floating: bool,
+    /// Weld and drop slivers at the printability tolerance, and remove stray
+    /// faces hanging off the surface by one edge.
+    pub deep_clean: bool,
 }
 
 impl Default for MeshOps {
@@ -109,6 +112,7 @@ impl Default for MeshOps {
             fill_holes: false,
             split_vertices: false,
             drop_floating: false,
+            deep_clean: false,
         }
     }
 }
@@ -125,6 +129,7 @@ pub struct RepairReport {
     pub flipped_triangles: usize,
     pub split_vertices: usize,
     pub dropped_pieces: usize,
+    pub fin_triangles: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -156,8 +161,12 @@ impl Mesh {
         // Holes, winding and fans are read from shared vertices: on an unwelded
         // mesh every seam would look like a hole. Reverting the cleanup alone
         // must not leave them working on loose triangles.
-        if ops.repair || ops.fill_holes || ops.orient || ops.split_vertices {
+        if ops.repair || ops.deep_clean || ops.fill_holes || ops.orient || ops.split_vertices {
             shape.repair_all();
+        }
+        // Before holes: a stray face's open sides are not a hole to cap.
+        if ops.deep_clean {
+            shape.deep_clean(CLEAN_MM / scale);
         }
         // Holes first, so their caps get oriented with the rest of the piece.
         if ops.fill_holes {
@@ -194,6 +203,20 @@ impl Mesh {
     /// drops triangles that collapsed or repeat another one.
     pub fn repair_all(&mut self) {
         let eps = self.bounds().map_or(1e-4, |(lo, hi)| (geom::len(geom::sub(hi, lo)) * 1e-6).max(1e-6));
+        self.weld(eps, 0.0);
+    }
+
+    /// What the printability analysis calls degenerate or repeated goes too:
+    /// vertices closer than `tol` (source units) are welded and triangles of
+    /// area up to `tol`² dropped. Then stray faces come off (see [`Self::remove_fins`]).
+    pub fn deep_clean(&mut self, tol: f32) {
+        self.weld(tol, tol * tol);
+        self.remove_fins();
+    }
+
+    /// Welds vertices on a grid of `eps`, then drops triangles that collapsed,
+    /// have an area up to `min_area`, or repeat another one.
+    fn weld(&mut self, eps: f32, min_area: f32) {
         let mut report = self.repair;
         for part in &mut self.parts {
             let mut seen: HashMap<[i64; 3], u32> = HashMap::with_capacity(part.positions.len());
@@ -217,7 +240,7 @@ impl Mesh {
             let keep: Vec<bool> = (0..part.tris.len())
                 .map(|i| {
                     let t = part.tris[i];
-                    if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || geom::area(&part.corners(i)) <= 0.0 {
+                    if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || geom::area(&part.corners(i)) <= min_area {
                         report.degenerate_triangles += 1;
                         return false;
                     }
@@ -231,6 +254,72 @@ impl Mesh {
                 })
                 .collect();
             part.retain(&keep);
+        }
+        self.repair = report;
+    }
+
+    /// Removes fins: small sheets of faces (joined through edges with exactly
+    /// two faces) that hang off the surface by a non-manifold edge and leave the
+    /// rest of their border open. They are what modelling leaves behind when a
+    /// face is extruded or duplicated by mistake, and they make that edge
+    /// non-manifold, its sides open and its vertices non-manifold all at once.
+    /// Only sheets up to a tenth of the part's largest one count as fins.
+    pub fn remove_fins(&mut self) {
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            // Taking a fin off can turn the next one into a fin; a few passes settle it.
+            for _ in 0..8 {
+                let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+                for (ti, t) in part.tris.iter().enumerate() {
+                    for k in 0..3 {
+                        let (a, b) = (t[k], t[(k + 1) % 3]);
+                        edges.entry((a.min(b), a.max(b))).or_default().push(ti);
+                    }
+                }
+                let n = part.tris.len();
+                let mut sheet = vec![usize::MAX; n];
+                // Triangles, open edges and non-manifold edges of each sheet.
+                let mut sheets: Vec<(usize, usize, usize)> = vec![];
+                for start in 0..n {
+                    if sheet[start] != usize::MAX {
+                        continue;
+                    }
+                    let id = sheets.len();
+                    let mut s = (0, 0, 0);
+                    sheet[start] = id;
+                    let mut stack = vec![start];
+                    while let Some(ti) = stack.pop() {
+                        s.0 += 1;
+                        let t = part.tris[ti];
+                        for k in 0..3 {
+                            let (a, b) = (t[k], t[(k + 1) % 3]);
+                            let faces = &edges[&(a.min(b), a.max(b))];
+                            match faces.len() {
+                                1 => s.1 += 1,
+                                2 => {
+                                    for &o in faces {
+                                        if sheet[o] == usize::MAX {
+                                            sheet[o] = id;
+                                            stack.push(o);
+                                        }
+                                    }
+                                }
+                                _ => s.2 += 1,
+                            }
+                        }
+                    }
+                    sheets.push(s);
+                }
+                let largest = sheets.iter().map(|s| s.0).max().unwrap_or(0);
+                let fin: Vec<bool> =
+                    sheets.iter().map(|&(size, open, nm)| nm > 0 && open > 0 && size * 10 <= largest).collect();
+                if !fin.contains(&true) {
+                    break;
+                }
+                let keep: Vec<bool> = sheet.iter().map(|&s| !fin[s]).collect();
+                report.fin_triangles += keep.iter().filter(|&&k| !k).count();
+                part.retain(&keep);
+            }
         }
         self.repair = report;
     }
@@ -680,6 +769,10 @@ impl Mesh {
     }
 }
 
+/// Weld and sliver size of the deep clean, in final millimetres: the
+/// printability analysis's default tolerance, so what it flags goes.
+pub const CLEAN_MM: f32 = 0.001;
+
 /// Which pieces (by bounding box, lowest corner first) have nothing to hold
 /// them up: they do not reach `floor` and do not touch, within `tol`, any piece
 /// that does, directly or through others. Boxes are coarse, so a piece above a
@@ -819,6 +912,33 @@ mod tests {
         assert_eq!(m.parts[1].positions, before);
         let report = crate::printability::analyze(&m, crate::printability::Params::for_nozzle(0.4));
         assert_eq!(report.checks.iter().find(|c| c.code == "floating").unwrap().count, 0);
+    }
+
+    #[test]
+    fn deep_clean_takes_off_a_stray_face_hanging_by_one_edge() {
+        let mut m = closed_cube();
+        // A flap on the bottom edge 0-1: that edge gets three faces, the flap two open sides.
+        m.parts[0].positions.push([0.5, -1.0, -1.0]);
+        m.parts[0].tris.push([0, 1, 8]);
+        m.parts[0].origin.as_mut().unwrap().push((0, ROOT));
+        let before = crate::printability::analyze(&m, crate::printability::Params::for_nozzle(0.4));
+        let count =
+            |r: &crate::printability::Report, code: &str| r.checks.iter().find(|c| c.code == code).unwrap().count;
+        assert_eq!(count(&before, "nonManifoldEdges"), 1);
+        assert_eq!(count(&before, "openEdges"), 2);
+        m.deep_clean(1e-3);
+        assert_eq!(m.repair.fin_triangles, 1);
+        assert_eq!(m.parts[0].tris.len(), 12);
+        let after = crate::printability::analyze(&m, crate::printability::Params::for_nozzle(0.4));
+        for code in ["nonManifoldEdges", "openEdges", "nonManifoldVertices"] {
+            assert_eq!(count(&after, code), 0, "{code}");
+        }
+        // A real hole in the surface is not a fin: nothing hangs from a non-manifold edge.
+        let mut open = closed_cube();
+        open.parts[0].tris.pop();
+        open.parts[0].origin.as_mut().unwrap().pop();
+        open.deep_clean(1e-3);
+        assert_eq!(open.parts[0].tris.len(), 11);
     }
 
     #[test]

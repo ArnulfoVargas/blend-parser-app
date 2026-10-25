@@ -133,6 +133,67 @@ fn onto_down(d: Vec3) -> Mat3 {
     std::array::from_fn(|i| std::array::from_fn(|j| IDENTITY[i][j] + x[i][j] + xx[i][j] * k))
 }
 
+/// Centre of the enclosed volume, or of the surface when it encloses none
+/// (open or inside-out meshes), as a stand-in for the centre of mass.
+fn mass_centre(tris: &[[Vec3; 3]], faces: &[(Vec3, f32)], origin: Vec3) -> Vec3 {
+    let (mut volume, mut sum) = (0.0f64, [0.0f64; 3]);
+    for c in tris {
+        let [a, b, d] = c.map(|p| geom::sub(p, origin));
+        let v = geom::dot(a, geom::cross(b, d)) as f64 / 6.0;
+        volume += v;
+        for k in 0..3 {
+            sum[k] += v * (a[k] + b[k] + d[k]) as f64 / 4.0;
+        }
+    }
+    if volume.abs() > 1e-12 {
+        return std::array::from_fn(|k| (sum[k] / volume) as f32 + origin[k]);
+    }
+    let area: f32 = faces.iter().map(|f| f.1).sum();
+    let mut c = [0.0; 3];
+    for (t, f) in tris.iter().zip(faces) {
+        c = geom::add(c, geom::scale(geom::add(geom::add(t[0], t[1]), t[2]), f.1 / 3.0));
+    }
+    geom::scale(c, 1.0 / area.max(f32::MIN_POSITIVE))
+}
+
+/// Whether `centre` falls inside the convex footprint of `feet` (the points
+/// touching the plate) seen from `up`, at least `margin` from its border.
+fn stands(feet: &[Vec3], centre: Vec3, up: Vec3, margin: f32) -> bool {
+    let u = geom::normalize(geom::cross(up, if up[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }));
+    let v = geom::cross(up, u);
+    let flat = |p: Vec3| [geom::dot(p, u), geom::dot(p, v)];
+    let mut pts: Vec<[f32; 2]> = feet.iter().map(|&p| flat(p)).collect();
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    pts.dedup();
+    if pts.len() < 3 {
+        return false;
+    }
+    // Monotone chain, counter-clockwise.
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut hull: Vec<[f32; 2]> = vec![];
+    for pass in 0..2 {
+        let start = hull.len();
+        let points: Box<dyn Iterator<Item = &[f32; 2]>> =
+            if pass == 0 { Box::new(pts.iter()) } else { Box::new(pts.iter().rev()) };
+        for &p in points {
+            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    if hull.len() < 3 {
+        return false;
+    }
+    let c = flat(centre);
+    (0..hull.len()).all(|i| {
+        let (a, b) = (hull[i], hull[(i + 1) % hull.len()]);
+        let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+        len > 0.0 && cross(a, b, c) / len >= margin
+    })
+}
+
 #[derive(Clone)]
 pub struct Project {
     scene: Scene,
@@ -278,14 +339,17 @@ impl Project {
 
     /// The rotation (absolute, like [`Self::set_rotation`]) that leaves the least
     /// downward-facing area steeper than `overhang_deg` off the plate. It tries
-    /// resting on each axis, edge and corner direction and on the largest faces;
-    /// near-ties go to more plate contact. Returns the current rotation when
-    /// nothing is clearly better.
+    /// resting on each axis, edge and corner direction and on the largest faces,
+    /// but only where the model stands by itself: the centre of mass has to fall
+    /// inside the footprint it rests on, so it never balances on a corner. Near
+    /// ties go to more plate contact. Returns the current rotation when nothing
+    /// stable is clearly better.
     pub fn best_rotation(&self, overhang_deg: f32) -> Mat3 {
         let tris: Vec<[Vec3; 3]> =
             self.scene.parts.iter().flat_map(|p| (0..p.tris.len()).map(move |t| p.corners(t))).collect();
         let Some((lo, hi)) = self.scene.bounds() else { return self.rotation };
-        let tol = geom::len(geom::sub(hi, lo)) * 1e-3;
+        let diagonal = geom::len(geom::sub(hi, lo));
+        let tol = diagonal * 1e-3;
         let faces: Vec<(Vec3, f32)> = tris
             .iter()
             .map(|c| {
@@ -294,12 +358,14 @@ impl Project {
             })
             .collect();
         let total: f32 = faces.iter().map(|f| f.1).sum();
+        let centre = mass_centre(&tris, &faces, lo);
         let limit = overhang_deg.to_radians().sin();
-        // (overhang, contact) with `down` pointing at the plate.
-        let score = |down: Vec3| {
+        // (overhang, contact) with `down` pointing at the plate; None when it would tip over.
+        let score = |down: Vec3| -> Option<(f32, f32)> {
             let up = geom::scale(down, -1.0);
             let base = tris.iter().flatten().map(|&p| geom::dot(p, up)).fold(f32::MAX, f32::min);
             let (mut overhang, mut contact) = (0.0, 0.0);
+            let mut feet = vec![];
             for (c, &(n, area)) in tris.iter().zip(&faces) {
                 let facing = geom::dot(n, up);
                 if c.iter().all(|&p| geom::dot(p, up) <= base + tol) {
@@ -309,8 +375,9 @@ impl Project {
                 } else if -facing > limit {
                     overhang += area;
                 }
+                feet.extend(c.iter().copied().filter(|&p| geom::dot(p, up) <= base + tol));
             }
-            (overhang, contact)
+            stands(&feet, centre, up, diagonal * 0.01).then_some((overhang, contact))
         };
         let mut candidates: Vec<Vec3> = vec![];
         for x in -1..=1 {
@@ -325,10 +392,15 @@ impl Project {
         let mut largest: Vec<&(Vec3, f32)> = faces.iter().filter(|f| f.1 > 0.0).collect();
         largest.sort_by(|a, b| b.1.total_cmp(&a.1));
         candidates.extend(largest.iter().take(24).map(|f| f.0));
-        let current = score([0.0, 0.0, -1.0]);
+        // The model as it is stays a valid answer even if it would not stand.
+        let current = score([0.0, 0.0, -1.0]).unwrap_or_else(|| {
+            let up = [0.0, 0.0, 1.0];
+            let overhang = faces.iter().filter(|f| -geom::dot(f.0, up) > limit).map(|f| f.1).sum();
+            (overhang, 0.0)
+        });
         let mut best = ([0.0, 0.0, -1.0], current);
         for d in candidates {
-            let s = score(d);
+            let Some(s) = score(d) else { continue };
             let near = (s.0 - best.1 .0).abs() <= total * 0.01;
             if s.0 < best.1 .0 - total * 0.01 || (near && s.1 > best.1 .1 * 1.05) {
                 best = (d, s);
@@ -549,7 +621,8 @@ impl Project {
             || (ops.min_piece_mm - self.mesh_ops.min_piece_mm).abs() > 1e-4
             || ops.orient != self.mesh_ops.orient
             || ops.fill_holes != self.mesh_ops.fill_holes
-            || ops.split_vertices != self.mesh_ops.split_vertices;
+            || ops.split_vertices != self.mesh_ops.split_vertices
+            || ops.deep_clean != self.mesh_ops.deep_clean;
         self.mesh_ops = ops;
         if topology_changes {
             self.rebuild_geometry();
@@ -985,6 +1058,16 @@ mod tests {
         assert_eq!(p.undo_label(), Some("fix"));
         assert!(p.undo());
         assert_eq!(p.rotation(), flipped);
+    }
+
+    #[test]
+    fn a_model_only_stands_where_its_centre_is_over_its_footprint() {
+        let square = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]];
+        let up = [0.0, 0.0, 1.0];
+        assert!(stands(&square, [5.0, 5.0, 4.0], up, 0.1));
+        // Over the edge, or on a single corner, it tips over.
+        assert!(!stands(&square, [12.0, 5.0, 4.0], up, 0.1));
+        assert!(!stands(&square[..1], [0.0, 0.0, 4.0], up, 0.1));
     }
 
     #[test]
