@@ -125,6 +125,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
       - name: Descargar y validar el manifiesto de ambas plataformas
         env:
           GH_TOKEN: ${{ github.token }}
@@ -162,6 +165,15 @@ jobs:
               latest = newer(parse(process.env.RELEASE_TAG), parse(current.tag_name));
             } catch (error) {
               if (error.status !== 404) throw error;
+            }
+            // Older CI runs may finish after a newer merge. Publish their builds,
+            // but only the current main snapshot can become the updater's latest.
+            const { execFileSync } = require('node:child_process');
+            const markers = execFileSync('git', ['tag', '--points-at', 'HEAD'], { encoding: 'utf8' });
+            const source = markers.split('\n').map(tag => /^release-source-([a-f0-9]{40})$/.exec(tag)?.[1]).find(Boolean);
+            if (source) {
+              const main = (await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' })).data;
+              latest = latest && main.object.sha === source;
             }
             await github.rest.repos.updateRelease({
               ...context.repo, release_id: Number(process.env.RELEASE_ID),
