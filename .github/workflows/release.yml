@@ -1,6 +1,6 @@
 name: Release
 
-# Un tag como alpha-0.0.2 o v0.1.0 compila Windows y Linux, firma los paquetes para
+# Un tag como alpha-0.0.2 o v0.1.0 compila Windows, Linux y macOS, firma los paquetes para
 # el actualizador y publica un Release con latest.json. Crea el tag con
 # `npm run release -- <versión>` para que tag y versión coincidan.
 #
@@ -62,7 +62,7 @@ jobs:
               release = (await github.rest.repos.createRelease({
                 ...context.repo, tag_name: tag, name: `BlendParser ${tag}`,
                 draft: true, prerelease: false, generate_release_notes: true,
-                body: `Blender 3.6 o posterior requerido. Windows: .exe/.msi; Linux: .AppImage/.deb. Incluye actualizaciones automáticas firmadas. ${process.env.SIGNING_NOTE} Política de firma de código: https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CODE_SIGNING.md`,
+                body: `Blender 3.6 o posterior requerido. Windows: .exe/.msi; Linux: .AppImage/.deb/.rpm; macOS: .dmg para Intel (x64) y Apple Silicon (aarch64). Incluye actualizaciones automáticas firmadas. ${process.env.SIGNING_NOTE} macOS usa firma ad hoc, sin notarización de Apple; puede requerir autorización en Privacidad y seguridad. Política de firma de código: https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CODE_SIGNING.md`,
               })).data;
             }
             core.setOutput('tag', tag);
@@ -74,12 +74,22 @@ jobs:
     if: needs.prepare.outputs.build == 'true'
     strategy:
       fail-fast: false
-      # Both jobs merge latest.json into the same asset; serialize their uploads.
+      # All jobs merge latest.json into the same asset; serialize their uploads.
       max-parallel: 1
       matrix:
         include:
           - platform: windows-latest
+            args: ''
+            target: ''
           - platform: ubuntu-22.04
+            args: ''
+            target: ''
+          - platform: macos-14
+            args: '--target aarch64-apple-darwin'
+            target: aarch64-apple-darwin
+          - platform: macos-15-intel
+            args: '--target x86_64-apple-darwin'
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -101,6 +111,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
@@ -115,6 +127,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          args: ${{ matrix.args }}
           releaseId: ${{ needs.prepare.outputs.id }}
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "BlendParser ${{ needs.prepare.outputs.tag }}"
@@ -124,11 +137,14 @@ jobs:
             **Requisito:** Blender 3.6 o posterior instalado (la app lo usa para leer el .blend).
 
             - Windows: `BlendParser_*_x64-setup.exe` (instalador) o `.msi`.
-            - Linux: `.AppImage` (portable) o `.deb` (Debian/Ubuntu).
+            - Linux: `.AppImage` (portable), `.deb` (Debian/Ubuntu) o `.rpm`.
+            - macOS: `.dmg` para Intel (`x64`) o Apple Silicon (`aarch64`).
 
             Si ya tienes BlendParser 0.0.2 o posterior, se actualiza solo al abrirlo (en Linux, con el AppImage).
 
             ${{ vars.SIGNPATH_PROJECT_SLUG != '' && 'Los instaladores de Windows llevan firma de código de SignPath Foundation. SmartScreen puede avisar en las primeras descargas de cada versión, hasta que el certificado gane reputación.' || 'Los instaladores no llevan firma de código: Windows SmartScreen puede pedir "Más información > Ejecutar de todas formas".' }}
+
+            macOS usa firma ad hoc, sin notarización de Apple: puede requerir autorización en Ajustes del Sistema > Privacidad y seguridad.
 
             Política de firma de código: https://github.com/${{ github.repository }}/blob/main/CODE_SIGNING.md
           releaseDraft: true
@@ -197,24 +213,15 @@ jobs:
         with:
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
-      - name: Descargar y validar el manifiesto de ambas plataformas
+      - name: Descargar y validar el manifiesto de todas las plataformas
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           gh release download "$RELEASE_TAG" --pattern latest.json --dir "$RUNNER_TEMP/updater"
-          node --input-type=module - "$RUNNER_TEMP/updater/latest.json" <<'JS'
-          import { readFileSync } from 'node:fs';
-          const manifest = JSON.parse(readFileSync(process.argv[2], 'utf8'));
-          const version = process.env.RELEASE_TAG.replace(/^(alpha-|beta-|v)/, '');
-          if (manifest.version !== version) throw new Error('Versión incorrecta en latest.json');
-          for (const platform of ['windows-x86_64', 'linux-x86_64']) {
-            const entry = manifest.platforms?.[platform];
-            if (!entry?.signature || !entry?.url) throw new Error(`Falta ${platform} o su firma`);
-          }
-          JS
-      - name: Publicar solamente cuando ambas builds hayan terminado
+          node scripts/validate-updater.mjs "$RUNNER_TEMP/updater/latest.json" "$RELEASE_TAG"
+      - name: Publicar solamente cuando todas las builds hayan terminado
         uses: actions/github-script@v7
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
