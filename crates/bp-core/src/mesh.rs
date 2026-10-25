@@ -153,7 +153,10 @@ impl Mesh {
     /// `scale` converts source millimetres to final millimetres.
     pub fn build(scene: &Scene, ops: MeshOps, scale: f32) -> (Self, Self) {
         let mut shape = Self::from_scene(scene);
-        if ops.repair {
+        // Holes, winding and fans are read from shared vertices: on an unwelded
+        // mesh every seam would look like a hole. Reverting the cleanup alone
+        // must not leave them working on loose triangles.
+        if ops.repair || ops.fill_holes || ops.orient || ops.split_vertices {
             shape.repair_all();
         }
         // Holes first, so their caps get oriented with the rest of the piece.
@@ -483,28 +486,41 @@ impl Mesh {
         self.repair = report;
     }
 
-    /// Lowers each connected piece whose lowest point is above the lowest point
-    /// of the whole mesh by more than `tol`, until it rests at that height.
+    /// Lowers each connected piece that has nothing under it (see [`unsupported`])
+    /// until it rests on the lowest point of the whole mesh. Pieces resting on or
+    /// sunk into another one stay where they are.
     pub fn drop_floating(&mut self, tol: f32) {
         let Some((lo, _)) = self.bounds() else { return };
         let mut report = self.repair;
-        for part in &mut self.parts {
+        // Pieces of every part, since one object usually sits on another.
+        let mut pieces = vec![];
+        let mut boxes = vec![];
+        for part in &self.parts {
             let comp = part.components();
             let n = comp.iter().copied().max().map_or(0, |m| m as usize + 1);
-            let mut bottom = vec![f32::MAX; n];
+            let mut bb = vec![([f32::MAX; 3], [f32::MIN; 3]); n];
             let mut piece_of = vec![u32::MAX; part.positions.len()];
             for (ti, t) in part.tris.iter().enumerate() {
+                let c = comp[ti] as usize;
                 for &v in t {
-                    bottom[comp[ti] as usize] = bottom[comp[ti] as usize].min(part.positions[v as usize][2]);
+                    let p = part.positions[v as usize];
+                    bb[c] =
+                        (std::array::from_fn(|k| bb[c].0[k].min(p[k])), std::array::from_fn(|k| bb[c].1[k].max(p[k])));
                     piece_of[v as usize] = comp[ti];
                 }
             }
-            report.dropped_pieces += bottom.iter().filter(|&&b| b > lo[2] + tol).count();
+            pieces.push((piece_of, boxes.len()));
+            boxes.extend(bb);
+        }
+        let floats = unsupported(&boxes, lo[2], tol);
+        report.dropped_pieces += floats.iter().filter(|&&f| f).count();
+        for (part, (piece_of, first)) in self.parts.iter_mut().zip(pieces) {
             for (v, p) in part.positions.iter_mut().enumerate() {
-                if let Some(&b) = bottom.get(piece_of[v] as usize) {
-                    if b > lo[2] + tol {
-                        p[2] -= b - lo[2];
-                    }
+                let Some(i) = piece_of.get(v).filter(|&&c| c != u32::MAX).map(|&c| first + c as usize) else {
+                    continue;
+                };
+                if floats[i] {
+                    p[2] -= boxes[i].0[2] - lo[2];
                 }
             }
         }
@@ -664,6 +680,26 @@ impl Mesh {
     }
 }
 
+/// Which pieces (by bounding box, lowest corner first) have nothing to hold
+/// them up: they do not reach `floor` and do not touch, within `tol`, any piece
+/// that does, directly or through others. Boxes are coarse, so a piece above a
+/// hollow of its neighbour still counts as supported; a separate object resting
+/// on another (a hat, an eye) is never taken for a floating one.
+pub(crate) fn unsupported(boxes: &[(Vec3, Vec3)], floor: f32, tol: f32) -> Vec<bool> {
+    let touch = |a: &(Vec3, Vec3), b: &(Vec3, Vec3)| (0..3).all(|k| a.0[k] <= b.1[k] + tol && b.0[k] <= a.1[k] + tol);
+    let mut floats: Vec<bool> = boxes.iter().map(|b| b.0[2] > floor + tol).collect();
+    let mut stack: Vec<usize> = (0..boxes.len()).filter(|&i| !floats[i]).collect();
+    while let Some(i) = stack.pop() {
+        for j in 0..boxes.len() {
+            if floats[j] && touch(&boxes[i], &boxes[j]) {
+                floats[j] = false;
+                stack.push(j);
+            }
+        }
+    }
+    floats
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +805,20 @@ mod tests {
         m.drop_floating(1e-4);
         assert_eq!(m.repair.dropped_pieces, 1);
         assert!(m.parts[0].positions.iter().all(|p| p[2] <= 1.0 + 1e-6));
+
+        // A separate object stacked on the first one (a hat, an eye) is held up and stays put.
+        let mut m = closed_cube();
+        let mut top = closed_cube().parts.remove(0);
+        for p in &mut top.positions {
+            p[2] += 1.0;
+        }
+        m.parts.push(top);
+        let before = m.parts[1].positions.clone();
+        m.drop_floating(1e-4);
+        assert_eq!(m.repair.dropped_pieces, 0);
+        assert_eq!(m.parts[1].positions, before);
+        let report = crate::printability::analyze(&m, crate::printability::Params::for_nozzle(0.4));
+        assert_eq!(report.checks.iter().find(|c| c.code == "floating").unwrap().count, 0);
     }
 
     #[test]

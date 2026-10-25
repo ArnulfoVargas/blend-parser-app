@@ -143,7 +143,8 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
     let mut components = vec![];
     let mut small = vec![];
     let mut detail = vec![];
-    let mut floating = vec![];
+    // Every piece of every part: one object often rests on another.
+    let mut boxes = vec![];
     let mut invalid_volume = vec![];
     let mut all_closed = !soup.is_empty();
     let mut positive_shells = 0;
@@ -260,9 +261,7 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
             if (0..3).map(|k| b[k] - a[k]).fold(f32::MAX, f32::min) < params.detail_mm.max(params.extrusion_mm) {
                 detail.push(at);
             }
-            if a[2] > lo[2] + params.tolerance_mm {
-                floating.push(at);
-            }
+            boxes.push((a, b));
             if closed && volume[i] > 0.0 {
                 positive_shells += 1;
             }
@@ -275,6 +274,12 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         }
         all_closed &= closed;
     }
+    // Same rule as the fix that lowers them, so fixing clears the warning.
+    let floating: Vec<Vec3> = crate::mesh::unsupported(&boxes, lo[2], params.tolerance_mm)
+        .into_iter()
+        .zip(&components)
+        .filter_map(|(f, &at)| f.then_some(at))
+        .collect();
     for (code, points) in [
         ("openEdges", open),
         ("nonManifoldEdges", nonmanifold),

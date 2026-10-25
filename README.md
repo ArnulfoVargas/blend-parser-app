@@ -254,7 +254,8 @@ invalida el informe; hay que ejecutarlo de nuevo. El idioma no lo invalida.
   por objeto después de soldar posiciones mediante una cuadrícula de tolerancia en mm;
   posiciones muy próximas a lados distintos de una celda pueden seguir separadas.
 - **Estimado:** componentes separados o pequeños, detalle fino por la menor dimensión de
-  cada componente, componentes sin contacto con la placa, voladizos y área de contacto.
+  cada componente, componentes que no tocan la placa ni otra pieza apoyada (por caja
+  envolvente), voladizos y área de contacto.
   Las piezas separadas pueden ser intencionales; nunca se eliminan automáticamente por
   un hallazgo. Convención angular: **0° = pared vertical; 90° = cara inferior horizontal**.
   El contacto es el área de caras inferiores dentro de la tolerancia del mínimo Z.
@@ -294,7 +295,7 @@ Cada corrección activa operaciones de malla deterministas y vuelve a analizar:
 | Piezas pequeñas | Eliminar piezas sueltas bajo el umbral |
 | Poco contacto con la placa | Aplanar la base (dos capas, mínimo 0,4 mm) |
 | Vértices no manifold | Dar a cada grupo de caras su propia copia del vértice, a 0,02 mm |
-| Piezas sin contacto con la placa | Bajar cada pieza flotante hasta la placa |
+| Piezas sin contacto con la placa | Bajar hasta la placa las piezas que no se apoyan en nada |
 | Caras en voladizo | Probar unas cincuenta orientaciones (ejes, aristas, esquinas y las caras más grandes) y girar a la de menor área en voladizo |
 | No cabe en la placa | Reducir el tamaño sin deformar hasta que quepa con margen y torre |
 

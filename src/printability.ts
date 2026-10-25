@@ -75,7 +75,7 @@ function makeFixes(ops: FixOps): Record<string, Fix> {
     },
   });
   /** A change read back from the summary: `value` before and after tells whether it happened. */
-  const measured = <T extends number[] | number[][]>(value: (s: Summary) => T, run: (r: PrintabilityReport) => Promise<unknown>, back: (v: T) => Promise<unknown>): Fix => ({
+  const measured = <T extends number[] | number[][]>(value: (s: Summary) => T, run: (r: PrintabilityReport) => Promise<unknown>, back: (v: T, s: Summary) => Promise<unknown>): Fix => ({
     available: () => true, repaints: false,
     async apply(s, r) {
       const before = value(s);
@@ -83,7 +83,7 @@ function makeFixes(ops: FixOps): Record<string, Fix> {
       const now = ops.summary();
       if (!now || same(value(now), before)) return null;
       const after = value(now);
-      return { revert: () => back(before), holds: (x) => same(value(x), after) };
+      return { revert: () => back(before, s), holds: (x) => same(value(x), after) };
     },
   });
   return {
@@ -92,9 +92,14 @@ function makeFixes(ops: FixOps): Record<string, Fix> {
     fillHoles: mesh((s) => !s.settings.fillHoles, () => ({ repair: true, fillHoles: true })),
     splitVertices: mesh((s) => !s.settings.splitVertices, () => ({ repair: true, splitVertices: true })),
     dropFloating: mesh((s) => !s.settings.dropFloating, () => ({ repair: true, dropFloating: true })),
-    removeSmall: mesh((s, r) => s.settings.minPieceMm < r.params.componentMm, (_, r) => ({ minPieceMm: r.params.componentMm }), (_, r) => r.params.componentMm),
+    removeSmall: mesh((s, r) => s.settings.minPieceMm < r.params.componentMm, (_, r) => ({ repair: true, minPieceMm: r.params.componentMm }), (_, r) => r.params.componentMm),
     flattenBase: mesh((s) => s.settings.flattenMm === 0, (s) => ({ flattenMm: base(s) }), base),
-    rotate: measured((s) => s.settings.rotation, (r) => ops.orient(r.params.overhangDeg), (v) => ops.rotate(v)),
+    // Turning drops a per-axis stretch, so turning back also puts the size back.
+    rotate: measured((s) => s.settings.rotation, (r) => ops.orient(r.params.overhangDeg), async (v, s) => {
+      await ops.rotate(v);
+      const now = ops.summary();
+      if (now && !same(now.size.targetMm, s.size.targetMm)) await ops.resize(s.size.targetMm);
+    }),
     fitPlate: measured((s) => s.size.targetMm, () => ops.fitPlate(), (v) => ops.resize(v as Vec3)),
   };
 }
@@ -218,10 +223,14 @@ export function setupPrintability(options: {
     token++;
     outdated = outdated || report !== null;
     report = null;
-    output.replaceChildren();
     markers(null, []);
-    say(t(outdated ? "printability.outdated" : "printability.stale"), outdated ? "warn" : "");
-    sum.replaceChildren();
+    // A fix in progress redraws the results once it has analysed again; emptying
+    // them meanwhile collapses the panel and the sidebar jumps back to the top.
+    if (!busy) {
+      output.replaceChildren();
+      sum.replaceChildren();
+      say(t(outdated ? "printability.outdated" : "printability.stale"), outdated ? "warn" : "");
+    }
     controls();
   }
 
@@ -396,7 +405,7 @@ export function setupPrintability(options: {
   }
 
   /** Runs `change` with the panel busy, then analyses what the document is now. */
-  async function step(text: string, change: () => Promise<unknown>, done: () => string) {
+  async function step(id: string, text: string, change: () => Promise<unknown>, done: () => string) {
     const params = read();
     if (!params || busy) return;
     busy = true;
@@ -408,7 +417,14 @@ export function setupPrintability(options: {
       const next = await api.analyzePrintability(params);
       token++;
       show(next, done());
+      // The clicked button was replaced; keep the keyboard where it was without scrolling.
+      output.querySelector<HTMLButtonElement>(`[data-fix="${id}"]`)?.focus({ preventScroll: true });
     } catch (e) {
+      // The results kept on screen during the change no longer describe the document.
+      if (!report) {
+        output.replaceChildren();
+        sum.replaceChildren();
+      }
       fail(e);
     } finally {
       busy = false;
@@ -424,7 +440,7 @@ export function setupPrintability(options: {
     const r = report;
     const before = new Map(r.checks.map((c) => [c.code, c.count]));
     // A failed or empty change leaves no entry, and the message says so.
-    await step(t("printability.fixing"), async () => {
+    await step(id, t("printability.fixing"), async () => {
       const undo = await FIXES[id].apply(s, r);
       if (undo) applied.set(id, { ...undo, before });
     }, () => t(applied.has(id) ? "printability.fixDone" : `printability.fixNone.${id === "rotate" ? "rotate" : "any"}`));
@@ -434,7 +450,7 @@ export function setupPrintability(options: {
     const a = applied.get(id);
     if (!a || busy) return;
     applied.delete(id);
-    await step(t("printability.reverting"), () => a.revert(), () => t("printability.revertDone"));
+    await step(id, t("printability.reverting"), () => a.revert(), () => t("printability.revertDone"));
   }
 
   async function run() {
