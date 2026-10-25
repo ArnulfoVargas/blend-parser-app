@@ -1060,6 +1060,37 @@ mod tests {
         assert_eq!(p.rotation(), flipped);
     }
 
+    /// Flattening squashes the walls under the cut into lines; none may be left behind.
+    #[test]
+    fn a_flattened_base_leaves_no_degenerate_faces() {
+        let positions = vec![
+            [0., 0., 0.], [10., 0., 0.], [10., 10., 0.], [0., 10., 0.],
+            [0., 0., 10.], [10., 0., 10.], [10., 10., 10.], [0., 10., 10.],
+        ];
+        let tris = vec![
+            [0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4],
+            [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7],
+        ];
+        let part = Part {
+            name: "box".into(),
+            tri_loops: tris.clone(),
+            tri_source: vec![0; tris.len()],
+            sources: vec![ColorSource::Flat([0.8; 3])],
+            positions,
+            tris,
+            ..Default::default()
+        };
+        let mut p = Project::new(Scene { parts: vec![part], ..Default::default() }, 1);
+        for deep_clean in [false, true] {
+            p.set_mesh_ops(MeshOps { flatten_mm: 0.8, deep_clean, ..p.mesh_ops() });
+            let r = p.printability(crate::printability::Params::for_nozzle(0.4));
+            for code in ["degenerate", "openEdges", "nonManifoldEdges", "winding"] {
+                assert_eq!(r.checks.iter().find(|c| c.code == code).unwrap().count, 0, "{code}, deep clean {deep_clean}");
+            }
+            assert_eq!(p.preview().labels.len() * 9, p.preview().positions.len());
+        }
+    }
+
     #[test]
     fn a_model_only_stands_where_its_centre_is_over_its_footprint() {
         let square = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]];

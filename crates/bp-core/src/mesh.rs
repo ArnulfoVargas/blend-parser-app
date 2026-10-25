@@ -196,7 +196,94 @@ impl Mesh {
         if ops.drop_floating {
             work.drop_floating(1e-4 / scale);
         }
+        // Flattening squashes the walls under the cut into lines, and holes,
+        // simplifying and the cut leave slivers after the clean-up ran.
+        if ops.deep_clean || ops.flatten_mm > 0.0 {
+            Self::clear_slivers(&mut shape, &mut work, CLEAN_MM / scale);
+        }
         (shape, work)
+    }
+
+    /// Clears the slivers of `work` without opening it, as the printability
+    /// analysis sees it (vertices within `eps` are one). A triangle with two
+    /// corners together goes; a needle, its third corner on its longest edge,
+    /// gives that edge to the face across it, so both end up as two proper
+    /// triangles. `shape` gets the same changes, so both keep matching triangles.
+    fn clear_slivers(shape: &mut Self, work: &mut Self, eps: f32) {
+        let collapsed = |c: &[Vec3; 3]| (0..3).any(|k| geom::len(geom::sub(c[k], c[(k + 1) % 3])) <= eps);
+        let mut fixed = 0;
+        for (s, w) in shape.parts.iter_mut().zip(&mut work.parts) {
+            let keep: Vec<bool> = (0..w.tris.len()).map(|i| !collapsed(&w.corners(i))).collect();
+            fixed += keep.iter().filter(|&&k| !k).count();
+            s.retain(&keep);
+            w.retain(&keep);
+            let mut weld: HashMap<[i64; 3], u32> = HashMap::new();
+            let id: Vec<u32> = w
+                .positions
+                .iter()
+                .enumerate()
+                .map(|(i, p)| *weld.entry(p.map(|c| (c / eps).round() as i64)).or_insert(i as u32))
+                .collect();
+            let key = |a: u32, b: u32| (id[a as usize].min(id[b as usize]), id[a as usize].max(id[b as usize]));
+            // A flip can leave the next needle beside it; a few passes settle it.
+            for _ in 0..4 {
+                let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+                for (ti, t) in w.tris.iter().enumerate() {
+                    for k in 0..3 {
+                        edges.entry(key(t[k], t[(k + 1) % 3])).or_default().push(ti);
+                    }
+                }
+                let mut touched = vec![false; w.tris.len()];
+                let mut flips = 0;
+                for ti in 0..w.tris.len() {
+                    let c = w.corners(ti);
+                    if touched[ti] || geom::area(&c) > eps * eps || collapsed(&c) {
+                        continue;
+                    }
+                    let edge = |k: usize| geom::len(geom::sub(c[(k + 1) % 3], c[k]));
+                    let k = (0..3).max_by(|&i, &j| edge(i).total_cmp(&edge(j))).unwrap_or(0);
+                    let t = w.tris[ti];
+                    let apex = t[(k + 2) % 3];
+                    let faces = &edges[&key(t[k], t[(k + 1) % 3])];
+                    let [x, y] = faces[..] else { continue };
+                    let o = if x == ti { y } else { x };
+                    let ot = w.tris[o];
+                    // The face across has to run the edge the other way.
+                    let Some(m) = (0..3).find(|&m| id[ot[m] as usize] == id[t[(k + 1) % 3] as usize]
+                        && id[ot[(m + 1) % 3] as usize] == id[t[k] as usize])
+                    else {
+                        continue;
+                    };
+                    if touched[o] {
+                        continue;
+                    }
+                    let (b, a, d) = (ot[m], ot[(m + 1) % 3], ot[(m + 2) % 3]);
+                    let (pa, pb) = (w.positions[a as usize], w.positions[b as usize]);
+                    let ab = geom::sub(pb, pa);
+                    let along = geom::dot(geom::sub(w.positions[apex as usize], pa), ab) / geom::dot(ab, ab).max(f32::MIN_POSITIVE);
+                    for part in [&mut *s, &mut *w] {
+                        part.tris[ti] = [apex, a, d];
+                        part.tris[o] = [apex, d, b];
+                        if let Some(origin) = &mut part.origin {
+                            // Both halves lie on the face across, so they take its colour.
+                            let (src, bary) = origin[o];
+                            let (ba, bb, bd) = (bary[(m + 1) % 3], bary[m], bary[(m + 2) % 3]);
+                            let mid = geom::bary_in(&[ba, bb, bd], [1.0 - along, along, 0.0]);
+                            origin[ti] = (src, [mid, ba, bd]);
+                            origin[o] = (src, [mid, bd, bb]);
+                        }
+                    }
+                    touched[ti] = true;
+                    touched[o] = true;
+                    flips += 1;
+                }
+                fixed += flips;
+                if flips == 0 {
+                    break;
+                }
+            }
+        }
+        work.repair.degenerate_triangles += fixed;
     }
 
     /// Welds vertices that coincide (to a millionth of the model size), then

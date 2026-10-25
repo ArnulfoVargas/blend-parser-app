@@ -423,6 +423,7 @@ export const es = {
   "printability.fixHelp.removeSmall": "Corregir elimina las piezas sueltas de menos de {mm} mm de diagonal.",
   "printability.fixHelp.flattenBase": "Corregir aplana {mm} mm de la base para ampliar el apoyo.",
   "printability.fixNone.any": "La corrección no encontró nada que cambiar.",
+  "printability.fixSpent": "Su corrección ya está activa, aquí o a través de otra, y estos son los casos que no pudo resolver sin abrir la malla. Arréglalos en tu programa de modelado.",
   "printability.fixNone.rotate": "Ninguna orientación en la que el modelo se sostenga solo tiene claramente menos voladizo que la actual.",
   "printability.fixHelp.splitVertices": "Corregir quita caras sueltas y separa cada vértice compartido en uno por grupo de caras, a 0,02 mm entre sí.",
   "printability.fixHelp.dropFloating": "Corregir baja hasta la placa cada pieza que no toca la placa ni otra pieza apoyada.",

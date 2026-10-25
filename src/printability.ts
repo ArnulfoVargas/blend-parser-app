@@ -3,6 +3,7 @@ import { num, onLangChange, t, tKey } from "./i18n";
 import "./styles/printability.css";
 
 type Severity = PrintabilityCheck["severity"];
+type Tone = "ok" | "warn" | "error";
 
 /** Field, min, max. Bounds mirror `Params::valid` in bp-core. */
 const FIELDS: [keyof PrintabilityParams, number, number][] = [
@@ -149,6 +150,8 @@ export function setupPrintability(options: {
   const inputs = new Map<keyof PrintabilityParams, HTMLInputElement>();
   /** Fixes applied from this panel: how to take each back, and the counts before it. */
   const applied = new Map<string, Undo & { before: Map<string, number> }>();
+  /** Fixes that found nothing to change in this revision; their card says so instead of offering them again. */
+  const fruitless = new Set<string>();
   let report: PrintabilityReport | null = null;
   let outdated = false;
   let token = 0;
@@ -216,7 +219,7 @@ export function setupPrintability(options: {
     output.querySelectorAll<HTMLButtonElement>("[data-fix]").forEach((b) => (b.disabled = busy));
   }
 
-  function say(text: string, tone: "" | "ok" | "warn" | "error" = "") {
+  function say(text: string, tone: Tone | "" = "") {
     status.textContent = text;
     status.dataset.tone = tone;
   }
@@ -248,6 +251,7 @@ export function setupPrintability(options: {
     // Another file starts fresh; the same file edited says the old report is outdated.
     const sameFile = revision !== "" && s !== null && JSON.parse(revision)[0] === s.fileName;
     revision = next;
+    fruitless.clear();
     if (!sameFile) {
       report = null;
       outdated = false;
@@ -267,6 +271,8 @@ export function setupPrintability(options: {
     if (unit && c.threshold !== null) parts.push(t("printability.threshold", { n: value(c.threshold) }));
     return parts.join(" · ");
   }
+
+  const noneText = (id: string) => t(`printability.fixNone.${id === "rotate" ? "rotate" : "any"}`);
 
   function fixText(id: string, s: Summary, r: PrintabilityReport) {
     const mm = FIXES[id].mm?.(s, r);
@@ -299,8 +305,12 @@ export function setupPrintability(options: {
     } else {
       row.append(el("p", "help", tKey(`printability.help.${c.code}`)));
     }
-    const fixable = id && s && !done && c.severity !== "pass" && FIXES[id].available(s, r);
+    const open = id && s && !done && c.severity !== "pass";
+    const fixable = open && !fruitless.has(id) && FIXES[id].available(s, r);
     if (fixable) row.append(el("p", "pa-check__fix", fixText(id, s, r)));
+    // The outcome shows where it was asked for: the status line is above the cards, often out of view.
+    else if (open && fruitless.has(id)) row.append(el("p", "pa-check__note", noneText(id)));
+    else if (open) row.append(el("p", "pa-check__note", t("printability.fixSpent")));
 
     const actions = el("div", "pa-check__actions");
     if (done || fixable) {
@@ -348,7 +358,7 @@ export function setupPrintability(options: {
     }));
   }
 
-  function show(r: PrintabilityReport, message = "") {
+  function show(r: PrintabilityReport, message = "", tone: Tone = "ok") {
     report = r;
     outdated = false;
     markers(null, []);
@@ -367,7 +377,7 @@ export function setupPrintability(options: {
     const top = el("div", "pa-chips");
     chips(top, counts);
     chips(sum, counts);
-    say(message || (errors || warnings ? "" : t("printability.allClear")), message ? "ok" : "");
+    say(message || (errors || warnings ? "" : t("printability.allClear")), message ? tone : "");
 
     const context = el("p", "pa-context mono", t("printability.context", {
       printer: r.printer ?? s?.settings.printer ?? "",
@@ -407,7 +417,7 @@ export function setupPrintability(options: {
   }
 
   /** Runs `change` with the panel busy, then analyses what the document is now. */
-  async function step(id: string, text: string, change: () => Promise<unknown>, done: () => string) {
+  async function step(id: string, text: string, change: () => Promise<unknown>, done: () => [string, Tone]) {
     const params = read();
     if (!params || busy) return;
     busy = true;
@@ -418,7 +428,7 @@ export function setupPrintability(options: {
       prune(options.summary());
       const next = await api.analyzePrintability(params);
       token++;
-      show(next, done());
+      show(next, ...done());
       // The clicked button was replaced; keep the keyboard where it was without scrolling.
       output.querySelector<HTMLButtonElement>(`[data-fix="${id}"]`)?.focus({ preventScroll: true });
     } catch (e) {
@@ -445,14 +455,15 @@ export function setupPrintability(options: {
     await step(id, t("printability.fixing"), async () => {
       const undo = await FIXES[id].apply(s, r);
       if (undo) applied.set(id, { ...undo, before });
-    }, () => t(applied.has(id) ? "printability.fixDone" : `printability.fixNone.${id === "rotate" ? "rotate" : "any"}`));
+      else fruitless.add(id);
+    }, () => applied.has(id) ? [t("printability.fixDone"), "ok"] : [noneText(id), "warn"]);
   }
 
   async function revert(id: string) {
     const a = applied.get(id);
     if (!a || busy) return;
     applied.delete(id);
-    await step(id, t("printability.reverting"), () => a.revert(), () => t("printability.revertDone"));
+    await step(id, t("printability.reverting"), () => a.revert(), () => [t("printability.revertDone"), "ok"]);
   }
 
   async function run() {

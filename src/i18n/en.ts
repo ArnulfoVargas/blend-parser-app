@@ -419,6 +419,7 @@ export const en: Catalog = {
   "printability.fixHelp.removeSmall": "Fix removes loose pieces under {mm} mm across.",
   "printability.fixHelp.flattenBase": "Fix flattens {mm} mm of the base to widen its footprint.",
   "printability.fixNone.any": "The fix found nothing to change.",
+  "printability.fixSpent": "Its fix is already on, here or through another one, and these are what it could not resolve without opening the mesh. Fix them in your modelling software.",
   "printability.fixNone.rotate": "No orientation in which the model stands by itself has clearly less overhang than the current one.",
   "printability.fixHelp.splitVertices": "Fix removes stray faces and gives each shared vertex one copy per group of faces, 0.02 mm apart.",
   "printability.fixHelp.dropFloating": "Fix lowers onto the plate each piece that touches neither the plate nor another grounded piece.",
