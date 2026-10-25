@@ -154,6 +154,7 @@ pub async fn open_blend(
             flush: Default::default(),
             offset_mm: [0.0; 2],
             filaments: Default::default(),
+            kit: None,
         };
         // With colours from the inventory only, the model starts with spools the user has.
         if let Some(owned) = state.filaments.lock()?.inventory() {
@@ -664,30 +665,49 @@ pub async fn undo(app: AppHandle) -> CmdResult<Summary> {
     .await
 }
 
-/// One STL per colour in a ZIP, its colour list in `lang`. Returns how many colour files were written.
+/// The model split into solid pieces per colour, laid out on single-colour
+/// plates, with STLs and an assembly guide, all in one ZIP.
 #[tauri::command]
 pub async fn export_color_zip(
     app: AppHandle,
     path: String,
-    thickness_mm: f32,
-    main_solid: bool,
-    lang: String,
-) -> CmdResult<usize> {
-    in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
+    voxel_mm: f32,
+    depth_mm: f32,
+    core_slot: Option<u8>,
+    min_piece_mm3: f32,
+) -> CmdResult<dto::KitDto> {
+    in_range(voxel_mm, 0.2..=2.0, "error.kitDetailRange")?;
+    in_range(depth_mm, 0.0..=50.0, "error.kitDepthRange")?;
+    let handle = app.clone();
     with_doc(app, move |d, _| {
-        let pieces = d.project.color_pieces(thickness_mm, main_solid);
-        let colors = d.slot_colors();
-        let hexes: Vec<String> = pieces.iter().map(|p| bp_core::color::to_hex(colors[p.slot as usize])).collect();
-        let files: Vec<bp_3mf::ColorFile> = pieces
-            .iter()
-            .zip(&hexes)
-            .map(|(p, hex)| bp_3mf::ColorFile { hex, positions: &p.positions, tris: &p.tris, solid: p.solid })
-            .collect();
+        let emit = |key: &str| {
+            let _ = handle.emit("progress", ProgressDto { key: key.to_string(), name: String::new() });
+        };
+        emit("kitSplit");
+        let params = bp_core::SplitParams { voxel_mm, depth_mm, core_slot, min_piece_mm3: min_piece_mm3.max(0.0) };
+        d.kit = Some(bp_3mf::project_file::KitSettings {
+            voxel_mm,
+            depth_mm,
+            core_slot,
+            min_piece_mm3: params.min_piece_mm3,
+        });
+        let split = d.project.split_by_color(params);
+        if split.pieces.is_empty() {
+            return Err(AppError::new("error.kitEmpty"));
+        }
+        emit("kitPlates");
+        let kit = bp_core::kit::kit(split, d.printer.bed_mm());
+        emit("kitGuide");
+        // Each slot in the colour it prints, with its filament where one was picked.
+        let palette: Vec<String> = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+        let slots: Vec<_> =
+            d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let info = bp_3mf::KitInfo { name: &name, palette: &palette, slots: &slots, printer: &d.printer };
         let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
-        bp_3mf::write_color_zip(std::io::BufWriter::new(file), &name, &files, bp_3mf::ZipText::for_lang(&lang))
+        let s = bp_3mf::write_kit_zip(std::io::BufWriter::new(file), &kit, &info)
             .map_err(|e| AppError::with("error.zipWrite", json!({ "detail": e.to_string() })))?;
-        Ok(files.len())
+        Ok(dto::KitDto { pieces: s.pieces, plates: s.plates, oversize: s.oversize })
     })
     .await
 }

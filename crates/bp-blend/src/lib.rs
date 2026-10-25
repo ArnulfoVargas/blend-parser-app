@@ -461,25 +461,36 @@ mod tests {
         assert!(five.swaps.swaps <= ten.swaps.swaps);
         eprintln!("palette 5: {:?}", project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect::<Vec<_>>());
 
-        // One closed STL per colour.
-        let t = std::time::Instant::now();
-        let pieces = project.color_pieces(1.2, true);
-        let hexes: Vec<String> =
-            pieces.iter().map(|p| bp_core::color::to_hex(project.palette()[p.slot as usize])).collect();
-        let files: Vec<bp_3mf::ColorFile> = pieces
-            .iter()
-            .zip(&hexes)
-            .map(|(p, h)| bp_3mf::ColorFile { hex: h, positions: &p.positions, tris: &p.tris, solid: p.solid })
-            .collect();
-        let zip = std::env::temp_dir().join("blendparser-colores.zip");
-        bp_3mf::write_color_zip(std::fs::File::create(&zip).unwrap(), "spider", &files, &bp_3mf::ZipText::ES).unwrap();
-        eprintln!(
-            "color zip in {:?}: {} pieces, {} KB, tris {:?}",
-            t.elapsed(),
-            files.len(),
-            std::fs::metadata(&zip).unwrap().len() / 1024,
-            pieces.iter().map(|p| p.tris.len()).collect::<Vec<_>>()
-        );
-        assert!(!files.is_empty() && files.len() <= 5);
+        // Solid pieces per colour.
+        for (voxel_mm, depth_mm) in [(0.5, 0.0), (0.5, 3.0)] {
+            let t = std::time::Instant::now();
+            let params = bp_core::SplitParams { voxel_mm, depth_mm, ..Default::default() };
+            let split = project.split_by_color(params);
+            let closed = split.pieces.iter().filter(|p| bp_core::split::watertight(&p.tris)).count();
+            eprintln!(
+                "split {voxel_mm} mm, depth {depth_mm} in {:?}: voxel {:.2} mm, {} pieces ({closed} sealed), {} tris, per slot {:?}",
+                t.elapsed(),
+                split.voxel_mm,
+                split.pieces.len(),
+                split.pieces.iter().map(|p| p.tris.len()).sum::<usize>(),
+                (0..5).map(|s| split.pieces.iter().filter(|p| p.slot == s).count()).collect::<Vec<_>>()
+            );
+            assert_eq!(closed, split.pieces.len());
+
+            let t = std::time::Instant::now();
+            let kit = bp_core::kit::kit(split, bp_3mf::Printer::default().bed_mm());
+            let palette: Vec<String> = project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+            let info =
+                bp_3mf::KitInfo { name: "spider", palette: &palette, slots: &[], printer: &bp_3mf::Printer::default() };
+            let zip = std::env::temp_dir().join(format!("blendparser-piezas-{depth_mm}.zip"));
+            let summary = bp_3mf::write_kit_zip(std::fs::File::create(&zip).unwrap(), &kit, &info).unwrap();
+            eprintln!(
+                "kit zip in {:?}: {summary:?}, {} KB, {}",
+                t.elapsed(),
+                std::fs::metadata(&zip).unwrap().len() / 1024,
+                zip.display()
+            );
+            assert_eq!(summary.pieces, kit.pieces.len());
+        }
     }
 }

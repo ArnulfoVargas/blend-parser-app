@@ -37,6 +37,7 @@ fn save_with(p: &Project, path: &Path, filaments: Vec<(String, bp_3mf::filament:
         flush: vec![],
         offset_mm: [0.0; 2],
         filaments,
+        kit: None,
     };
     let file = std::fs::File::create(path).unwrap();
     bp_3mf::project_file::write(file, &serde_json::to_string(&settings).unwrap(), &p.to_bytes()).unwrap();

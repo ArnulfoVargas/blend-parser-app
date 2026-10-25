@@ -58,8 +58,12 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
 - Miniatura en el 3MF: el modelo con sus colores de filamento, dibujado por el visor
   (tres cuartos, de frente o como se ve; en Preferencias), para Bambu Studio, Bambu Handy y
   el explorador de archivos. Si el visor no puede dibujarla, el 3MF sale sin ella.
-- Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
-  dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
+- Exportar por color: divide el modelo en piezas **sólidas** (no cáscaras) que encajan entre sí.
+  Cada voxel interior toma el color de la superficie pintada más cercana, o solo hasta una
+  profundidad dada sobre un núcleo de un color; las migas se unen a su vecina. El `.zip` trae un
+  3MF con las piezas giradas sobre su cara más plana y acomodadas en placas de un solo color, un
+  STL por pieza y una guía de armado (`guia-de-armado.html` con imágenes de cada paso, e
+  `instrucciones.txt`).
 
 ## Perfiles de impresora en el 3MF
 
@@ -322,12 +326,14 @@ crates/
     optimize    Limpieza de islas de color por adyacencia
     estimate    Cambios de filamento por capa, con su sentido
     waste       Desperdicio: purga por par de colores, purga inicial y torre
-    split       Una pieza cerrada por color (cáscara o sólido completo)
+    split       Piezas sólidas por color: vóxeles, Voronoi de la superficie, tetraedros marchantes
+    kit         Orientación de cada pieza, acomodo en placas por color y orden de armado
+    render      Renderizador por software para las imágenes de la guía
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
-  bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa;
-              project_file: el contenedor .bpproj
+  bp-3mf/     Escritor del 3MF de Bambu (pintado o por placas), STL binario y ZIP con guía de armado;
+              plate: espacio en la placa; project_file: el contenedor .bpproj
   bp-cli/     blendparser-cli: conversión por lotes sin interfaz
 src-tauri/    Capa de aplicación: comandos, estado, malla en binario hacia la UI
 src/          Interfaz (TypeScript + three.js), diseño Dose

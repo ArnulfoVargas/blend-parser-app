@@ -35,6 +35,7 @@ pub fn save(doc: &Document, path: &str) -> CmdResult<()> {
                 doc.filaments.get(&hex).map(|f| (hex, f.clone()))
             })
             .collect(),
+        kit: doc.kit,
     };
     let json = serde_json::to_string_pretty(&settings).map_err(AppError::internal)?;
     let model = doc.project.to_bytes();
@@ -81,6 +82,7 @@ pub fn open(path: &str, store: &Store) -> CmdResult<Document> {
         flush: s.flush.into_iter().map(|(a, b, v)| ((a, b), v)).collect(),
         offset_mm: s.offset_mm,
         filaments: s.filaments.into_iter().collect(),
+        kit: s.kit,
     })
 }
 
@@ -116,6 +118,12 @@ mod tests {
             flush: [(("#E61A1A".to_string(), "#1A1AE6".to_string()), 321.0)].into_iter().collect(),
             offset_mm: [12.0, -3.5],
             filaments: Default::default(),
+            kit: Some(bp_3mf::project_file::KitSettings {
+                voxel_mm: 0.3,
+                depth_mm: 2.0,
+                core_slot: Some(1),
+                min_piece_mm3: 12.0,
+            }),
         }
     }
 
@@ -130,6 +138,7 @@ mod tests {
         assert_eq!(o.file_name, "q.blend");
         assert_eq!(o.offset_mm, [12.0, -3.5]);
         assert_eq!(o.flush, d.flush);
+        assert_eq!(o.kit, d.kit);
         assert_eq!(o.printer.profile.id, d.printer.profile.id);
         assert!(o.import_warnings.is_empty());
         assert_eq!(o.project.export_parts()[0].paint, d.project.export_parts()[0].paint);
