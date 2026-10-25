@@ -237,7 +237,7 @@ details.group[open] .group__sum { visibility: hidden; }
 .app.is-working .busybar { opacity: 1; }
 .app.is-working #viewport { opacity: 0.6; transition: opacity var(--dur-short) var(--ease-out); }
 
-.toast { position: fixed; inset: auto var(--space-md) var(--space-md) auto; margin: 0; border: 0; align-items: center; gap: var(--space-sm); max-width: min(520px, calc(100% - 2 * var(--space-md))); padding: var(--space-sm) var(--space-sm) var(--space-sm) var(--space-md); border-radius: var(--radius-input); background: var(--glint); color: var(--color-ink); box-shadow: 0 0 0 1px var(--color-accent), var(--shadow-lift); font-size: var(--text-sm); }
+.toast { position: fixed; inset: auto var(--space-md) var(--space-md) auto; z-index: var(--z-toast); margin: 0; border: 0; align-items: center; gap: var(--space-sm); max-width: min(520px, calc(100% - 2 * var(--space-md))); padding: var(--space-sm) var(--space-sm) var(--space-sm) var(--space-md); border-radius: var(--radius-input); background: var(--glint); color: var(--color-ink); box-shadow: 0 0 0 1px var(--color-accent), var(--shadow-lift); font-size: var(--text-sm); }
 .toast:popover-open { display: flex; }
 .toast p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .toast[data-kind="error"] { background: var(--color-error-soft); box-shadow: 0 0 0 1px var(--color-error), var(--shadow-lift); }

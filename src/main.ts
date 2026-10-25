@@ -85,12 +85,17 @@ let onToastAction: (() => void) | null = null;
 /** Hides the notice. */
 const hideToast = () => toastEl.matches(":popover-open") && toastEl.hidePopover();
 
-/** Shows the notice over the stage's corner. It is a popover, so it lands above any open dialog too. */
+/** Where the notice lives when no dialog is open. */
+const toastHome = toastEl.parentElement!;
+
+/** Shows the notice in the window's corner. It is a popover, so it lands above
+ *  any open dialog; it moves into that dialog, since a modal dialog makes
+ *  everything outside it inert and a click on the notice would reach the
+ *  dialog's backdrop instead. */
 function raiseToast() {
-  const r = $(".stage__view").getBoundingClientRect();
-  toastEl.style.right = `${Math.max(16, window.innerWidth - r.right + 16)}px`;
-  toastEl.style.bottom = `${Math.max(16, window.innerHeight - r.bottom + 16)}px`;
   hideToast();
+  const host = document.querySelector<HTMLDialogElement>("dialog[open]") ?? toastHome;
+  if (toastEl.parentElement !== host) host.append(toastEl);
   toastEl.showPopover();
 }
 
@@ -1418,6 +1423,14 @@ onLangChange(() => {
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });
+
+// A notice shown inside a dialog goes back home when the dialog closes, still showing.
+document.querySelectorAll("dialog").forEach((d) => d.addEventListener("close", () => {
+  if (toastEl.parentElement !== d) return;
+  const open = toastEl.matches(":popover-open");
+  toastHome.append(toastEl);
+  if (open) toastEl.showPopover();
+}));
 
 // A click outside a dialog's box closes it, like Esc. The press has to start
 // outside too, so dragging a selection out of a field does not close it.
