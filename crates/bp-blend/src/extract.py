@@ -14,8 +14,9 @@ OUT = sys.argv[sys.argv.index("--") + 1]
 os.makedirs(OUT, exist_ok=True)
 
 
-def progress(msg):
-    print("BP_PROGRESS " + msg, flush=True)
+def progress(key, name=""):
+    # A step key the app translates, then the name it mentions.
+    print("BP_PROGRESS " + key + (" " + name if name else ""), flush=True)
 
 
 def linear_to_srgb(c):
@@ -90,7 +91,7 @@ materials = {}
 def add_image(img):
     if img.name in image_index:
         return image_index[img.name]
-    progress("Leyendo textura " + img.name)
+    progress("texture", img.name)
     w, h = img.size
     px = np.empty(w * h * 4, dtype=np.float32)
     img.pixels.foreach_get(px)
@@ -107,7 +108,7 @@ def add_image(img):
 parts = []
 objs = [o for o in scene.objects if o.type == "MESH" and o.visible_get()]
 for oi, obj in enumerate(objs):
-    progress(f"Leyendo {obj.name}")
+    progress("object", obj.name)
     ev = obj.evaluated_get(depsgraph)
     me = ev.to_mesh()
     me.calc_loop_triangles()
@@ -153,7 +154,7 @@ for oi, obj in enumerate(objs):
                     uv_files.append(dump(f"p{oi}_uv{len(uv_files)}.bin", uv))
                 img_idx = add_image(src[1])
                 sources.append({"kind": "image", "image": img_idx, "uv": uv_index[layer.name]})
-                info = ("image", f"Textura de {src[1].size[0]} × {src[1].size[1]} px")
+                info = ("image", f"{src[1].size[0]}×{src[1].size[1]}")
         if src[0] == "vcol":
             name = src[1]
             if name not in col_index:
@@ -167,11 +168,11 @@ for oi, obj in enumerate(objs):
                 col_index[name] = len(col_files)
                 col_files.append(dump(f"p{oi}_col{len(col_files)}.bin", c.astype(np.float32)))
             sources.append({"kind": "vcol", "attr": col_index[name]})
-            info = ("vertex", f"Color de vértice «{name}»")
+            info = ("vertex", name)
         if src[0] == "flat":
             rgb = [float(v) for v in src[1]]
             sources.append({"kind": "flat", "rgb": rgb})
-            info = ("flat", "Color plano #%02X%02X%02X" % tuple(int(round(v * 255)) for v in rgb))
+            info = ("flat", "#%02X%02X%02X" % tuple(int(round(v * 255)) for v in rgb))
         m = materials.setdefault(label, {"name": label, "kind": info[0], "detail": info[1], "faces": 0})
         m["faces"] += int(faces_per_slot[si])
 
@@ -192,4 +193,4 @@ for oi, obj in enumerate(objs):
 
 with open(os.path.join(OUT, "scene.json"), "w", encoding="utf-8") as f:
     json.dump({"unit_mm": unit_mm, "images": images, "materials": list(materials.values()), "parts": parts}, f)
-progress("Escena extraída")
+progress("extracted")

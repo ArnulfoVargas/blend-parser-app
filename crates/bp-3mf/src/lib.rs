@@ -7,6 +7,11 @@ use std::io::{Seek, Write};
 
 use zip::write::SimpleFileOptions;
 
+pub mod plate;
+mod printer;
+pub use plate::{PlateCheck, Rect, Reserve};
+pub use printer::{canonical_id, catalog, Printer, PrinterProfile, NOZZLES};
+
 pub struct Part<'a> {
     pub name: &'a str,
     pub positions: &'a [[f32; 3]],
@@ -15,59 +20,32 @@ pub struct Part<'a> {
     pub paint: &'a [String],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Printer {
-    A1,
-    A1Mini,
-    X1Carbon,
-    P1S,
-}
-
-impl Printer {
-    pub fn from_id(id: &str) -> Self {
-        match id {
-            "A1M" => Printer::A1Mini,
-            "X1C" => Printer::X1Carbon,
-            "P1S" => Printer::P1S,
-            _ => Printer::A1,
-        }
-    }
-
-    /// (model, printer preset, process preset, filament preset suffix, plate centre)
-    fn presets(self) -> (&'static str, &'static str, &'static str, &'static str, (u32, u32)) {
-        match self {
-            Printer::A1 => {
-                ("Bambu Lab A1", "Bambu Lab A1 0.4 nozzle", "0.20mm Standard @BBL A1", "@BBL A1", (128, 128))
-            }
-            Printer::A1Mini => {
-                ("Bambu Lab A1 mini", "Bambu Lab A1 mini 0.4 nozzle", "0.20mm Standard @BBL A1M", "@BBL A1M", (90, 90))
-            }
-            Printer::X1Carbon => (
-                "Bambu Lab X1 Carbon",
-                "Bambu Lab X1 Carbon 0.4 nozzle",
-                "0.20mm Standard @BBL X1C",
-                "@BBL X1C",
-                (128, 128),
-            ),
-            Printer::P1S => {
-                ("Bambu Lab P1S", "Bambu Lab P1S 0.4 nozzle", "0.20mm Standard @BBL X1C", "@BBL X1C", (128, 128))
-            }
-        }
-    }
-
-    /// Printable area in millimetres.
-    pub fn bed_mm(self) -> (f32, f32) {
-        let c = self.presets().4;
-        (c.0 as f32 * 2.0, c.1 as f32 * 2.0)
-    }
-}
-
 pub struct Model<'a> {
     pub name: &'a str,
     pub parts: Vec<Part<'a>>,
     /// Filament colours as `#RRGGBB`, slot 1 first.
     pub filaments: Vec<String>,
     pub printer: Printer,
+    pub flush: Flush,
+    /// Layer height the user set; `None` keeps the process preset's.
+    pub layer_mm: Option<f32>,
+}
+
+/// How the slicer flushes between filaments, so it matches the waste estimate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flush {
+    /// mm³ from filament `i` to `j` at `i * n + j`; empty for 280 everywhere.
+    pub volumes_mm3: Vec<f32>,
+    pub multiplier: f32,
+    /// Flush into the model's infill as well as its supports.
+    pub into_infill: bool,
+    pub prime_mm3: f32,
+}
+
+impl Default for Flush {
+    fn default() -> Self {
+        Self { volumes_mm3: vec![], multiplier: 1.0, into_infill: false, prime_mm3: 20.0 }
+    }
 }
 
 const NS: &str = r#"xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" requiredextensions="p""#;
@@ -117,7 +95,7 @@ fn objects_xml(model: &Model) -> String {
 }
 
 fn main_xml(model: &Model, object_id: usize) -> String {
-    let (_, _, _, _, (cx, cy)) = model.printer.presets();
+    let (cx, cy) = model.printer.plate_centre();
     let mut comps = String::new();
     for i in 0..model.parts.len() {
         let _ = writeln!(
@@ -167,13 +145,28 @@ fn settings_xml(model: &Model, object_id: usize) -> String {
 }
 
 fn project_json(model: &Model) -> String {
-    let (printer_model, printer_id, process, suffix, _) = model.printer.presets();
+    let printer = &model.printer;
+    let nozzle = format!("{}", printer.nozzle_mm);
+    // Bambu Studio's own presets when it knows the printer; otherwise the
+    // volume and nozzle themselves, so any slicer that reads the config sees them.
+    let (printer_model, printer_id, process, filament) = match printer.presets() {
+        Some(p) => (p.printer_model.to_string(), p.printer_settings_id, p.process.to_string(), p.filament.to_string()),
+        None => (String::new(), printer.profile.name.clone(), String::new(), "Generic PLA".to_string()),
+    };
     let n = model.filaments.len().max(1);
     let rep = |v: &str| vec![v.to_string(); n];
-    let flush: Vec<String> = (0..n * n).map(|i| if i / n == i % n { "0" } else { "280" }.to_string()).collect();
-    serde_json::to_string_pretty(&serde_json::json!({
+    let (tower_x, tower_y) = printer.tower_origin();
+    let f = &model.flush;
+    let flush: Vec<String> = (0..n * n)
+        .map(|i| match f.volumes_mm3.get(i) {
+            _ if i / n == i % n => "0".to_string(),
+            Some(v) => format!("{}", v.round()),
+            None => "280".to_string(),
+        })
+        .collect();
+    let mut cfg = serde_json::json!({
         "filament_colour": model.filaments.iter().map(|c| format!("{}FF", c.to_uppercase())).collect::<Vec<_>>(),
-        "filament_settings_id": rep(&format!("Bambu PLA Basic {suffix}")),
+        "filament_settings_id": rep(&filament),
         "filament_type": rep("PLA"),
         "filament_minimal_purge_on_wipe_tower": rep("15"),
         "filament_flow_ratio": rep("0.98"),
@@ -186,15 +179,15 @@ fn project_json(model: &Model) -> String {
         "enable_prime_tower": if n > 1 { "1" } else { "0" },
         "prime_tower_width": "20",
         "prime_tower_brim_width": "3",
-        "prime_volume": "20",
-        "flush_into_infill": "0",
+        "prime_volume": format!("{}", f.prime_mm3.round()),
+        "flush_into_infill": if f.into_infill { "1" } else { "0" },
         "flush_into_objects": "0",
         "flush_into_support": "1",
-        "flush_multiplier": "1",
+        "flush_multiplier": format!("{}", (f.multiplier * 100.0).round() / 100.0),
         "flush_volumes_matrix": flush,
         "flush_volumes_vector": vec!["140"; 2 * n],
-        "wipe_tower_x": ["15"],
-        "wipe_tower_y": ["145"],
+        "wipe_tower_x": [format!("{tower_x}")],
+        "wipe_tower_y": [format!("{tower_y}")],
         "wipe_tower_rotation_angle": "0",
         "wipe_tower_no_sparse_layers": "0",
         "wipe_speed": "80%",
@@ -202,14 +195,28 @@ fn project_json(model: &Model) -> String {
         "print_sequence": "by layer",
         "printer_model": printer_model,
         "printer_settings_id": printer_id,
-        "nozzle_diameter": ["0.4"],
+        "nozzle_diameter": [nozzle],
         "print_settings_id": process,
         "layer_change_gcode": "; layer change\nG92 E0\n",
         "from": "project",
         "name": "project_settings",
         "version": "02.03.01.00"
-    }))
-    .unwrap_or_default()
+    });
+    if printer.profile.custom {
+        let [w, d, h] = printer.profile.volume_mm;
+        let obj = cfg.as_object_mut().expect("config is an object");
+        obj.insert(
+            "printable_area".into(),
+            serde_json::json!(["0x0", format!("{w}x0"), format!("{w}x{d}"), format!("0x{d}")]),
+        );
+        obj.insert("printable_height".into(), serde_json::json!(format!("{h}")));
+        obj.insert("layer_height".into(), serde_json::json!(format!("{}", printer.layer_mm())));
+    }
+    if let Some(l) = model.layer_mm {
+        let obj = cfg.as_object_mut().expect("config is an object");
+        obj.insert("layer_height".into(), serde_json::json!(format!("{}", (l * 1000.0).round() / 1000.0)));
+    }
+    serde_json::to_string_pretty(&cfg).unwrap_or_default()
 }
 
 const CONTENT_TYPES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n</Types>\n";
@@ -255,7 +262,13 @@ mod tests {
             name: "test & co",
             parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint }],
             filaments: vec!["#4d2720".into(), "#222222".into(), "#E8A461".into()],
-            printer: Printer::A1,
+            printer: Printer::default(),
+            flush: Flush {
+                volumes_mm3: (0..9).map(|i| i as f32 * 100.0).collect(),
+                multiplier: 1.5,
+                ..Default::default()
+            },
+            layer_mm: Some(0.16),
         };
         let mut buf = Cursor::new(Vec::new());
         write(&mut buf, &model).unwrap();
@@ -269,9 +282,60 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
         assert_eq!(v["filament_colour"][0], "#4D2720FF");
         assert_eq!(v["flush_volumes_matrix"].as_array().unwrap().len(), 9);
+        assert_eq!(v["flush_volumes_matrix"][0], "0");
+        assert_eq!(v["flush_volumes_matrix"][1], "100");
+        assert_eq!(v["flush_volumes_matrix"][3], "300");
+        assert_eq!(v["flush_multiplier"], "1.5");
+        assert_eq!(v["wipe_tower_x"][0], "15");
+        assert_eq!(v["layer_height"], "0.16");
         let mut main = String::new();
         zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut main).unwrap();
         assert!(main.contains("test &amp; co") && main.contains("objectid=\"2\""));
+        assert!(main.contains("1 0 0 0 1 0 0 0 1 128 128 0"));
+        assert_eq!(v["printer_settings_id"], "Bambu Lab A1 0.4 nozzle");
+        assert!(v.get("printable_area").is_none());
+    }
+
+    fn config(printer: Printer) -> serde_json::Value {
+        let model = Model {
+            name: "t",
+            parts: vec![],
+            filaments: vec!["#FFFFFF".into()],
+            printer,
+            flush: Flush::default(),
+            layer_mm: None,
+        };
+        serde_json::from_str(&project_json(&model)).unwrap()
+    }
+
+    #[test]
+    fn names_the_presets_for_the_nozzle() {
+        let x1c = catalog().into_iter().find(|p| p.id == "Bambu Lab X1 Carbon").unwrap();
+        let v = config(Printer::new(x1c, 0.6));
+        assert_eq!(v["printer_model"], "Bambu Lab X1 Carbon");
+        assert_eq!(v["printer_settings_id"], "Bambu Lab X1 Carbon 0.6 nozzle");
+        assert_eq!(v["print_settings_id"], "0.30mm Standard @BBL X1C 0.6 nozzle");
+        assert_eq!(v["filament_settings_id"][0], "Bambu PLA Basic @BBL X1C 0.6 nozzle");
+        assert_eq!(v["nozzle_diameter"][0], "0.6");
+    }
+
+    #[test]
+    fn custom_printer_carries_its_volume() {
+        let p = PrinterProfile {
+            id: "custom-1".into(),
+            vendor: String::new(),
+            name: "Ender 3".into(),
+            volume_mm: [220.0, 120.0, 250.0],
+            nozzles: vec![0.4, 0.6],
+            base: None,
+            custom: true,
+        };
+        let v = config(Printer::new(p, 0.6));
+        assert_eq!(v["printer_settings_id"], "Ender 3");
+        assert_eq!(v["printable_area"][2], "220x120");
+        assert_eq!(v["printable_height"], "250");
+        assert_eq!(v["layer_height"], "0.3");
+        assert_eq!(v["wipe_tower_y"][0], "80");
     }
 }
 
@@ -308,24 +372,64 @@ pub fn write_stl<W: Write>(out: &mut W, name: &str, positions: &[[f32; 3]], tris
     out.write_all(&buf)
 }
 
-/// A ZIP with one STL per colour plus `colores.txt` listing slot, colour and kind.
-pub fn write_color_zip<W: Write + Seek>(out: W, model_name: &str, files: &[ColorFile]) -> zip::result::ZipResult<()> {
+/// The words of the colour list inside the ZIP, in the user's language.
+pub struct ZipText {
+    pub index_file: &'static str,
+    /// Column heads: slot, colour, file.
+    pub columns: [&'static str; 3],
+    pub solid: &'static str,
+    pub footer: &'static str,
+}
+
+impl ZipText {
+    pub const ES: ZipText = ZipText {
+        index_file: "colores.txt",
+        columns: ["Ranura", "Color", "Archivo"],
+        solid: "(sólido completo)",
+        footer: "Cada color es una pieza cerrada. Las cáscaras siguen la superficie del modelo hacia dentro;\n\
+                 el sólido completo, si lo hay, es el modelo entero en el color principal.\n",
+    };
+    pub const EN: ZipText = ZipText {
+        index_file: "colors.txt",
+        columns: ["Slot", "Colour", "File"],
+        solid: "(full solid)",
+        footer: "Each colour is a closed piece. Shells follow the model's surface inwards;\n\
+                 the full solid, if there is one, is the whole model in the main colour.\n",
+    };
+
+    /// The text for a BCP 47 language tag; Spanish when there is none for it.
+    pub fn for_lang(lang: &str) -> &'static ZipText {
+        if lang.to_ascii_lowercase().starts_with("en") {
+            &Self::EN
+        } else {
+            &Self::ES
+        }
+    }
+}
+
+/// A ZIP with one STL per colour plus a list of slot, colour and kind.
+pub fn write_color_zip<W: Write + Seek>(
+    out: W,
+    model_name: &str,
+    files: &[ColorFile],
+    text: &ZipText,
+) -> zip::result::ZipResult<()> {
     let mut z = zip::ZipWriter::new(out);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut index = format!("{model_name}\n\nRanura  Color    Archivo\n");
+    let [slot, colour, file_head] = text.columns;
+    let mut index = format!("{model_name}\n\n{slot:<7} {colour:<8} {file_head}\n");
     for (i, f) in files.iter().enumerate() {
         let file = format!("{:02}_{}_{}.stl", i + 1, model_name, f.hex.trim_start_matches('#'));
-        let _ = writeln!(index, "{:<7} {}  {}{}", i + 1, f.hex, file, if f.solid { "  (sólido completo)" } else { "" });
+        let solid = if f.solid { format!("  {}", text.solid) } else { String::new() };
+        let _ = writeln!(index, "{:<7} {}  {}{}", i + 1, f.hex, file, solid);
         z.start_file(&file, opts)?;
         let mut stl = Vec::new();
         write_stl(&mut stl, &file, f.positions, f.tris)?;
         z.write_all(&stl)?;
     }
-    index.push_str(
-        "\nCada color es una pieza cerrada. Las cáscaras siguen la superficie del modelo hacia dentro;\n\
-         el sólido completo, si lo hay, es el modelo entero en el color principal.\n",
-    );
-    z.start_file("colores.txt", opts)?;
+    index.push('\n');
+    index.push_str(text.footer);
+    z.start_file(text.index_file, opts)?;
     z.write_all(index.as_bytes())?;
     z.finish()?;
     Ok(())
@@ -345,9 +449,12 @@ mod color_zip_tests {
             ColorFile { hex: "#E9A462", positions: &positions, tris: &tris[..2], solid: false },
         ];
         let mut buf = Cursor::new(Vec::new());
-        write_color_zip(&mut buf, "spider", &files).unwrap();
+        write_color_zip(&mut buf, "spider", &files, ZipText::for_lang("en-GB")).unwrap();
         let mut zip = zip::ZipArchive::new(Cursor::new(buf.into_inner())).unwrap();
         assert_eq!(zip.len(), 3);
+        let mut index = String::new();
+        zip.by_name("colors.txt").unwrap().read_to_string(&mut index).unwrap();
+        assert!(index.contains("Slot") && index.contains("(full solid)"), "{index}");
         let mut stl = Vec::new();
         zip.by_name("02_spider_E9A462.stl").unwrap().read_to_end(&mut stl).unwrap();
         assert_eq!(stl.len(), 84 + 2 * 50);

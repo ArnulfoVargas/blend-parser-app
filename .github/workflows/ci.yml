@@ -23,6 +23,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npm run check:i18n
       - run: node --test scripts/auto-release.test.mjs scripts/publish-signed-windows.test.mjs
       - run: npm run build
       - run: cargo fmt --all --check

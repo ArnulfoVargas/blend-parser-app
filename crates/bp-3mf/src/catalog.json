@@ -1,0 +1,2640 @@
+{
+ "source": "bambulab/BambuStudio@79df7ae309be398ed30c9f397c13c9911c2edc57",
+ "printers": [
+  {
+   "id": "Bambu Lab A1",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab A1",
+   "area": [
+    0,
+    0,
+    256,
+    256
+   ],
+   "height": 256,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab A1 0.2 nozzle",
+     "process": "0.10mm Standard @BBL A1 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL A1 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab A1 0.4 nozzle",
+     "process": "0.20mm Standard @BBL A1",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL A1"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab A1 0.6 nozzle",
+     "process": "0.30mm Strength @BBL A1 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL A1"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab A1 0.8 nozzle",
+     "process": "0.40mm Standard @BBL A1 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL A1"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab A1 mini",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab A1 mini",
+   "area": [
+    0,
+    0,
+    180,
+    180
+   ],
+   "height": 180,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab A1 mini 0.2 nozzle",
+     "process": "0.10mm Standard @BBL A1M 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL A1M 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab A1 mini 0.4 nozzle",
+     "process": "0.20mm Standard @BBL A1M",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL A1M"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab A1 mini 0.6 nozzle",
+     "process": "0.30mm Standard @BBL A1M 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL A1M"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab A1 mini 0.8 nozzle",
+     "process": "0.40mm Standard @BBL A1M 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL A1M"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab A2L",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab A2L",
+   "area": [
+    0,
+    0,
+    330,
+    320
+   ],
+   "height": 325,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab A2L 0.2 nozzle",
+     "process": "0.10mm Standard @BBL A2L 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL A2L 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab A2L 0.4 nozzle",
+     "process": "0.20mm Standard @BBL A2L",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL A2L 0.4 nozzle"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab A2L 0.6 nozzle",
+     "process": "0.30mm Standard @BBL A2L 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL A2L 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab A2L 0.8 nozzle",
+     "process": "0.40mm Standard @BBL A2L 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL A2L 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab H2S",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab H2S",
+   "area": [
+    0,
+    0,
+    340,
+    320
+   ],
+   "height": 340,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab H2S 0.2 nozzle",
+     "process": "0.10mm Standard @BBL H2S 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL H2S 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab H2S 0.4 nozzle",
+     "process": "0.20mm Standard @BBL H2S",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL H2S"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab H2S 0.6 nozzle",
+     "process": "0.30mm Standard @BBL H2S 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL H2S 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab H2S 0.8 nozzle",
+     "process": "0.40mm Standard @BBL H2S 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL H2S 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab P1P",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab P1P",
+   "area": [
+    0,
+    0,
+    256,
+    256
+   ],
+   "height": 250,
+   "exclude": [
+    [
+     0,
+     0,
+     18,
+     28
+    ]
+   ],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab P1P 0.2 nozzle",
+     "process": "0.10mm Standard @BBL P1P 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL P1P 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab P1P 0.4 nozzle",
+     "process": "0.20mm Standard @BBL P1P",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL P1P"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab P1P 0.6 nozzle",
+     "process": "0.30mm Standard @BBL P1P 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL P1P 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab P1P 0.8 nozzle",
+     "process": "0.40mm Standard @BBL P1P 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL P1P"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab P1S",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab P1S",
+   "area": [
+    0,
+    0,
+    256,
+    256
+   ],
+   "height": 250,
+   "exclude": [
+    [
+     0,
+     0,
+     18,
+     28
+    ]
+   ],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab P1S 0.2 nozzle",
+     "process": "0.10mm Standard @BBL X1C 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL X1C 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab P1S 0.4 nozzle",
+     "process": "0.20mm Standard @BBL X1C",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL P1S 0.4 nozzle"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab P1S 0.6 nozzle",
+     "process": "0.30mm Standard @BBL X1C 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL P1S 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab P1S 0.8 nozzle",
+     "process": "0.40mm Standard @BBL X1C 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL X1C 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab P2S",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab P2S",
+   "area": [
+    0,
+    0,
+    256,
+    256
+   ],
+   "height": 256,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab P2S 0.2 nozzle",
+     "process": "0.10mm Standard @BBL P2S 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL P2S 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab P2S 0.4 nozzle",
+     "process": "0.20mm Standard @BBL P2S",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL P2S"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab P2S 0.6 nozzle",
+     "process": "0.30mm Standard @BBL P2S 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL P2S 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab P2S 0.8 nozzle",
+     "process": "0.40mm Standard @BBL P2S 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL P2S 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab X1",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab X1",
+   "area": [
+    0,
+    0,
+    256,
+    256
+   ],
+   "height": 250,
+   "exclude": [
+    [
+     0,
+     0,
+     18,
+     28
+    ]
+   ],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab X1 0.2 nozzle",
+     "process": "0.10mm Standard @BBL X1C 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL X1C 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab X1 0.4 nozzle",
+     "process": "0.20mm Standard @BBL X1C",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL X1"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab X1 0.6 nozzle",
+     "process": "0.30mm Standard @BBL X1 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL X1"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab X1 0.8 nozzle",
+     "process": "0.40mm Standard @BBL X1 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL X1"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab X1 Carbon",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab X1 Carbon",
+   "area": [
+    0,
+    0,
+    256,
+    256
+   ],
+   "height": 250,
+   "exclude": [
+    [
+     0,
+     0,
+     18,
+     28
+    ]
+   ],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab X1 Carbon 0.2 nozzle",
+     "process": "0.10mm Standard @BBL X1C 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL X1C 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab X1 Carbon 0.4 nozzle",
+     "process": "0.20mm Standard @BBL X1C",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL X1C"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab X1 Carbon 0.6 nozzle",
+     "process": "0.30mm Standard @BBL X1C 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL X1C 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab X1 Carbon 0.8 nozzle",
+     "process": "0.40mm Standard @BBL X1C 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL X1C 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Bambu Lab X1E",
+   "vendor": "Bambu Lab",
+   "name": "Bambu Lab X1E",
+   "area": [
+    0,
+    0,
+    256,
+    256
+   ],
+   "height": 250,
+   "exclude": [
+    [
+     0,
+     0,
+     18,
+     28
+    ]
+   ],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Bambu Lab X1E 0.2 nozzle",
+     "process": "0.10mm Standard @BBL X1C 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Bambu PLA Basic @BBL X1C 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Bambu Lab X1E 0.4 nozzle",
+     "process": "0.20mm Standard @BBL X1C",
+     "layer": 0.2,
+     "filament": "Bambu PLA Basic @BBL X1C"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Bambu Lab X1E 0.6 nozzle",
+     "process": "0.30mm Standard @BBL X1C 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Bambu PLA Basic @BBL X1C"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Bambu Lab X1E 0.8 nozzle",
+     "process": "0.40mm Standard @BBL X1C 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Bambu PLA Basic @BBL X1C 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Anker M5",
+   "vendor": "Anker",
+   "name": "Anker M5",
+   "area": [
+    0,
+    0,
+    235,
+    235
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anker M5 0.4 nozzle",
+     "process": "0.20mm Standard @Anker",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anker"
+    }
+   ]
+  },
+  {
+   "id": "Anker M5C",
+   "vendor": "Anker",
+   "name": "Anker M5C",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anker M5C 0.4 nozzle",
+     "process": "0.20mm Standard @Anker",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anker"
+    }
+   ]
+  },
+  {
+   "id": "Anycubic 4Max Pro",
+   "vendor": "Anycubic",
+   "name": "Anycubic 4Max Pro",
+   "area": [
+    0,
+    0,
+    270,
+    205
+   ],
+   "height": 200,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anycubic 4Max Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Anycubic 4MaxPro",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anycubic"
+    }
+   ]
+  },
+  {
+   "id": "Anycubic 4Max Pro 2",
+   "vendor": "Anycubic",
+   "name": "Anycubic 4Max Pro 2",
+   "area": [
+    0,
+    0,
+    270,
+    210
+   ],
+   "height": 190,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anycubic 4Max Pro 2 0.4 nozzle",
+     "process": "0.20mm Standard @Anycubic 4MaxPro2",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anycubic"
+    }
+   ]
+  },
+  {
+   "id": "Anycubic Chiron",
+   "vendor": "Anycubic",
+   "name": "Anycubic Chiron",
+   "area": [
+    0,
+    0,
+    400,
+    400
+   ],
+   "height": 450,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anycubic Chiron 0.4 nozzle",
+     "process": "0.20mm Standard @Anycubic Chiron",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anycubic"
+    }
+   ]
+  },
+  {
+   "id": "Anycubic i3 Mega S",
+   "vendor": "Anycubic",
+   "name": "Anycubic i3 Mega S",
+   "area": [
+    0,
+    0,
+    210,
+    210
+   ],
+   "height": 205,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anycubic i3 Mega S 0.4 nozzle",
+     "process": "0.20mm Standard @Anycubic i3MegaS",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anycubic"
+    }
+   ]
+  },
+  {
+   "id": "Anycubic Kobra 2",
+   "vendor": "Anycubic",
+   "name": "Anycubic Kobra 2",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anycubic Kobra 2 0.4 nozzle",
+     "process": "0.20mm Standard @Anycubic Kobra2",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anycubic"
+    }
+   ]
+  },
+  {
+   "id": "Anycubic Kobra Max",
+   "vendor": "Anycubic",
+   "name": "Anycubic Kobra Max",
+   "area": [
+    0,
+    0,
+    400,
+    400
+   ],
+   "height": 450,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anycubic Kobra Max 0.4 nozzle",
+     "process": "0.20mm Standard @Anycubic KobraMax",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anycubic"
+    }
+   ]
+  },
+  {
+   "id": "Anycubic Kobra Plus",
+   "vendor": "Anycubic",
+   "name": "Anycubic Kobra Plus",
+   "area": [
+    0,
+    0,
+    300,
+    300
+   ],
+   "height": 350,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anycubic Kobra Plus 0.4 nozzle",
+     "process": "0.20mm Standard @Anycubic KobraPlus",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anycubic"
+    }
+   ]
+  },
+  {
+   "id": "Anycubic Vyper",
+   "vendor": "Anycubic",
+   "name": "Anycubic Vyper",
+   "area": [
+    0,
+    0,
+    250,
+    255
+   ],
+   "height": 265,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Anycubic Vyper 0.4 nozzle",
+     "process": "0.20mm Standard @Anycubic Vyper",
+     "layer": 0.2,
+     "filament": "Generic PLA @Anycubic"
+    }
+   ]
+  },
+  {
+   "id": "Creality CR-6 Max",
+   "vendor": "Creality",
+   "name": "Creality CR-6 Max",
+   "area": [
+    5,
+    5,
+    395,
+    395
+   ],
+   "height": 400,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Creality CR-6 Max 0.2 nozzle",
+     "process": "0.12mm Detail @Creality 0.2 CR-6",
+     "layer": 0.12,
+     "filament": "Generic PLA @Creality CR-6"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Creality CR-6 Max 0.4 nozzle",
+     "process": "0.20mm Normal @Creality CR-6",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality CR-6"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Creality CR-6 Max 0.6 nozzle",
+     "process": "0.20mm Normal @Creality CR-6 0.6",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality CR-6"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Creality CR-6 Max 0.8 nozzle",
+     "process": "0.32mm Normal @Creality CR-6 0.8",
+     "layer": 0.32,
+     "filament": "Generic PLA @Creality CR-6"
+    }
+   ]
+  },
+  {
+   "id": "Creality CR-6 SE",
+   "vendor": "Creality",
+   "name": "Creality CR-6 SE",
+   "area": [
+    5,
+    0,
+    230,
+    235
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Creality CR-6 SE 0.2 nozzle",
+     "process": "0.12mm Detail @Creality 0.2 CR-6",
+     "layer": 0.12,
+     "filament": "Generic PLA @Creality CR-6"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Creality CR-6 SE 0.4 nozzle",
+     "process": "0.20mm Normal @Creality CR-6",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality CR-6"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Creality CR-6 SE 0.6 nozzle",
+     "process": "0.20mm Normal @Creality CR-6 0.6",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality CR-6"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Creality CR-6 SE 0.8 nozzle",
+     "process": "0.32mm Normal @Creality CR-6 0.8",
+     "layer": 0.32,
+     "filament": "Generic PLA @Creality CR-6"
+    }
+   ]
+  },
+  {
+   "id": "Creality CR-10 Max",
+   "vendor": "Creality",
+   "name": "Creality CR-10 Max",
+   "area": [
+    0,
+    0,
+    450,
+    450
+   ],
+   "height": 470,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality CR-10 Max 0.4 nozzle",
+     "process": "0.20mm Standard @Creality CR10Max",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality CR-10 V2",
+   "vendor": "Creality",
+   "name": "Creality CR-10 V2",
+   "area": [
+    0,
+    0,
+    300,
+    300
+   ],
+   "height": 400,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality CR-10 V2 0.4 nozzle",
+     "process": "0.20mm Standard @Creality CR10V2",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-3 S1",
+   "vendor": "Creality",
+   "name": "Creality Ender-3 S1",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 270,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-3 S1 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender3S1",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-3 S1 Pro",
+   "vendor": "Creality",
+   "name": "Creality Ender-3 S1 Pro",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 270,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-3 S1 Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender3S1Pro",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-3 V2",
+   "vendor": "Creality",
+   "name": "Creality Ender-3 V2",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-3 V2 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender3V2",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-3 V3",
+   "vendor": "Creality",
+   "name": "Creality Ender-3 V3",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-3 V3 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender3V3",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Creality Ender-3 V3 0.6 nozzle",
+     "process": "0.30mm Standard @Creality Ender3V3 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-3 V3 KE",
+   "vendor": "Creality",
+   "name": "Creality Ender-3 V3 KE",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 245,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-3 V3 KE 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender3V3KE",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-3 V3 Plus",
+   "vendor": "Creality",
+   "name": "Creality Ender-3 V3 Plus",
+   "area": [
+    0,
+    0,
+    300,
+    300
+   ],
+   "height": 330,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-3 V3 Plus 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender3V3Plus",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Creality Ender-3 V3 Plus 0.6 nozzle",
+     "process": "0.30mm Standard @Creality Ender3V3Plus 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-5",
+   "vendor": "Creality",
+   "name": "Creality Ender-5",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 300,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-5 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender5",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-5 Plus",
+   "vendor": "Creality",
+   "name": "Creality Ender-5 Plus",
+   "area": [
+    0,
+    0,
+    350,
+    350
+   ],
+   "height": 400,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-5 Plus 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender5Plus",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-5 S1",
+   "vendor": "Creality",
+   "name": "Creality Ender-5 S1",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 300,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-5 S1 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender5S1",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-5S",
+   "vendor": "Creality",
+   "name": "Creality Ender-5S",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 300,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-5S 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender5S",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality Ender-6",
+   "vendor": "Creality",
+   "name": "Creality Ender-6",
+   "area": [
+    0,
+    0,
+    250,
+    250
+   ],
+   "height": 400,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality Ender-6 0.4 nozzle",
+     "process": "0.20mm Standard @Creality Ender6",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality K1",
+   "vendor": "Creality",
+   "name": "Creality K1",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality K1 0.4 nozzle",
+     "process": "0.20mm Standard @Creality K1 0.4 nozzle",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Creality K1 0.6 nozzle",
+     "process": "0.30mm Standard @Creality K1 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality K1 Max",
+   "vendor": "Creality",
+   "name": "Creality K1 Max",
+   "area": [
+    0,
+    0,
+    300,
+    300
+   ],
+   "height": 300,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality K1 Max 0.4 nozzle",
+     "process": "0.20mm Standard @Creality K1Max 0.4 nozzle",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Creality K1 Max 0.6 nozzle",
+     "process": "0.30mm Standard @Creality K1Max 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Creality"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Creality K1 0.8 nozzle",
+     "process": "0.40mm Standard @Creality K1 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Creality K1C",
+   "vendor": "Creality",
+   "name": "Creality K1C",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Creality K1C 0.4 nozzle",
+     "process": "0.20mm Standard @Creality K1C",
+     "layer": 0.2,
+     "filament": "Generic PLA @Creality"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Creality K1C 0.6 nozzle",
+     "process": "0.30mm Standard @Creality K1C 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Creality"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Creality K1C 0.8 nozzle",
+     "process": "0.40mm Standard @Creality K1C 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Creality"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune",
+   "area": [
+    0,
+    0,
+    210,
+    210
+   ],
+   "height": 200,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 2",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 2",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 2 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune2",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 2S",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 2S",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 2S 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune2S",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 3",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 3",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 280,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 3 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune3",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 3 Max",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 3 Max",
+   "area": [
+    0,
+    0,
+    420,
+    420
+   ],
+   "height": 500,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 3 Max 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune3Max",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 3 Plus",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 3 Plus",
+   "area": [
+    0,
+    0,
+    320,
+    320
+   ],
+   "height": 400,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 3 Plus 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune3Plus",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 3 Pro",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 3 Pro",
+   "area": [
+    0,
+    0,
+    225,
+    225
+   ],
+   "height": 280,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 3 Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune3Pro",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 4",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 4",
+   "area": [
+    0,
+    0,
+    225,
+    225
+   ],
+   "height": 265,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Elegoo Neptune 4 0.2 nozzle",
+     "process": "0.10mm Standard @Elegoo Neptune4 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 4 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune4 0.4 nozzle",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Elegoo Neptune 4 0.6 nozzle",
+     "process": "0.30mm Standard @Elegoo Neptune4 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Elegoo Neptune 4 0.8 nozzle",
+     "process": "0.40mm Standard @Elegoo Neptune4 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 4 Max",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 4 Max",
+   "area": [
+    0,
+    0,
+    420,
+    420
+   ],
+   "height": 480,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Elegoo Neptune 4 Max 0.2 nozzle",
+     "process": "0.10mm Standard @Elegoo Neptune4Max 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 4 Max 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune4Max 0.4 nozzle",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Elegoo Neptune 4 Max 0.6 nozzle",
+     "process": "0.30mm Standard @Elegoo Neptune4Max 0.6 nozzle",
+     "layer": 0.3,
+     "filament": null
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Elegoo Neptune 4 Max 0.8 nozzle",
+     "process": "0.30mm Standard @Elegoo Neptune4Max 0.6 nozzle",
+     "layer": 0.3,
+     "filament": null
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 4 Plus",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 4 Plus",
+   "area": [
+    0,
+    0,
+    320,
+    320
+   ],
+   "height": 385,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Elegoo Neptune 4 Plus 0.2 nozzle",
+     "process": "0.10mm Standard @Elegoo Neptune4 Plus 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 4 Plus 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune4 Plus 0.4 nozzle",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Elegoo Neptune 4 Plus 0.6 nozzle",
+     "process": "0.30mm Standard @Elegoo Neptune4 Plus 0.6 nozzle",
+     "layer": 0.3,
+     "filament": null
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Elegoo Neptune 4 Plus 0.8 nozzle",
+     "process": "0.40mm Standard @Elegoo Neptune4 Plus 0.8 nozzle",
+     "layer": 0.4,
+     "filament": null
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune 4 Pro",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune 4 Pro",
+   "area": [
+    0,
+    0,
+    235,
+    230
+   ],
+   "height": 265,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Elegoo Neptune 4 Pro 0.2 nozzle",
+     "process": null,
+     "layer": null,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune 4 Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo Neptune4Pro 0.4 nozzle",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Elegoo Neptune 4 Pro 0.6 nozzle",
+     "process": "0.30mm Standard @Elegoo Neptune4Pro 0.6 nozzle",
+     "layer": 0.3,
+     "filament": null
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Elegoo Neptune 4 Pro 0.8 nozzle",
+     "process": "0.40mm Standard @Elegoo Neptune4Pro 0.8 nozzle",
+     "layer": 0.4,
+     "filament": null
+    }
+   ]
+  },
+  {
+   "id": "Elegoo Neptune X",
+   "vendor": "Elegoo",
+   "name": "Elegoo Neptune X",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 300,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Elegoo Neptune X 0.4 nozzle",
+     "process": "0.20mm Standard @Elegoo NeptuneX",
+     "layer": 0.2,
+     "filament": "Generic PLA @Elegoo"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A10 M",
+   "vendor": "Geeetech",
+   "name": "Geeetech A10 M",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A10 M 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A10 Pro",
+   "vendor": "Geeetech",
+   "name": "Geeetech A10 Pro",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech A10 Pro 0.2 nozzle",
+     "process": "0.10mm Standard @Geeetech common 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A10 Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech A10 Pro 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech common 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech A10 Pro 0.8 nozzle",
+     "process": "0.40mm Standard @Geeetech common 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A10 T",
+   "vendor": "Geeetech",
+   "name": "Geeetech A10 T",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A10 T 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A20",
+   "vendor": "Geeetech",
+   "name": "Geeetech A20",
+   "area": [
+    0,
+    0,
+    250,
+    250
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech A20 0.2 nozzle",
+     "process": "0.10mm Standard @Geeetech common 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A20 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech A20 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech common 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech A20 0.8 nozzle",
+     "process": "0.40mm Standard @Geeetech common 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A20 M",
+   "vendor": "Geeetech",
+   "name": "Geeetech A20 M",
+   "area": [
+    0,
+    0,
+    250,
+    250
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A20 M 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A20 T",
+   "vendor": "Geeetech",
+   "name": "Geeetech A20 T",
+   "area": [
+    0,
+    0,
+    250,
+    250
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A20 T 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A30 M",
+   "vendor": "Geeetech",
+   "name": "Geeetech A30 M",
+   "area": [
+    0,
+    0,
+    320,
+    320
+   ],
+   "height": 420,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A30 M 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A30 Pro",
+   "vendor": "Geeetech",
+   "name": "Geeetech A30 Pro",
+   "area": [
+    0,
+    0,
+    320,
+    320
+   ],
+   "height": 420,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech A30 Pro 0.2 nozzle",
+     "process": "0.10mm Standard @Geeetech common 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A30 Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech A30 Pro 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech common 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech A30 Pro 0.8 nozzle",
+     "process": "0.40mm Standard @Geeetech common 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech A30 T",
+   "vendor": "Geeetech",
+   "name": "Geeetech A30 T",
+   "area": [
+    0,
+    0,
+    320,
+    320
+   ],
+   "height": 420,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech A30 T 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech M1",
+   "vendor": "Geeetech",
+   "name": "Geeetech M1",
+   "area": [
+    0,
+    0,
+    105,
+    105
+   ],
+   "height": 95,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech M1 0.2 nozzle",
+     "process": "0.10mm Standard @Geeetech M1 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech M1 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech M1",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech M1 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech M1 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech M1 0.8 nozzle",
+     "process": "0.44mm Draft @Geeetech M1 0.8 nozzle",
+     "layer": 0.44,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech Mizar",
+   "vendor": "Geeetech",
+   "name": "Geeetech Mizar",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech Mizar 0.2 nozzle",
+     "process": "0.10mm Standard @Geeetech common 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech Mizar 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech Mizar 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech common 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech Mizar 0.8 nozzle",
+     "process": "0.40mm Standard @Geeetech common 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech Mizar M",
+   "vendor": "Geeetech",
+   "name": "Geeetech Mizar M",
+   "area": [
+    0,
+    0,
+    255,
+    255
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech Mizar M 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech Mizar Max",
+   "vendor": "Geeetech",
+   "name": "Geeetech Mizar Max",
+   "area": [
+    0,
+    0,
+    320,
+    320
+   ],
+   "height": 400,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech Mizar Max 0.2 nozzle",
+     "process": "0.10mm Standard @Geeetech common 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech Mizar Max 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech Mizar Max 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech common 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech Mizar Max 0.8 nozzle",
+     "process": "0.40mm Standard @Geeetech common 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech Mizar Pro",
+   "vendor": "Geeetech",
+   "name": "Geeetech Mizar Pro",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech Mizar Pro 0.2 nozzle",
+     "process": "0.10mm Standard @Geeetech common 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech Mizar Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech Mizar Pro 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech common 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech Mizar Pro 0.8 nozzle",
+     "process": "0.40mm Standard @Geeetech common 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech Mizar S",
+   "vendor": "Geeetech",
+   "name": "Geeetech Mizar S",
+   "area": [
+    0,
+    0,
+    255,
+    255
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech Mizar S 0.2 nozzle",
+     "process": "0.10mm Standard @Geeetech common 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech Mizar S 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech common",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech Mizar S 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech common 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech Mizar S 0.8 nozzle",
+     "process": "0.40mm Standard @Geeetech common 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Geeetech"
+    }
+   ]
+  },
+  {
+   "id": "Geeetech Thunder",
+   "vendor": "Geeetech",
+   "name": "Geeetech Thunder",
+   "area": [
+    0,
+    0,
+    250,
+    250
+   ],
+   "height": 260,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Geeetech Thunder 0.2 nozzle",
+     "process": "0.10mm Fine @Geeetech Thunder",
+     "layer": 0.1,
+     "filament": "Generic PLA @Geeetech_FastSpeed"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Geeetech Thunder 0.4 nozzle",
+     "process": "0.20mm Standard @Geeetech Thunder",
+     "layer": 0.2,
+     "filament": "Generic PLA @Geeetech_FastSpeed"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Geeetech Thunder 0.6 nozzle",
+     "process": "0.30mm Standard @Geeetech Thunder 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Geeetech_FastSpeed"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Geeetech Thunder 0.8 nozzle",
+     "process": "0.44mm Draft @Geeetech Thunder 0.8 nozzle",
+     "layer": 0.44,
+     "filament": "Generic PLA @Geeetech_FastSpeed"
+    }
+   ]
+  },
+  {
+   "id": "Prusa MINI",
+   "vendor": "Prusa",
+   "name": "Prusa MINI",
+   "area": [
+    0,
+    0,
+    180,
+    180
+   ],
+   "height": 180,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Prusa MINI 0.4 nozzle",
+     "process": "0.20mm Standard @MINI",
+     "layer": 0.2,
+     "filament": "Generic PLA @Prusa"
+    }
+   ]
+  },
+  {
+   "id": "Prusa MK3S",
+   "vendor": "Prusa",
+   "name": "Prusa MK3S",
+   "area": [
+    0,
+    0,
+    250,
+    210
+   ],
+   "height": 210,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Prusa MK3S 0.4 nozzle",
+     "process": "0.20mm Standard @MK3S",
+     "layer": 0.2,
+     "filament": "Generic PLA @Prusa"
+    }
+   ]
+  },
+  {
+   "id": "Qidi Q1 Pro",
+   "vendor": "Qidi",
+   "name": "Qidi Q1 Pro",
+   "area": [
+    0,
+    0,
+    245,
+    245
+   ],
+   "height": 240,
+   "exclude": [
+    [
+     25,
+     240,
+     245,
+     245
+    ]
+   ],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Qidi Q1 Pro 0.2 nozzle",
+     "process": "0.10mm Standard @Qidi Q1 Pro 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Qidi Q1 Pro 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Qidi Q1 Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Qidi Q1 Pro",
+     "layer": 0.2,
+     "filament": "Generic PLA @Qidi Q1 Pro 0.4 nozzle"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Qidi Q1 Pro 0.6 nozzle",
+     "process": "0.30mm Standard @Qidi Q1 Pro 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Qidi Q1 Pro 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Qidi Q1 Pro 0.8 nozzle",
+     "process": "0.40mm Standard @Qidi Q1 Pro 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Qidi Q1 Pro 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Qidi X-CF Pro",
+   "vendor": "Qidi",
+   "name": "Qidi X-CF Pro",
+   "area": [
+    0,
+    0,
+    300,
+    250
+   ],
+   "height": 300,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Qidi X-CF Pro 0.4 nozzle",
+     "process": "0.20mm Standard @Qidi XCFPro",
+     "layer": 0.2,
+     "filament": "Generic PLA @Qidi"
+    }
+   ]
+  },
+  {
+   "id": "Qidi X-Max",
+   "vendor": "Qidi",
+   "name": "Qidi X-Max",
+   "area": [
+    0,
+    0,
+    300,
+    250
+   ],
+   "height": 300,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Qidi X-Max 0.4 nozzle",
+     "process": "0.20mm Standard @Qidi XMax",
+     "layer": 0.2,
+     "filament": "Generic PLA @Qidi"
+    }
+   ]
+  },
+  {
+   "id": "Qidi X-Max 3",
+   "vendor": "Qidi",
+   "name": "Qidi X-Max 3",
+   "area": [
+    0,
+    0,
+    325,
+    325
+   ],
+   "height": 315,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Qidi X-Max 3 0.2 nozzle",
+     "process": "0.10mm Standard @Qidi XMax3 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Qidi 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Qidi X-Max 3 0.4 nozzle",
+     "process": "0.20mm Standard @Qidi XMax3",
+     "layer": 0.2,
+     "filament": "Generic PLA @Qidi"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Qidi X-Max 3 0.6 nozzle",
+     "process": "0.30mm Standard @Qidi XMax3 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Qidi 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Qidi X-Max 3 0.8 nozzle",
+     "process": "0.40mm Standard @Qidi XMax3 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Qidi 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Qidi X-Plus",
+   "vendor": "Qidi",
+   "name": "Qidi X-Plus",
+   "area": [
+    0,
+    0,
+    270,
+    200
+   ],
+   "height": 200,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Qidi X-Plus 0.4 nozzle",
+     "process": "0.20mm Standard @Qidi XPlus",
+     "layer": 0.2,
+     "filament": "Generic PLA @Qidi"
+    }
+   ]
+  },
+  {
+   "id": "Qidi X-Plus 3",
+   "vendor": "Qidi",
+   "name": "Qidi X-Plus 3",
+   "area": [
+    0,
+    0,
+    280,
+    280
+   ],
+   "height": 270,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Qidi X-Plus 3 0.2 nozzle",
+     "process": "0.10mm Standard @Qidi XPlus3 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Qidi 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Qidi X-Plus 3 0.4 nozzle",
+     "process": "0.20mm Standard @Qidi XPlus3",
+     "layer": 0.2,
+     "filament": "Generic PLA @Qidi"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Qidi X-Plus 3 0.6 nozzle",
+     "process": "0.30mm Standard @Qidi XPlus3 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Qidi 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Qidi X-Plus 3 0.8 nozzle",
+     "process": "0.40mm Standard @Qidi XPlus3 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Qidi 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Qidi X-Plus 4",
+   "vendor": "Qidi",
+   "name": "Qidi X-Plus 4",
+   "area": [
+    0,
+    0,
+    305,
+    305
+   ],
+   "height": 280,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Qidi X-Plus 4 0.2 nozzle",
+     "process": "0.10mm Standard @Qidi XPlus4 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Qidi X-Plus 4 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Qidi X-Plus 4 0.4 nozzle",
+     "process": "0.20mm Standard @Qidi XPlus4",
+     "layer": 0.2,
+     "filament": "Generic PLA @Qidi X-Plus 4 0.4 nozzle"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Qidi X-Plus 4 0.6 nozzle",
+     "process": "0.30mm Standard @Qidi XPlus4 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Qidi X-Plus 4 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Qidi X-Plus 4 0.8 nozzle",
+     "process": "0.40mm Standard @Qidi XPlus4 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Qidi X-Plus 4 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Qidi X-Smart 3",
+   "vendor": "Qidi",
+   "name": "Qidi X-Smart 3",
+   "area": [
+    0,
+    0,
+    175,
+    180
+   ],
+   "height": 170,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.2,
+     "printer": "Qidi X-Smart 3 0.2 nozzle",
+     "process": "0.10mm Standard @Qidi XSmart3 0.2 nozzle",
+     "layer": 0.1,
+     "filament": "Generic PLA @Qidi 0.2 nozzle"
+    },
+    {
+     "diameter": 0.4,
+     "printer": "Qidi X-Smart 3 0.4 nozzle",
+     "process": "0.20mm Standard @Qidi XSmart3",
+     "layer": 0.2,
+     "filament": "Generic PLA @Qidi"
+    },
+    {
+     "diameter": 0.6,
+     "printer": "Qidi X-Smart 3 0.6 nozzle",
+     "process": "0.30mm Standard @Qidi XSmart3 0.6 nozzle",
+     "layer": 0.3,
+     "filament": "Generic PLA @Qidi 0.6 nozzle"
+    },
+    {
+     "diameter": 0.8,
+     "printer": "Qidi X-Smart 3 0.8 nozzle",
+     "process": "0.40mm Standard @Qidi XSmart3 0.8 nozzle",
+     "layer": 0.4,
+     "filament": "Generic PLA @Qidi 0.8 nozzle"
+    }
+   ]
+  },
+  {
+   "id": "Tronxy X5SA 400 Marlin Firmware",
+   "vendor": "Tronxy",
+   "name": "Tronxy X5SA 400 Marlin Firmware",
+   "area": [
+    0,
+    0,
+    400,
+    400
+   ],
+   "height": 400,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Tronxy X5SA 400 0.4 nozzle",
+     "process": "0.20mm Standard @Tronxy",
+     "layer": 0.2,
+     "filament": "Generic PLA @Tronxy"
+    }
+   ]
+  },
+  {
+   "id": "Troodon 2.0 - Klipper",
+   "vendor": "Vivedino",
+   "name": "Troodon 2.0 - Klipper",
+   "area": [
+    0,
+    0,
+    350,
+    350
+   ],
+   "height": 330,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Troodon 2.0 Klipper 0.4 nozzle",
+     "process": "0.20mm Standard @Troodon2",
+     "layer": 0.2,
+     "filament": "Generic PLA @Troodon"
+    }
+   ]
+  },
+  {
+   "id": "Troodon 2.0 - RRF",
+   "vendor": "Vivedino",
+   "name": "Troodon 2.0 - RRF",
+   "area": [
+    0,
+    0,
+    350,
+    350
+   ],
+   "height": 330,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Troodon 2.0 RRF 0.4 nozzle",
+     "process": "0.20mm Standard @Troodon2",
+     "layer": 0.2,
+     "filament": "Generic PLA @Troodon"
+    }
+   ]
+  },
+  {
+   "id": "Voron 0.1",
+   "vendor": "Voron",
+   "name": "Voron 0.1",
+   "area": [
+    0,
+    0,
+    120,
+    120
+   ],
+   "height": 120,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Voron 0.1 0.4 nozzle",
+     "process": "0.20mm Standard @Voron",
+     "layer": 0.2,
+     "filament": "Generic PLA @Voron"
+    }
+   ]
+  },
+  {
+   "id": "Voron 2.4 250",
+   "vendor": "Voron",
+   "name": "Voron 2.4 250",
+   "area": [
+    0,
+    0,
+    250,
+    250
+   ],
+   "height": 225,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Voron 2.4 250 0.4 nozzle",
+     "process": "0.20mm Standard @Voron",
+     "layer": 0.2,
+     "filament": "Generic PLA @Voron"
+    }
+   ]
+  },
+  {
+   "id": "Voron 2.4 300",
+   "vendor": "Voron",
+   "name": "Voron 2.4 300",
+   "area": [
+    0,
+    0,
+    300,
+    300
+   ],
+   "height": 275,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Voron 2.4 300 0.4 nozzle",
+     "process": "0.20mm Standard @Voron",
+     "layer": 0.2,
+     "filament": "Generic PLA @Voron"
+    }
+   ]
+  },
+  {
+   "id": "Voron 2.4 350",
+   "vendor": "Voron",
+   "name": "Voron 2.4 350",
+   "area": [
+    0,
+    0,
+    350,
+    350
+   ],
+   "height": 325,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Voron 2.4 350 0.4 nozzle",
+     "process": "0.20mm Standard @Voron",
+     "layer": 0.2,
+     "filament": "Generic PLA @Voron"
+    }
+   ]
+  },
+  {
+   "id": "Voron Trident 250",
+   "vendor": "Voron",
+   "name": "Voron Trident 250",
+   "area": [
+    0,
+    0,
+    250,
+    250
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Voron Trident 250 0.4 nozzle",
+     "process": "0.20mm Standard @Voron",
+     "layer": 0.2,
+     "filament": "Generic PLA @Voron"
+    }
+   ]
+  },
+  {
+   "id": "Voron Trident 300",
+   "vendor": "Voron",
+   "name": "Voron Trident 300",
+   "area": [
+    0,
+    0,
+    300,
+    300
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Voron Trident 300 0.4 nozzle",
+     "process": "0.20mm Standard @Voron",
+     "layer": 0.2,
+     "filament": "Generic PLA @Voron"
+    }
+   ]
+  },
+  {
+   "id": "Voron Trident 350",
+   "vendor": "Voron",
+   "name": "Voron Trident 350",
+   "area": [
+    0,
+    0,
+    350,
+    350
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Voron Trident 350 0.4 nozzle",
+     "process": "0.20mm Standard @Voron",
+     "layer": 0.2,
+     "filament": "Generic PLA @Voron"
+    }
+   ]
+  },
+  {
+   "id": "Voxelab Aquila X2",
+   "vendor": "Voxelab",
+   "name": "Voxelab Aquila X2",
+   "area": [
+    0,
+    0,
+    220,
+    220
+   ],
+   "height": 250,
+   "exclude": [],
+   "nozzles": [
+    {
+     "diameter": 0.4,
+     "printer": "Voxelab Aquila X2 0.4 nozzle",
+     "process": "0.20mm Standard @Voxelab AquilaX2",
+     "layer": 0.2,
+     "filament": "Generic PLA @Voxelab"
+    }
+   ]
+  }
+ ]
+}

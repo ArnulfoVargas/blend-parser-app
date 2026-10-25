@@ -293,8 +293,8 @@ mod tests {
         let report = |label: &str, p: &bp_core::Project| {
             let s = p.stats();
             eprintln!(
-                "{label:<28} tris {:>7}  size {:>5.1}x{:>5.1}x{:>5.1}  contact {:>7.0} mm2  swaps {:>4}  multicolor layers {:>3}/{:<3}  purge {:>5.1} g",
-                s.triangles, s.size_mm[0], s.size_mm[1], s.size_mm[2], s.contact_mm2, s.swaps.swaps, s.swaps.multicolor_layers, s.swaps.layers, s.swaps.purge_grams
+                "{label:<28} tris {:>7}  size {:>5.1}x{:>5.1}x{:>5.1}  contact {:>7.0} mm2  swaps {:>4}  multicolor layers {:>3}/{:<3}",
+                s.triangles, s.size_mm[0], s.size_mm[1], s.size_mm[2], s.contact_mm2, s.swaps.swaps, s.swaps.multicolor_layers, s.swaps.layers
             );
             s
         };
@@ -318,6 +318,26 @@ mod tests {
         let lite = report(&format!("+ keep 40% ({:?})", t.elapsed()), &project);
         assert!(lite.triangles < flat.triangles / 2);
 
+        // The waste estimate, with the flush per pair that also goes into the 3MF.
+        let pal = project.palette().to_vec();
+        let n = pal.len();
+        let matrix: Vec<f32> =
+            pal.iter().flat_map(|&a| pal.iter().map(move |&b| bp_core::waste::default_flush(a, b))).collect();
+        let params = bp_core::WasteParams { tower: n > 1, ..Default::default() };
+        let w = bp_core::waste::waste(&lite.swaps, &params, |a, b| matrix[a as usize * n + b as usize]);
+        eprintln!(
+            "waste: flush {:.1} g, start {:.1} g, tower {:.1} g ({:.0}x{:.0} mm, {:.1} mm tall), total {:.1} g / {:.2} m",
+            w.flush_mm3 * 1.24e-3,
+            w.start_mm3 * 1.24e-3,
+            w.tower_mm3 * 1.24e-3,
+            w.tower_footprint_mm[0],
+            w.tower_footprint_mm[1],
+            w.tower_height_mm,
+            w.total_g,
+            w.total_m
+        );
+        assert!(w.total_g > 0.0 && w.flush_mm3 > w.tower_mm3);
+
         // Export and check every paint_color decodes.
         let parts = project.export_parts();
         let filaments: Vec<String> = project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
@@ -328,7 +348,9 @@ mod tests {
                 .map(|p| bp_3mf::Part { name: &p.name, positions: &p.positions, tris: &p.tris, paint: &p.paint })
                 .collect(),
             filaments,
-            printer: bp_3mf::Printer::A1,
+            printer: bp_3mf::Printer::default(),
+            flush: bp_3mf::Flush { volumes_mm3: matrix, ..Default::default() },
+            layer_mm: None,
         };
         let out = std::env::temp_dir().join("blendparser-integration.3mf");
         bp_3mf::write(std::fs::File::create(&out).unwrap(), &model).unwrap();
@@ -359,7 +381,7 @@ mod tests {
             .map(|(p, h)| bp_3mf::ColorFile { hex: h, positions: &p.positions, tris: &p.tris, solid: p.solid })
             .collect();
         let zip = std::env::temp_dir().join("blendparser-colores.zip");
-        bp_3mf::write_color_zip(std::fs::File::create(&zip).unwrap(), "spider", &files).unwrap();
+        bp_3mf::write_color_zip(std::fs::File::create(&zip).unwrap(), "spider", &files, &bp_3mf::ZipText::ES).unwrap();
         eprintln!(
             "color zip in {:?}: {} pieces, {} KB, tris {:?}",
             t.elapsed(),
