@@ -43,7 +43,7 @@ jobs:
       id: ${{ steps.release.outputs.id }}
       build: ${{ steps.release.outputs.build }}
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         id: release
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -82,9 +82,13 @@ jobs:
           - platform: ubuntu-22.04
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
       - name: El tag coincide con la versión de la app
         id: version
         shell: bash
@@ -102,10 +106,6 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
       - run: npm ci
       - uses: tauri-apps/tauri-action@v0
         # Signed Windows builds take the steps below instead.
@@ -146,9 +146,10 @@ jobs:
       - name: Subir instaladores sin firmar para SignPath
         id: unsigned
         if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-unsigned
+          archive: true
           # The artifact keeps nsis/ and msi/ as folders, as .signpath/artifact-configuration.xml expects.
           path: |
             target/release/bundle/nsis/*_x64-setup.exe
@@ -193,10 +194,13 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: Descargar y validar el manifiesto de ambas plataformas
         env:
           GH_TOKEN: ${{ github.token }}
@@ -215,7 +219,7 @@ jobs:
           }
           JS
       - name: Publicar solamente cuando ambas builds hayan terminado
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_ID: ${{ needs.prepare.outputs.id }}

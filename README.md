@@ -136,7 +136,7 @@ aprobación en SignPath, vuelve a firmarlos para el actualizador y los publica.
 - **Blender** 3.6 o posterior. La app lo busca en `C:\Program Files\Blender Foundation`,
   `/Applications/Blender.app`, `/usr/bin` o en `PATH`; también se puede indicar con
   `BLENDER_PATH` o desde la app.
-- Rust estable (1.88+), Node 20, y en Windows WebView2 (viene con Windows 11).
+- Rust estable (1.88+), Node 24, y en Windows WebView2 (viene con Windows 11).
 - Linux: `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`.
 
 ## Desarrollo

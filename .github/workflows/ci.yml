@@ -9,7 +9,7 @@ jobs:
   check:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Dependencias de sistema (Tauri en Linux)
         run: |
           sudo apt-get update
@@ -18,9 +18,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run check:i18n
@@ -42,7 +42,7 @@ jobs:
     steps:
       - name: Comprobar que el commit viene de una PR fusionada
         id: pr
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const prs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
@@ -52,15 +52,15 @@ jobs:
             core.setOutput('merged', Boolean(pr));
             const labels = pr?.labels.map(label => label.name) ?? [];
             core.setOutput('bump', labels.includes('release:major') ? 'major' : labels.includes('release:minor') ? 'minor' : 'patch');
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.pr.outputs.merged == 'true'
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.pr.outputs.merged == 'true'
         with:
-          node-version: 20
+          node-version: 24
       - uses: dtolnay/rust-toolchain@stable
         if: steps.pr.outputs.merged == 'true'
       - uses: Swatinem/rust-cache@v2
