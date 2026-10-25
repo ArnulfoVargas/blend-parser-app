@@ -88,11 +88,15 @@ pub struct MeshOps {
     pub repair: bool,
     /// Loose pieces whose bounding box diagonal is under this are removed; 0 keeps all.
     pub min_piece_mm: f32,
+    /// Make every piece's faces agree on their winding and point outwards.
+    pub orient: bool,
+    /// Close holes with a flat fan that takes the colour of the face beside it.
+    pub fill_holes: bool,
 }
 
 impl Default for MeshOps {
     fn default() -> Self {
-        Self { keep_ratio: 1.0, flatten_mm: 0.0, repair: true, min_piece_mm: 0.0 }
+        Self { keep_ratio: 1.0, flatten_mm: 0.0, repair: true, min_piece_mm: 0.0, orient: false, fill_holes: false }
     }
 }
 
@@ -104,6 +108,8 @@ pub struct RepairReport {
     pub duplicate_triangles: usize,
     pub loose_pieces: usize,
     pub loose_triangles: usize,
+    pub filled_holes: usize,
+    pub flipped_triangles: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -134,6 +140,13 @@ impl Mesh {
         let mut shape = Self::from_scene(scene);
         if ops.repair {
             shape.repair_all();
+        }
+        // Holes first, so their caps get oriented with the rest of the piece.
+        if ops.fill_holes {
+            shape.fill_holes();
+        }
+        if ops.orient {
+            shape.orient();
         }
         if ops.min_piece_mm > 0.0 {
             shape.remove_loose_pieces(ops.min_piece_mm / scale);
@@ -224,6 +237,150 @@ impl Mesh {
             let keep: Vec<bool> = comp.iter().map(|&c| !small[c as usize]).collect();
             report.loose_triangles += keep.iter().filter(|&&k| !k).count();
             part.retain(&keep);
+        }
+        self.repair = report;
+    }
+
+    /// Caps every hole: each boundary loop gets a fan around its centroid. A cap
+    /// triangle runs its boundary edge backwards, so it agrees with the face it
+    /// closes, and keeps that face's colour by pointing at one spot of its source.
+    /// Boundaries are found on shared vertex indices, so weld first.
+    pub fn fill_holes(&mut self) {
+        fn find(parent: &mut HashMap<u32, u32>, x: u32) -> u32 {
+            let mut root = x;
+            while let Some(&up) = parent.get(&root).filter(|&&up| up != root) {
+                root = up;
+            }
+            parent.insert(x, root);
+            root
+        }
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            let mut uses: HashMap<(u32, u32), usize> = HashMap::new();
+            for t in &part.tris {
+                for k in 0..3 {
+                    let (a, b) = (t[k], t[(k + 1) % 3]);
+                    *uses.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+            // Directed boundary edges as their face runs them, with that face.
+            let mut boundary = vec![];
+            for (ti, t) in part.tris.iter().enumerate() {
+                for k in 0..3 {
+                    let (a, b) = (t[k], t[(k + 1) % 3]);
+                    if uses[&(a.min(b), a.max(b))] == 1 {
+                        boundary.push((a, b, ti));
+                    }
+                }
+            }
+            if boundary.is_empty() {
+                continue;
+            }
+            // A loop is the boundary vertices its edges join.
+            let mut parent: HashMap<u32, u32> = HashMap::new();
+            for &(a, b, _) in &boundary {
+                parent.entry(a).or_insert(a);
+                parent.entry(b).or_insert(b);
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                if ra != rb {
+                    parent.insert(rb, ra);
+                }
+            }
+            let mut centre: HashMap<u32, (Vec3, f32)> = HashMap::new();
+            for &(a, _, _) in &boundary {
+                let root = find(&mut parent, a);
+                let c = centre.entry(root).or_insert(([0.0; 3], 0.0));
+                c.0 = geom::add(c.0, part.positions[a as usize]);
+                c.1 += 1.0;
+            }
+            let mut hub: HashMap<u32, u32> = HashMap::new();
+            for (&root, &(sum, n)) in &centre {
+                hub.insert(root, part.positions.len() as u32);
+                part.positions.push(geom::scale(sum, 1.0 / n));
+            }
+            report.filled_holes += hub.len();
+            for (a, b, ti) in boundary {
+                let c = hub[&find(&mut parent, a)];
+                part.tris.push([b, a, c]);
+                if let Some(origin) = &mut part.origin {
+                    let (src, corners) = origin[ti];
+                    let spot = geom::bary_in(&corners, [1.0 / 3.0; 3]);
+                    origin.push((src, [spot; 3]));
+                }
+            }
+        }
+        self.repair = report;
+    }
+
+    /// Flips faces so neighbours run each shared edge in opposite directions,
+    /// then turns any piece whose volume comes out negative inside out. Only
+    /// edges with exactly two faces carry the orientation across.
+    pub fn orient(&mut self) {
+        let mut report = self.repair;
+        for part in &mut self.parts {
+            let mut edges: HashMap<(u32, u32), Vec<(usize, bool)>> = HashMap::new();
+            for (ti, t) in part.tris.iter().enumerate() {
+                for k in 0..3 {
+                    let (a, b) = (t[k], t[(k + 1) % 3]);
+                    edges.entry((a.min(b), a.max(b))).or_default().push((ti, a < b));
+                }
+            }
+            let n = part.tris.len();
+            let mut flip = vec![false; n];
+            let mut seen = vec![false; n];
+            let mut piece = vec![0usize; n];
+            let mut volume: Vec<f64> = vec![];
+            for start in 0..n {
+                if seen[start] {
+                    continue;
+                }
+                let id = volume.len();
+                volume.push(0.0);
+                seen[start] = true;
+                let mut stack = vec![start];
+                while let Some(ti) = stack.pop() {
+                    piece[ti] = id;
+                    let t = part.tris[ti];
+                    for k in 0..3 {
+                        let (a, b) = (t[k], t[(k + 1) % 3]);
+                        let faces = &edges[&(a.min(b), a.max(b))];
+                        if faces.len() != 2 {
+                            continue;
+                        }
+                        let mine = (a < b) ^ flip[ti];
+                        for &(other, raw) in faces {
+                            if other != ti && !seen[other] {
+                                // The neighbour must run this edge the other way.
+                                flip[other] = raw == mine;
+                                seen[other] = true;
+                                stack.push(other);
+                            }
+                        }
+                    }
+                }
+            }
+            // Translate near the piece to avoid cancellation at large offsets.
+            let lo = part.positions.iter().fold([f32::MAX; 3], |m, p| std::array::from_fn(|k| m[k].min(p[k])));
+            for ti in 0..n {
+                let mut c = part.corners(ti);
+                if flip[ti] {
+                    c.swap(1, 2);
+                }
+                let [a, b, d] = c.map(|p| geom::sub(p, lo));
+                volume[piece[ti]] += geom::dot(a, geom::cross(b, d)) as f64;
+            }
+            for ti in 0..n {
+                if volume[piece[ti]] < 0.0 {
+                    flip[ti] = !flip[ti];
+                }
+                if flip[ti] {
+                    part.tris[ti].swap(1, 2);
+                    if let Some(origin) = &mut part.origin {
+                        origin[ti].1.swap(1, 2);
+                    }
+                    report.flipped_triangles += 1;
+                }
+            }
         }
         self.repair = report;
     }
@@ -399,6 +556,78 @@ mod tests {
         let tris = vec![[0, 2, 1], [0, 3, 2], [0, 4, 3], [0, 1, 4], [5, 1, 2], [5, 2, 3], [5, 3, 4], [5, 4, 1]];
         let origin = Some((0..8).map(|i| (i, ROOT)).collect());
         Mesh { parts: vec![MeshPart { name: "o".into(), positions, tris, origin }], repair: RepairReport::default() }
+    }
+
+    fn closed_cube() -> Mesh {
+        let positions = vec![
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [1., 1., 0.],
+            [0., 1., 0.],
+            [0., 0., 1.],
+            [1., 0., 1.],
+            [1., 1., 1.],
+            [0., 1., 1.],
+        ];
+        let tris = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let origin = Some((0..tris.len() as u32).map(|i| (i, ROOT)).collect());
+        Mesh { parts: vec![MeshPart { name: "cube".into(), positions, tris, origin }], repair: RepairReport::default() }
+    }
+
+    fn signed_volume(m: &Mesh) -> f32 {
+        let p = &m.parts[0];
+        (0..p.tris.len())
+            .map(|i| {
+                let [a, b, c] = p.corners(i);
+                geom::dot(a, geom::cross(b, c)) / 6.0
+            })
+            .sum()
+    }
+
+    #[test]
+    fn orient_fixes_a_flipped_face_and_an_inside_out_piece() {
+        let mut m = closed_cube();
+        m.parts[0].tris[3].swap(1, 2);
+        m.orient();
+        assert_eq!(m.repair.flipped_triangles, 1);
+        assert!((signed_volume(&m) - 1.0).abs() < 1e-5);
+        let mut m = closed_cube();
+        for t in &mut m.parts[0].tris {
+            t.swap(1, 2);
+        }
+        m.orient();
+        assert_eq!(m.repair.flipped_triangles, 12);
+        assert!((signed_volume(&m) - 1.0).abs() < 1e-5);
+        // Each corner keeps its own spot of the source: the origin swaps with it.
+        assert_eq!(m.parts[0].origin.as_ref().unwrap()[0].1, [ROOT[0], ROOT[2], ROOT[1]]);
+    }
+
+    #[test]
+    fn fill_holes_closes_the_box_with_matching_winding() {
+        let mut m = closed_cube();
+        m.parts[0].tris.drain(2..4);
+        m.parts[0].origin.as_mut().unwrap().drain(2..4);
+        m.fill_holes();
+        assert_eq!(m.repair.filled_holes, 1);
+        assert_eq!(m.parts[0].tris.len(), 14);
+        assert_eq!(m.parts[0].origin.as_ref().unwrap().len(), 14);
+        assert!((signed_volume(&m) - 1.0).abs() < 1e-5);
+        // Closed and consistent now: orienting changes nothing.
+        m.orient();
+        assert_eq!(m.repair.flipped_triangles, 0);
     }
 
     #[test]

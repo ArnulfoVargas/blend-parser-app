@@ -37,7 +37,7 @@ pub fn run() {
             commands::fit_to_plate,
             commands::set_mesh_ops,
             commands::analyze_printability,
-            commands::apply_cleanup,
+            commands::fix_mesh,
             commands::set_color_ops,
             commands::printers,
             commands::set_printer,

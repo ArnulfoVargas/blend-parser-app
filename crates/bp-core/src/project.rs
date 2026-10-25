@@ -193,26 +193,19 @@ impl Project {
         report
     }
 
-    /// Enable only the existing deterministic cleanup; retain the full document for undo.
-    pub fn cleanup(&mut self) {
-        if self.mesh_ops.repair {
+    /// Applies mesh operations as one undoable step that restores the whole
+    /// document: geometry, colours and hand painting. The printability panel's
+    /// fixes and their reverts both come through here.
+    pub fn fix_mesh(&mut self, ops: MeshOps) {
+        if ops == self.mesh_ops {
             return;
         }
         self.end_stroke();
         let history = std::mem::take(&mut self.undo);
         let mut previous = self.clone();
         previous.undo = history;
-        self.set_mesh_ops(MeshOps { repair: true, ..self.mesh_ops });
+        self.set_mesh_ops(ops);
         self.undo.push(UndoEntry::Geometry(Box::new(previous)));
-    }
-
-    /// A cleanup candidate without duplicating any undo snapshots. The live history stays intact.
-    pub fn cleanup_candidate(&mut self) -> Self {
-        let history = std::mem::take(&mut self.undo);
-        let mut candidate = self.clone();
-        self.undo = history;
-        candidate.set_mesh_ops(MeshOps { repair: true, ..candidate.mesh_ops });
-        candidate
     }
 
     pub fn scene(&self) -> &Scene {
@@ -268,7 +261,7 @@ impl Project {
         self.undo.last().map(|e| match e {
             UndoEntry::Stroke(_) => "stroke",
             UndoEntry::Slots(_) => "merge",
-            UndoEntry::Geometry(_) => "cleanup",
+            UndoEntry::Geometry(_) => "fix",
         })
     }
 
@@ -420,7 +413,9 @@ impl Project {
     pub fn set_mesh_ops(&mut self, ops: MeshOps) {
         let topology_changes = (ops.keep_ratio - self.mesh_ops.keep_ratio).abs() > 1e-4
             || ops.repair != self.mesh_ops.repair
-            || (ops.min_piece_mm - self.mesh_ops.min_piece_mm).abs() > 1e-4;
+            || (ops.min_piece_mm - self.mesh_ops.min_piece_mm).abs() > 1e-4
+            || ops.orient != self.mesh_ops.orient
+            || ops.fill_holes != self.mesh_ops.fill_holes;
         self.mesh_ops = ops;
         if topology_changes {
             self.rebuild_geometry();
@@ -826,69 +821,50 @@ mod tests {
         assert_eq!(pv.positions.len(), pv.labels.len() * 9);
     }
     #[test]
-    fn cleanup_preview_leaves_original_and_undo_restores_paint_and_geometry() {
+    fn fix_undo_restores_paint_and_geometry() {
         let mut p = Project::new(scene(), 2);
         p.set_mesh_ops(MeshOps { repair: false, ..p.mesh_ops() });
         p.paint([1.0, 1.0, 30.0], [0.0, 0.0, -1.0], 100.0, 1);
         p.end_stroke();
         let before = p.preview();
         let palette = p.palette().to_vec();
-        let mut candidate = p.clone();
-        candidate.cleanup();
-        assert_eq!(p.preview().labels, before.labels);
-        p.cleanup();
-        assert_eq!(p.undo_label(), Some("cleanup"));
+        p.fix_mesh(MeshOps { repair: true, orient: true, ..p.mesh_ops() });
+        assert_eq!(p.undo_label(), Some("fix"));
+        assert!(p.mesh_ops().orient);
         assert!(p.undo());
-        assert!(!p.mesh_ops().repair);
+        assert!(!p.mesh_ops().repair && !p.mesh_ops().orient);
         assert_eq!(p.preview().positions, before.positions);
         assert_eq!(p.preview().labels, before.labels);
         assert_eq!(p.preview().source_rgb, before.source_rgb);
         assert_eq!(p.palette(), palette);
     }
     #[test]
-    fn cleanup_undo_keeps_the_active_layer_profile_and_bounded_history() {
+    fn fix_undo_keeps_the_active_layer_profile_and_bounded_history() {
         let mut p = Project::new(scene(), 2);
         p.set_mesh_ops(MeshOps { repair: false, ..p.mesh_ops() });
         p.paint([1., 1., 30.], [0., 0., -1.], 100., 1);
         p.end_stroke();
         let before = p.preview().labels;
-        p.cleanup();
+        p.fix_mesh(MeshOps { repair: true, ..p.mesh_ops() });
         p.set_print_ops(PrintOps { nozzle_mm: 0.4, layer_mm: 0.12 });
         assert!(p.undo());
         assert_eq!(p.print_ops().layer_mm, 0.12);
         assert_eq!(p.preview().labels, before);
-        assert!(!p.mesh_ops().repair);
+        // A fix and its revert are two steps; neither duplicates older snapshots.
         for _ in 0..20 {
-            p.cleanup();
-            assert_eq!(p.undo.len(), 1);
-            let candidate = p.cleanup_candidate();
-            assert!(candidate.undo.is_empty());
-            assert_eq!(p.undo.len(), 1);
+            p.fix_mesh(MeshOps { fill_holes: true, ..p.mesh_ops() });
+            p.fix_mesh(MeshOps { fill_holes: false, ..p.mesh_ops() });
+            assert!(p.undo.len() <= 2);
             p.set_mesh_ops(MeshOps { repair: false, ..p.mesh_ops() });
             assert!(p.undo.is_empty());
         }
-        p.cleanup();
+        // Asking for what is already there changes nothing and records nothing.
+        p.fix_mesh(p.mesh_ops());
+        assert!(!p.can_undo());
+        p.fix_mesh(MeshOps { repair: true, ..p.mesh_ops() });
         p.set_print_ops(PrintOps { nozzle_mm: 0.8, layer_mm: 0.3 });
         // A nozzle change rebuilds paint, intentionally invalidating earlier topology undo.
         assert!(!p.can_undo());
         assert_eq!(p.printability(crate::printability::Params::for_nozzle(0.8)).nozzle_mm, Some(0.8));
-    }
-    #[test]
-    fn cleanup_candidate_recomputes_bounds_without_changing_original() {
-        let part = Part {
-            name: "triangle with unused distant vertex".into(),
-            positions: vec![[0., 0., 0.], [10., 0., 0.], [0., 10., 1.], [1000., 0., 1.]],
-            tris: vec![[0, 1, 2]],
-            tri_loops: vec![[0, 1, 2]],
-            tri_source: vec![0],
-            sources: vec![ColorSource::Flat([0.8; 3])],
-            ..Default::default()
-        };
-        let mut project = Project::new(Scene { parts: vec![part], ..Default::default() }, 1);
-        project.set_mesh_ops(MeshOps { repair: false, ..project.mesh_ops() });
-        let candidate = project.cleanup_candidate();
-        assert_eq!(candidate.stats().size_mm[0], 10.);
-        assert_eq!(project.stats().size_mm[0], 1000.);
-        assert!(!project.mesh_ops().repair);
     }
 }

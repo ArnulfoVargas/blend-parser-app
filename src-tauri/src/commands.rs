@@ -233,13 +233,15 @@ pub async fn set_mesh_ops(
     repair: bool,
     min_piece_mm: f32,
 ) -> CmdResult<Summary> {
-    let ops = MeshOps {
-        keep_ratio: keep_ratio.clamp(0.05, 1.0),
-        flatten_mm: flatten_mm.max(0.0),
-        repair,
-        min_piece_mm: min_piece_mm.max(0.0),
-    };
     with_doc(app, move |d, prefs| {
+        // The settings panel has no say over the printability fixes; keep them.
+        let ops = MeshOps {
+            keep_ratio: keep_ratio.clamp(0.05, 1.0),
+            flatten_mm: flatten_mm.max(0.0),
+            repair,
+            min_piece_mm: min_piece_mm.max(0.0),
+            ..d.project.mesh_ops()
+        };
         d.project.set_mesh_ops(ops);
         Ok(dto::summary(d, prefs))
     })
@@ -485,18 +487,11 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
 }
 
 fn printability_for_doc(
-    d: &mut Document,
+    d: &Document,
     prefs: &Prefs,
     params: bp_core::printability::Params,
-    preview_cleanup: bool,
 ) -> bp_core::printability::Report {
-    let candidate;
-    let project = if preview_cleanup {
-        candidate = d.project.cleanup_candidate();
-        &candidate
-    } else {
-        &d.project
-    };
+    let project = &d.project;
     let mut report = project.printability(params);
     report.printer = Some(d.printer.profile.id.clone());
     let stats = project.stats();
@@ -520,18 +515,37 @@ fn printability_for_doc(
 pub async fn analyze_printability(
     app: AppHandle,
     params: bp_core::printability::Params,
-    preview_cleanup: bool,
 ) -> CmdResult<bp_core::printability::Report> {
     if !params.valid() {
         return Err(AppError::new("error.printabilityParams"));
     }
-    with_doc(app, move |d, prefs| Ok(printability_for_doc(d, prefs, params, preview_cleanup))).await
+    with_doc(app, move |d, prefs| Ok(printability_for_doc(d, prefs, params))).await
 }
 
+/// The mesh operations a printability fix (or its revert) changes; the rest stay.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeshFix {
+    repair: Option<bool>,
+    orient: Option<bool>,
+    fill_holes: Option<bool>,
+    min_piece_mm: Option<f32>,
+    flatten_mm: Option<f32>,
+}
+
+/// One undoable step, so Ctrl+Z restores geometry, colours and hand painting.
 #[tauri::command]
-pub async fn apply_cleanup(app: AppHandle) -> CmdResult<Summary> {
-    with_doc(app, |d, prefs| {
-        d.project.cleanup();
+pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        let now = d.project.mesh_ops();
+        d.project.fix_mesh(MeshOps {
+            repair: fix.repair.unwrap_or(now.repair),
+            orient: fix.orient.unwrap_or(now.orient),
+            fill_holes: fix.fill_holes.unwrap_or(now.fill_holes),
+            min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
+            flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),
+            ..now
+        });
         Ok(dto::summary(d, prefs))
     })
     .await

@@ -1,4 +1,4 @@
-﻿import { api, type PrintabilityCheck, type PrintabilityParams, type PrintabilityReport, type Summary, type Vec3 } from "./api";
+﻿import { api, type MeshFix, type PrintabilityCheck, type PrintabilityParams, type PrintabilityReport, type Summary, type Vec3 } from "./api";
 import { num, onLangChange, t, tKey } from "./i18n";
 import "./styles/printability.css";
 
@@ -17,6 +17,37 @@ const RANK: Record<Severity, number> = { error: 0, warning: 1, pass: 2, incomple
 /** Checks whose measurement and threshold carry a unit worth showing; the rest are plain counts. */
 const UNITS: Record<string, string> = {
   contact: "mm²", thinWalls: "mm", smallComponents: "mm", smallDetails: "mm", overhang: "°",
+};
+
+/** A correction the core can make, as the mesh operations it turns on. Each one
+ *  is a single undo step and is reverted by putting the previous values back. */
+interface Fix {
+  /** Whether it would change anything for this document. */
+  available(s: Summary, r: PrintabilityReport): boolean;
+  patch(s: Summary, r: PrintabilityReport): MeshFix;
+  /** Value of `fixHelp.<id>`'s `{mm}`, when it has one. */
+  mm?(s: Summary, r: PrintabilityReport): number;
+}
+const base = (s: Summary) => Math.max(0.4, Math.round(s.settings.layerMm * 2 * 100) / 100);
+const FIXES: Record<string, Fix> = {
+  clean: { available: (s) => !s.settings.repair, patch: () => ({ repair: true }) },
+  orient: { available: (s) => !s.settings.orient, patch: () => ({ repair: true, orient: true }) },
+  fillHoles: { available: (s) => !s.settings.fillHoles, patch: () => ({ repair: true, fillHoles: true }) },
+  removeSmall: {
+    available: (s, r) => s.settings.minPieceMm < r.params.componentMm,
+    patch: (_, r) => ({ minPieceMm: r.params.componentMm }),
+    mm: (_, r) => r.params.componentMm,
+  },
+  flattenBase: { available: (s) => s.settings.flattenMm === 0, patch: (s) => ({ flattenMm: base(s) }), mm: base },
+};
+/** Which fix answers each check. Checks without one can only be located. */
+const FIX_OF: Record<string, string> = {
+  degenerate: "clean", duplicate: "clean", winding: "orient", volume: "orient",
+  openEdges: "fillHoles", smallComponents: "removeSmall", contact: "flattenBase",
+};
+/** Where a fix's mesh operations show in the summary, to tell whether it still holds. */
+const SETTING: Record<keyof MeshFix, keyof Summary["settings"]> = {
+  repair: "repair", orient: "orient", fillHoles: "fillHoles", minPieceMm: "minPieceMm", flattenMm: "flattenMm",
 };
 
 /** Same starting points as `Params::for_nozzle`. */
@@ -43,7 +74,8 @@ const size = (v: Vec3, digits: number) => v.map((x) => num(x, digits)).join(" ×
 export function setupPrintability(options: {
   summary(): Summary | null;
   locate(points: Vec3[], values?: (number | null)[], threshold?: number): void;
-  apply(): Promise<unknown>;
+  fix(fix: MeshFix): Promise<unknown>;
+  confirm(message: string): Promise<boolean>;
   error(error: unknown): void;
 }) {
   const panel = document.querySelector<HTMLElement>("#printability")!;
@@ -52,10 +84,10 @@ export function setupPrintability(options: {
   const status = panel.querySelector<HTMLElement>(".pa-status")!;
   const sum = panel.querySelector<HTMLElement>(".pa-sum")!;
   const analyze = panel.querySelector<HTMLButtonElement>("#printability-run")!;
-  const cleanup = panel.querySelector<HTMLButtonElement>("#printability-cleanup")!;
   const hide = panel.querySelector<HTMLButtonElement>("#printability-hide")!;
-  const dialog = document.querySelector<HTMLDialogElement>("#printability-dialog")!;
   const inputs = new Map<keyof PrintabilityParams, HTMLInputElement>();
+  /** Fixes applied from this panel: what they set, what to put back, and the counts before. */
+  const applied = new Map<string, { patch: MeshFix; previous: MeshFix; before: Map<string, number> }>();
   let report: PrintabilityReport | null = null;
   let outdated = false;
   let token = 0;
@@ -117,11 +149,15 @@ export function setupPrintability(options: {
   }
 
   function controls() {
-    const s = options.summary();
-    analyze.disabled = busy || !s;
+    analyze.disabled = busy || !options.summary();
     analyze.setAttribute("aria-busy", String(busy));
     analyze.textContent = t(report ? "printability.rerun" : "printability.run");
-    cleanup.disabled = busy || !s || s.settings.repair;
+    output.querySelectorAll<HTMLButtonElement>("[data-fix]").forEach((b) => (b.disabled = busy));
+  }
+
+  function say(text: string, tone: "" | "ok" | "warn" | "error" = "") {
+    status.textContent = text;
+    status.dataset.tone = tone;
   }
 
   function invalidate() {
@@ -130,10 +166,17 @@ export function setupPrintability(options: {
     report = null;
     output.replaceChildren();
     markers(null, []);
-    status.textContent = t(outdated ? "printability.outdated" : "printability.stale");
-    status.dataset.tone = outdated ? "warn" : "";
-    sum.textContent = "";
+    say(t(outdated ? "printability.outdated" : "printability.stale"), outdated ? "warn" : "");
+    sum.replaceChildren();
     controls();
+  }
+
+  /** Forgets fixes the document no longer has: undone, or changed in the settings panel. */
+  function prune(s: Summary | null) {
+    for (const [id, a] of applied) {
+      const holds = s && (Object.keys(a.patch) as (keyof MeshFix)[]).every((k) => s.settings[SETTING[k]] === a.patch[k]);
+      if (!holds) applied.delete(id);
+    }
   }
 
   /** Called with every summary; only a change that affects the geometry clears the report. */
@@ -146,7 +189,9 @@ export function setupPrintability(options: {
     if (!sameFile) {
       report = null;
       outdated = false;
+      applied.clear();
     }
+    prune(s);
     if (s && defaultsNozzle !== s.settings.nozzleMm) reset();
     else invalidate();
   }
@@ -161,21 +206,57 @@ export function setupPrintability(options: {
     return parts.join(" · ");
   }
 
-  function card(c: PrintabilityCheck): HTMLElement {
+  function fixText(id: string, s: Summary, r: PrintabilityReport) {
+    const mm = FIXES[id].mm?.(s, r);
+    return tKey(`printability.fixHelp.${id}`, { mm: mm === undefined ? "" : num(mm, 2) });
+  }
+
+  /** The applied fix that resolved `c`: its own, or one that fixed it on the way (closing holes also welds). */
+  function resolver(c: PrintabilityCheck): string | undefined {
+    const own = FIX_OF[c.code];
+    if (own && applied.has(own)) return own;
+    if (c.severity !== "pass") return undefined;
+    for (const [id, a] of applied) if ((a.before.get(c.code) ?? 0) > 0) return id;
+    return undefined;
+  }
+
+  function card(c: PrintabilityCheck, r: PrintabilityReport, s: Summary | null): HTMLElement {
+    const by = resolver(c);
+    const id = by ?? FIX_OF[c.code];
+    const done = by ? applied.get(by) : undefined;
     const row = el("article", "pa-check");
-    row.dataset.severity = c.severity;
+    row.dataset.severity = done && c.severity === "pass" ? "fixed" : c.severity;
     const head = el("div", "pa-check__head");
     head.append(el("span", "pa-dot"), el("strong", "pa-check__title", tKey(`printability.check.${c.code}`)));
-    if (!UNCOUNTED.has(c.code)) head.append(el("span", "pa-check__count mono", t("printability.count", { count: c.count })));
-    row.append(head, el("p", "pa-check__meta", checkMeta(c)), el("p", "help", tKey(`printability.help.${c.code}`)));
-    if (c.locations.length) {
+    if (row.dataset.severity === "fixed") head.append(el("span", "pa-check__count", t("printability.fixed")));
+    else if (!UNCOUNTED.has(c.code)) head.append(el("span", "pa-check__count mono", t("printability.count", { count: c.count })));
+    row.append(head, el("p", "pa-check__meta", checkMeta(c)));
+    if (done) {
+      const before = done.before.get(c.code);
+      if (before !== undefined && !UNCOUNTED.has(c.code)) row.append(el("p", "pa-check__delta mono", t("printability.fixedDelta", { before, after: c.count })));
+    } else {
+      row.append(el("p", "help", tKey(`printability.help.${c.code}`)));
+    }
+    const fixable = id && s && !done && c.severity !== "pass" && FIXES[id].available(s, r);
+    if (fixable) row.append(el("p", "pa-check__fix", fixText(id, s, r)));
+
+    const actions = el("div", "pa-check__actions");
+    if (done || fixable) {
+      const button = el("button", "btn btn--sm", t(done ? "printability.revert" : "printability.fix"));
+      button.type = "button";
+      button.dataset.fix = id;
+      button.disabled = busy;
+      button.addEventListener("click", () => void (done ? revert(id) : fix(id)));
+      actions.append(button);
+    }
+    if (c.locations.length && c.severity !== "pass") {
       const locate = el("button", "link", t("printability.locate"));
       locate.type = "button";
       locate.setAttribute("aria-pressed", "false");
-      locate.addEventListener("click", () =>
-        shown === locate ? markers(null, []) : markers(locate, c.locations));
-      row.append(locate);
+      locate.addEventListener("click", () => shown === locate ? markers(null, []) : markers(locate, c.locations));
+      actions.append(locate);
     }
+    if (actions.childElementCount) row.append(actions);
     return row;
   }
 
@@ -197,33 +278,35 @@ export function setupPrintability(options: {
     return box;
   }
 
-  function show(r: PrintabilityReport) {
+  function chips(target: HTMLElement, counts: [Severity | "fixed", number][]) {
+    target.replaceChildren(...counts.filter(([, n]) => n > 0).map(([severity, n]) => {
+      const node = el("span", "pa-chip", t(`printability.chip.${severity as "error" | "warning" | "pass" | "fixed"}`, { count: n }));
+      node.dataset.severity = severity;
+      return node;
+    }));
+  }
+
+  function show(r: PrintabilityReport, message = "") {
     report = r;
     outdated = false;
     markers(null, []);
-    const checks = [...r.checks].sort((a, b) => RANK[a.severity] - RANK[b.severity]);
-    const count = (s: Severity) => checks.filter((c) => c.severity === s).length;
-    const errors = count("error");
-    const warnings = count("warning");
-    const passed = checks.filter((c) => c.severity === "pass");
-    const skipped = checks.filter((c) => c.severity === "incomplete");
-
-    const chips = el("div", "pa-chips");
-    const chip = (severity: Severity, n: number) => {
-      const node = el("span", "pa-chip", t(`printability.chip.${severity as "error" | "warning" | "pass"}`, { count: n }));
-      node.dataset.severity = severity;
-      chips.append(node);
-    };
-    if (errors) chip("error", errors);
-    if (warnings) chip("warning", warnings);
-    chip("pass", passed.length);
-    status.textContent = errors || warnings ? "" : t("printability.allClear");
-    status.dataset.tone = "";
-    sum.textContent = errors || warnings
-      ? [errors && t("printability.chip.error", { count: errors }), warnings && t("printability.chip.warning", { count: warnings })].filter(Boolean).join(" · ")
-      : t("printability.chip.pass", { count: passed.length });
-
     const s = options.summary();
+    const checks = [...r.checks].sort((a, b) => RANK[a.severity] - RANK[b.severity]);
+    const problem = (c: PrintabilityCheck) => c.severity === "error" || c.severity === "warning";
+    const fixedNow = (c: PrintabilityCheck) => c.severity === "pass" && resolver(c) !== undefined;
+    const cards = checks.filter((c) => problem(c) || fixedNow(c));
+    const passed = checks.filter((c) => c.severity === "pass" && !fixedNow(c));
+    const skipped = checks.filter((c) => c.severity === "incomplete");
+    const errors = checks.filter((c) => c.severity === "error").length;
+    const warnings = checks.filter((c) => c.severity === "warning").length;
+    const fixed = checks.filter(fixedNow).length;
+    const counts: [Severity | "fixed", number][] = [["error", errors], ["warning", warnings], ["fixed", fixed], ["pass", passed.length]];
+
+    const top = el("div", "pa-chips");
+    chips(top, counts);
+    chips(sum, counts);
+    say(message || (errors || warnings ? "" : t("printability.allClear")), message ? "ok" : "");
+
     const context = el("p", "pa-context mono", t("printability.context", {
       printer: r.printer ?? s?.settings.printer ?? "",
       nozzle: num(r.nozzleMm ?? s?.settings.nozzleMm ?? 0, 2),
@@ -231,7 +314,7 @@ export function setupPrintability(options: {
       size: size(r.sizeMm, 1),
       triangles: num(r.triangles, 0),
     }));
-    output.replaceChildren(chips, context, ...checks.filter((c) => c.severity === "error" || c.severity === "warning").map(card));
+    output.replaceChildren(top, context, ...cards.map((c) => card(c, r, s)));
 
     if (r.thickness.length) {
       const threshold = Math.max(r.params.wallMm, r.params.extrusionMm * r.params.perimeters);
@@ -243,8 +326,8 @@ export function setupPrintability(options: {
         ? markers(null, [])
         : markers(button, r.thickness.map((x) => x.point), r.thickness.map((x) => x.mm), threshold));
       const legend = el("ul", "pa-legend");
-      for (const [key, tone] of [["thin", "thin"], ["ok", "ok"], ["none", "none"]] as const) {
-        const item = el("li", "", t(`printability.legend.${key}`));
+      for (const tone of ["thin", "ok", "none"] as const) {
+        const item = el("li", "", t(`printability.legend.${tone}`));
         item.dataset.tone = tone;
         legend.append(item);
       }
@@ -257,60 +340,60 @@ export function setupPrintability(options: {
   }
 
   function fail(e: unknown) {
-    status.textContent = t("printability.failed");
-    status.dataset.tone = "error";
+    say(t("printability.failed"), "error");
     options.error(e);
   }
 
-  async function compare(before: PrintabilityReport, after: PrintabilityReport): Promise<boolean> {
-    const body = dialog.querySelector<HTMLTableSectionElement>("tbody")!;
-    const row = (label: string, a: string, b: string) => {
-      const tr = el("tr");
-      if (a !== b) tr.className = "is-changed";
-      const th = el("th", "", label);
-      th.scope = "row";
-      tr.append(th, el("td", "mono", a), el("td", "mono", b));
-      return tr;
-    };
-    body.replaceChildren(
-      row(t("printability.compare.triangles"), num(before.triangles, 0), num(after.triangles, 0)),
-      row(t("printability.compare.size"), size(before.sizeMm, 2), size(after.sizeMm, 2)),
-      ...after.checks.flatMap((a) => {
-        const b = before.checks.find((c) => c.code === a.code);
-        if (!b || (a.count === b.count && a.evidence === b.evidence)) return [];
-        const value = (c: PrintabilityCheck) => c.evidence === "notEvaluated" ? tKey("printability.evidence.notEvaluated") : num(c.count, 0);
-        return [row(tKey(`printability.check.${a.code}`), value(b), value(a))];
-      }),
-    );
-    dialog.returnValue = "cancel";
-    dialog.showModal();
-    return new Promise<boolean>((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue === "apply"), { once: true }));
+  /** Runs `change` with the panel busy, then analyses what the document is now. */
+  async function step(text: string, change: () => Promise<unknown>, done: () => string) {
+    const params = read();
+    if (!params || busy) return;
+    busy = true;
+    controls();
+    say(text);
+    try {
+      await change();
+      prune(options.summary());
+      const next = await api.analyzePrintability(params);
+      token++;
+      show(next, done());
+    } catch (e) {
+      fail(e);
+    } finally {
+      busy = false;
+      controls();
+    }
   }
 
-  async function run(preview = false) {
+  async function fix(id: string) {
+    const s = options.summary();
+    if (!s || !report || busy) return;
+    // Rebuilding the mesh drops hand painting; Revertir and Ctrl+Z bring it back.
+    if (s.paintedTriangles > 0 && !(await options.confirm(t("printability.fixPaint")))) return;
+    const patch = FIXES[id].patch(s, report);
+    const previous = Object.fromEntries((Object.keys(patch) as (keyof MeshFix)[]).map((k) => [k, s.settings[SETTING[k]]])) as MeshFix;
+    applied.set(id, { patch, previous, before: new Map(report.checks.map((c) => [c.code, c.count])) });
+    // A failed change leaves the settings as they were, and `prune` drops the entry.
+    await step(t("printability.fixing"), () => options.fix(patch), () => applied.has(id) ? t("printability.fixDone") : "");
+  }
+
+  async function revert(id: string) {
+    const a = applied.get(id);
+    if (!a || busy) return;
+    applied.delete(id);
+    await step(t("printability.reverting"), () => options.fix(a.previous), () => t("printability.revertDone"));
+  }
+
+  async function run() {
     const params = read();
     if (!params || !options.summary() || busy) return;
     const mine = ++token;
     busy = true;
     controls();
-    status.textContent = t("printability.running");
-    status.dataset.tone = "";
+    say(t("printability.running"));
     try {
-      const before = await api.analyzePrintability(params);
-      if (mine !== token) return;
-      if (!preview) return show(before);
-      const after = await api.analyzePrintability(params, true);
-      if (mine !== token) return;
-      busy = false;
-      controls();
-      status.textContent = "";
-      if (!(await compare(before, after)) || mine !== token) return show(before);
-      busy = true;
-      controls();
-      await options.apply();
-      // Applying changes the revision; analyse what is now the document.
       const next = await api.analyzePrintability(params);
-      show(next);
+      if (mine === token) show(next);
     } catch (e) {
       if (mine === token) fail(e);
     } finally {
@@ -320,14 +403,13 @@ export function setupPrintability(options: {
   }
 
   analyze.addEventListener("click", () => void run());
-  cleanup.addEventListener("click", () => void run(true));
   hide.addEventListener("click", () => markers(null, []));
   panel.querySelector("#printability-reset")!.addEventListener("click", reset);
   const labels = () => grid.querySelectorAll<HTMLElement>("[data-param]").forEach((label) => (label.textContent = tKey(`printability.param.${label.dataset.param}`)));
   onLangChange(() => {
     labels();
     if (report) show(report);
-    else status.textContent = t(outdated ? "printability.outdated" : "printability.stale");
+    else say(t(outdated ? "printability.outdated" : "printability.stale"), outdated ? "warn" : "");
     controls();
   });
   labels();

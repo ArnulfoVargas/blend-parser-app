@@ -1452,7 +1452,8 @@ document.querySelectorAll("dialog").forEach((d) => {
 const printability = setupPrintability({
   summary: () => summary,
   locate: (points, values, threshold) => viewer.setFindings(points.map(p => p.map(v => v / (summary?.size.previewScale ?? 1)) as Vec3), values, threshold),
-  apply: () => apply(() => api.applyCleanup()),
+  fix: (fix) => apply(() => api.fixMesh(fix)),
+  confirm: (message) => ask(message, { title: t("printability.title"), kind: "warning" }),
   error: e => toast(errText(e), "error"),
 });
 

@@ -7,7 +7,7 @@ export interface Slot { hex: string; triangles: number; nearest: [number, number
 export interface Repair { weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -110,7 +110,7 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | "cleanup" | null;
+  undoLabel: "stroke" | "merge" | "fix" | null;
   paintedTriangles: number;
 }
 
@@ -141,8 +141,8 @@ export function decodePreview(buf: ArrayBuffer): PreviewMesh {
 }
 
 export const api = {
-  analyzePrintability: (params: PrintabilityParams, previewCleanup = false) => invoke<PrintabilityReport>("analyze_printability", { params, previewCleanup }),
-  applyCleanup: () => invoke<Summary>("apply_cleanup"),
+  analyzePrintability: (params: PrintabilityParams) => invoke<PrintabilityReport>("analyze_printability", { params }),
+  fixMesh: (fix: MeshFix) => invoke<Summary>("fix_mesh", { fix }),
   blenderStatus: () => invoke<string | null>("blender_status"),
   initialFile: () => invoke<string | null>("initial_file"),
   setBlenderPath: (path: string) => invoke<string>("set_blender_path", { path }),
@@ -179,6 +179,8 @@ export const api = {
     invoke<number>("export_color_zip", { path, thicknessMm, mainSolid, lang }),
 };
 
+/** Mesh operations a printability fix changes; omitted ones stay as they are. */
+export interface MeshFix { repair?: boolean; orient?: boolean; fillHoles?: boolean; minPieceMm?: number; flattenMm?: number }
 export interface PrintabilityParams {
   extrusionMm: number; perimeters: number; wallMm: number; detailMm: number;
   componentMm: number; overhangDeg: number; contactMm2: number; toleranceMm: number; samples: number;

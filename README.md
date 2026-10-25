@@ -280,22 +280,30 @@ cuesta aproximadamente O(T log T); los rayos se limitan por la calidad elegida. 
 comparación de todos los pares de triángulos. Una referencia de 24.000 triángulos en los
 tests comprueba que las muestras y marcadores siguen acotados; no es un benchmark de
 rendimiento ni una garantía de memoria para modelos arbitrarios. El análisis se ejecuta
-bajo demanda en un trabajador del backend; la limpieza reversible conserva una copia
+bajo demanda en un trabajador del backend; cada corrección conserva una copia
 completa del proyecto y puede consumir memoria adicional en modelos grandes.
 
-**Previsualizar limpieza reversible** compara conteos y dimensiones antes/después sin
-alterar el documento. Sólo activa la limpieza determinista ya existente: soldar vértices
-y eliminar caras degeneradas/duplicadas. Aplicar vuelve a analizar; **Deshacer** restaura
-geometría, ajustes, materiales, paleta y pintura previos. El diálogo avisa antes de aplicar
-que el recalculado conserva colores/materiales fuente pero vuelve a detectar la pintura
-manual. Cancelar deja el original intacto. Si la limpieza ya está activa, el botón queda
-inactivo; se puede desactivar en Malla para comparar la geometría sin limpiar.
+**Corregir** aparece junto a **Localizar** en los hallazgos que el núcleo sabe arreglar.
+Cada corrección activa operaciones de malla deterministas y vuelve a analizar:
+
+| Hallazgo | Corrección |
+| --- | --- |
+| Caras degeneradas o duplicadas | Soldar vértices y eliminar esas caras |
+| Orientación inconsistente, volumen invertido | Propagar la orientación entre caras vecinas y dar la vuelta a envolventes con volumen negativo |
+| Bordes abiertos | Cerrar cada agujero con un abanico plano desde su centro, del color de la cara vecina |
+| Piezas pequeñas | Eliminar piezas sueltas bajo el umbral |
+| Poco contacto con la placa | Aplanar la base (dos capas, mínimo 0,4 mm) |
+
+Una vez aplicada, la tarjeta queda como **Corregido** con el conteo antes/ahora y el botón
+pasa a **Revertir**, que devuelve esas operaciones a sus valores previos. Cada corrección o
+reversión es un paso de **Deshacer** que restaura geometría, ajustes, materiales, paleta y
+pintura. Si hay pintura manual, se pide confirmación, porque rehacer la malla la retira.
+Las tapas de agujeros grandes o curvos son planas: revísalas antes de exportar.
 
 **Pendiente / no evaluado:** autointersecciones robustas (incluidas caras coplanares),
 puentes, inicios locales de capas sin apoyo, distancias entre piezas y fragilidad mecánica.
-No se ofrecen cierre automático de agujeros, reorientación automática, engrosado local,
-remallado ni búsqueda automática de orientación; requieren un algoritmo fiable y una
-previsualización de su impacto en materiales. El diagnóstico tampoco mide la desviación
+No se ofrecen engrosado local, remallado ni búsqueda automática de orientación en la placa.
+El cierre de agujeros no reconstruye superficies curvas. El diagnóstico tampoco mide la desviación
 respecto a la geometría anterior a simplificar: vuelve a revisar la geometría resultante,
 pero no certifica que todos los detalles originales sobrevivan.
 
@@ -304,7 +312,7 @@ caras degeneradas/duplicadas, aristas no manifold, vértice que une dos envolven
 pared fina, componente pequeño/aislado, geometría elevada sin contacto y dos cajas
 intersectadas. Este último caso comprueba expresamente que **autointersecciones** aparece
 como **no evaluado**, nunca como aprobado. También se verifica la coherencia al cambiar
-escala/boquilla/umbrales y la restauración del color al deshacer la limpieza.
+escala/boquilla/umbrales y la restauración del color al deshacer una corrección.
 
 La comparación antes/después en Bambu Studio u otro laminador **no está automatizada ni
 verificada en esta entrega**: exporta ambos 3MF, selecciona el mismo proceso/material y
@@ -314,5 +322,5 @@ imprimir. La ausencia de hallazgos no garantiza que la pieza se imprima sin defe
 El volumen y espesor de modelos con envolventes de signos mixtos quedan **no evaluados**:
 una envolvente interior invertida puede ser una cavidad correcta y este alcance no
 implementa una prueba robusta de anidamiento. Una envolvente aislada invertida sigue
-siendo un error. Deshacer la limpieza conserva la altura de capa activa; cambiar la
+siendo un error. Deshacer una corrección conserva la altura de capa activa; cambiar la
 boquilla reconstruye la pintura e invalida ese historial, como los otros cambios de malla.
