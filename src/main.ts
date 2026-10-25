@@ -334,6 +334,12 @@ let locked = true;
 // Sizes are kept to hundredths of a millimetre, so equal factors can differ by that much.
 const uniform = (k: number[]) => k.every((v) => Math.abs(v - k[0]) < 5e-4 * k[0]);
 
+/** The tool's shortcuts under the view; the whole line also as a tooltip, for when it is cut. */
+function setHint(text: string) {
+  bind("hint", text);
+  $(".stage__hint").title = text;
+}
+
 function syncLock() {
   lockBtn.setAttribute("aria-pressed", String(locked));
   viewer.proportional = locked;
@@ -385,7 +391,7 @@ axisInputs.forEach((el, axis) => el.addEventListener("change", () => resizeAxis(
 function toggleLock() {
   locked = !locked;
   syncLock();
-  if (app.dataset.tool === "size") bind("hint", t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }));
+  if (app.dataset.tool === "size") setHint(t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }));
 }
 lockBtn.addEventListener("click", toggleLock);
 
@@ -1208,7 +1214,7 @@ function setTool(tool: Tool) {
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
-  bind("hint", tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
+  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
   syncMeasure();
 }
 

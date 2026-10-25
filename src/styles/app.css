@@ -157,8 +157,10 @@ legend { padding: 0; margin-bottom: var(--space-xs); }
 .app[data-state="converting"] .stage__busy { display: grid; font-family: var(--font-outlier); }
 
 
-.brush { display: flex; align-items: center; gap: var(--space-sm); min-width: 260px; font-size: var(--text-sm); color: var(--color-ink-2); }
-.stage__hint { flex: 1; font-size: var(--text-sm); color: var(--color-muted); text-align: center; }
+.brush { display: flex; flex: none; align-items: center; gap: var(--space-sm); font-size: var(--text-sm); color: var(--color-ink-2); }
+/* One line: what the tool needs on the left, its shortcuts on the right, cut short when tight. */
+.stage__foot { flex-wrap: nowrap; min-height: 36px; }
+.stage__hint { flex: 1; min-width: 0; font-size: var(--text-sm); color: var(--color-muted); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* AMS */
 .slots { display: grid; gap: var(--space-sm); margin: 0; padding: var(--space-sm); list-style: none; border-radius: calc(var(--radius-card) + var(--space-sm)); background: color-mix(in oklab, var(--color-paper-3) 70%, transparent); box-shadow: inset 0 2px 6px color-mix(in oklab, var(--color-ink) 12%, transparent); }
@@ -272,7 +274,6 @@ details.group[open] .group__sum { visibility: hidden; }
 .stage__top h2, details.group > summary h2 { white-space: nowrap; }
 @media (max-width: 80rem) {
   .work { grid-template-columns: 280px minmax(0, 1fr) 280px; gap: var(--space-md); padding: var(--space-md); }
-  .stage__hint { display: none; }
 }
 @media (max-width: 75rem) {
   .work { grid-template-columns: 250px minmax(0, 1fr) 250px; gap: var(--space-sm); padding: var(--space-sm); }
@@ -434,9 +435,9 @@ details.group[open] .group__sum { visibility: hidden; }
 .flush__cell.is-set { border-color: var(--color-accent-deep); background: var(--color-accent-soft); }
 .flush__self { text-align: center; color: var(--color-muted); }
 
-.measure { font-size: var(--text-sm); color: var(--color-ink-2); font-variant-numeric: tabular-nums; }
-.measure:empty, .measure > span:empty + .link[hidden] { display: none; }
+.measure { display: flex; flex: none; align-items: baseline; gap: var(--space-sm); font-size: var(--text-sm); color: var(--color-ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .measure .link { min-height: 0; font-size: inherit; }
+.app:not([data-tool="measure"]) .measure { display: none; }
 .app[data-tool="measure"] #viewport { cursor: crosshair; }
 @media (max-width: 75rem) {
   .grid2 { grid-template-columns: minmax(0, 1fr); }
@@ -463,7 +464,7 @@ details.group[open] .group__sum { visibility: hidden; }
 .toolbar__expand { color: var(--color-muted); }
 .toolbar__expand .toolbar__icon { transition: transform var(--dur-short) var(--ease-out); }
 .toolbar[data-expanded="true"] .toolbar__expand .toolbar__icon { transform: rotate(180deg); }
-.app[data-tool="measure"] .brush, .app[data-tool="size"] .brush { visibility: hidden; }
+.app[data-tool="measure"] .brush, .app[data-tool="size"] .brush { display: none; }
 
 /* Etiquetas sobre la vista: la medida y las medidas editables */
 .overlay { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }
