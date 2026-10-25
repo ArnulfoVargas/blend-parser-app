@@ -86,9 +86,13 @@ export const isAppError = (e: unknown): e is AppError => typeof e === "object" &
 /** A step of opening a file. */
 export interface Progress { key: string; name: string }
 
+/** A file the model references (`.mtl`, glTF `.bin`, texture) and whether it was found. */
+export interface Companion { kind: "materials" | "buffers" | "textures" | "unmapped"; name: string; found: boolean; required: boolean }
+
 export interface Summary {
   fileName: string;
   fileSize: number;
+  importWarnings: { code: string; detail: string }[];
   parts: { name: string; triangles: number }[];
   materials: Material[];
   slots: Slot[];
@@ -148,7 +152,10 @@ export const api = {
   blenderStatus: () => invoke<string | null>("blender_status"),
   initialFile: () => invoke<string | null>("initial_file"),
   setBlenderPath: (path: string) => invoke<string>("set_blender_path", { path }),
-  openBlend: (path: string) => invoke<Summary>("open_blend", { path }),
+  openBlend: (path: string, added: { files: string[]; textures: [string, string][]; library: string | null; blend: string | null }) =>
+    invoke<Summary>("open_blend", { path, extras: added.files, textures: added.textures, library: added.library, blend: added.blend }),
+  inspectModel: (path: string, extras: string[], library: string | null = null) =>
+    invoke<Companion[]>("inspect_model", { path, extras, library }),
   setPalette: (colors: string[]) => invoke<Summary>("set_palette", { colors }),
   suggestPalette: (count: number) => invoke<Summary>("suggest_palette", { count }),
   setSize: (mm: Vec3) => invoke<Summary>("set_size", { mm }),

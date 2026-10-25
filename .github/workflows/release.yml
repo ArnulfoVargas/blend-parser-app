@@ -3,17 +3,79 @@ name: Release
 # Un tag como alpha-0.0.2 o v0.1.0 compila Windows y Linux, firma los paquetes para
 # el actualizador y publica un Release con latest.json. Crea el tag con
 # `npm run release -- <versión>` para que tag y versión coincidan.
+#
+# Firma de código de Windows: con la variable del repo SIGNPATH_PROJECT_SLUG definida,
+# los instaladores de Windows pasan por SignPath (Authenticode) antes de publicarse.
+# Sin ella, salen sin firmar como hasta ahora. Ver CODE_SIGNING.md.
 on:
   push:
     tags: ["alpha-*", "beta-*", "v*"]
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag existente que se quiere publicar o reintentar
+        required: true
+        type: string
+
+# A rerun must not upload to a release while another run is publishing it.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
+  # SignPath reads the unsigned installers from this run's artifacts.
+  actions: read
+
+env:
+  WINDOWS_SIGNED: ${{ vars.SIGNPATH_PROJECT_SLUG != '' }}
 
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      id: ${{ steps.release.outputs.id }}
+      build: ${{ steps.release.outputs.build }}
+    steps:
+      - uses: actions/github-script@v7
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          SIGNING_NOTE: ${{ vars.SIGNPATH_PROJECT_SLUG != '' && 'Los instaladores de Windows llevan firma de código de SignPath Foundation.' || 'Los instaladores no llevan firma de código de Windows.' }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            if (!/^(alpha-|beta-|v)\d+\.\d+\.\d+$/.test(tag)) throw new Error('Tag inválido');
+            // Ref must exist; never create a release from the workflow's default ref.
+            await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              release = (await github.rest.repos.createRelease({
+                ...context.repo, tag_name: tag, name: `BlendParser ${tag}`,
+                draft: true, prerelease: false, generate_release_notes: true,
+                body: `Blender 3.6 o posterior requerido. Windows: .exe/.msi; Linux: .AppImage/.deb. Incluye actualizaciones automáticas firmadas. ${process.env.SIGNING_NOTE} Política de firma de código: https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CODE_SIGNING.md`,
+              })).data;
+            }
+            core.setOutput('tag', tag);
+            core.setOutput('id', release.id);
+            core.setOutput('build', release.draft);
+
   build:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
     strategy:
       fail-fast: false
+      # Both jobs merge latest.json into the same asset; serialize their uploads.
+      max-parallel: 1
       matrix:
         include:
           - platform: windows-latest
@@ -21,12 +83,18 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
       - name: El tag coincide con la versión de la app
+        id: version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           app=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          tag="${GITHUB_REF_NAME#*-}"; tag="${tag#v}"
-          if [ "$app" != "$tag" ]; then echo "El tag $GITHUB_REF_NAME no coincide con la versión $app"; exit 1; fi
+          tag="${RELEASE_TAG#*-}"; tag="${tag#v}"
+          if [ "$app" != "$tag" ]; then echo "El tag $RELEASE_TAG no coincide con la versión $app"; exit 1; fi
+          echo "app=$app" >> "$GITHUB_OUTPUT"
       - name: Dependencias de sistema (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -40,13 +108,16 @@ jobs:
           cache: npm
       - run: npm ci
       - uses: tauri-apps/tauri-action@v0
+        # Signed Windows builds take the steps below instead.
+        if: matrix.platform != 'windows-latest' || env.WINDOWS_SIGNED != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "BlendParser ${{ github.ref_name }}"
+          releaseId: ${{ needs.prepare.outputs.id }}
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: "BlendParser ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
             Versión de prueba de BlendParser: de .blend con materiales a 3MF multicolor para Bambu Studio.
 
@@ -57,8 +128,123 @@ jobs:
 
             Si ya tienes BlendParser 0.0.2 o posterior, se actualiza solo al abrirlo (en Linux, con el AppImage).
 
-            Los instaladores no llevan firma de código: Windows SmartScreen puede pedir "Más información > Ejecutar de todas formas".
-          releaseDraft: false
+            ${{ vars.SIGNPATH_PROJECT_SLUG != '' && 'Los instaladores de Windows llevan firma de código de SignPath Foundation. SmartScreen puede avisar en las primeras descargas de cada versión, hasta que el certificado gane reputación.' || 'Los instaladores no llevan firma de código: Windows SmartScreen puede pedir "Más información > Ejecutar de todas formas".' }}
+
+            Política de firma de código: https://github.com/${{ github.repository }}/blob/main/CODE_SIGNING.md
+          releaseDraft: true
           # Publicado como versión normal: el actualizador lee releases/latest, que ignora los prereleases.
           prerelease: false
           updaterJsonPreferNsis: true
+
+      # ---- Windows firmado: compilar, firmar en SignPath, volver a firmar para el actualizador y publicar.
+      - name: Compilar instaladores de Windows sin publicar
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --bundles nsis,msi
+      - name: Subir instaladores sin firmar para SignPath
+        id: unsigned
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned
+          # The artifact keeps nsis/ and msi/ as folders, as .signpath/artifact-configuration.xml expects.
+          path: |
+            target/release/bundle/nsis/*_x64-setup.exe
+            target/release/bundle/msi/*_x64_*.msi
+          if-no-files-found: error
+      - name: Firmar en SignPath (espera la aprobación manual)
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          # Each release waits for an approver in SignPath; two hours before the job gives up.
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: signed
+          parameters: |
+            version: "${{ steps.version.outputs.app }}"
+      - name: Comprobar la firma Authenticode
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem signed -Recurse -Include *.exe, *.msi
+          if ($files.Count -lt 2) { throw "SignPath no devolvió los dos instaladores" }
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            if ($sig.Status -ne 'Valid') { throw "$($f.Name): firma $($sig.Status)" }
+            "$($f.Name): firmado por $($sig.SignerCertificate.Subject)"
+          }
+      - name: Publicar los instaladores firmados y su entrada en latest.json
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_SIGNED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/publish-signed-windows.mjs signed "${{ needs.prepare.outputs.tag }}"
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+      - name: Descargar y validar el manifiesto de ambas plataformas
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          gh release download "$RELEASE_TAG" --pattern latest.json --dir "$RUNNER_TEMP/updater"
+          node --input-type=module - "$RUNNER_TEMP/updater/latest.json" <<'JS'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const version = process.env.RELEASE_TAG.replace(/^(alpha-|beta-|v)/, '');
+          if (manifest.version !== version) throw new Error('Versión incorrecta en latest.json');
+          for (const platform of ['windows-x86_64', 'linux-x86_64']) {
+            const entry = manifest.platforms?.[platform];
+            if (!entry?.signature || !entry?.url) throw new Error(`Falta ${platform} o su firma`);
+          }
+          JS
+      - name: Publicar solamente cuando ambas builds hayan terminado
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_ID: ${{ needs.prepare.outputs.id }}
+        with:
+          script: |
+            const parse = tag => tag.replace(/^(alpha-|beta-|v)/, '').split('.').map(Number);
+            const newer = (a, b) => {
+              for (let i = 0; i < 3; i++) {
+                if (a[i] !== b[i]) return a[i] > b[i];
+              }
+              return false;
+            };
+            let latest = true;
+            try {
+              const current = (await github.rest.repos.getLatestRelease(context.repo)).data;
+              latest = newer(parse(process.env.RELEASE_TAG), parse(current.tag_name));
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            // Older CI runs may finish after a newer merge. Publish their builds,
+            // but only the current main snapshot can become the updater's latest.
+            const { execFileSync } = require('node:child_process');
+            const markers = execFileSync('git', ['tag', '--points-at', 'HEAD'], { encoding: 'utf8' });
+            const source = markers.split('\n').map(tag => /^release-source-([a-f0-9]{40})$/.exec(tag)?.[1]).find(Boolean);
+            if (source) {
+              const main = (await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' })).data;
+              latest = latest && main.object.sha === source;
+            }
+            await github.rest.repos.updateRelease({
+              ...context.repo, release_id: Number(process.env.RELEASE_ID),
+              draft: false, prerelease: false, make_latest: String(latest),
+            });

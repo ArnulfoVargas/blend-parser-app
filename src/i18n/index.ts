@@ -1,5 +1,5 @@
 // Interface language: the catalogues, the user's choice and the formats that go
-// with it. Spanish is the reference catalogue and the fallback; every other
+// with it. Spanish is the reference catalogue and the fallback for missing keys; every other
 // catalogue is typed against it, so `npm run build` fails when one misses or
 // adds a key. To add a language see README, "Idiomas".
 import { en } from "./en";
@@ -15,12 +15,12 @@ export const LANGS = [
 export type Lang = (typeof LANGS)[number]["code"];
 
 const CATALOGS: Record<Lang, Catalog> = { es, en };
-const FALLBACK: Lang = "es";
+const FALLBACK: Lang = "en";
 const STORAGE = "blendparser.lang";
 
 export type Params = Record<string, string | number>;
 
-/** The saved choice, else the first system language there is a catalogue for, else Spanish. */
+/** The saved choice, else the first system language there is a catalogue for, else English. */
 function initial(): Lang {
   try {
     const saved = localStorage.getItem(STORAGE);

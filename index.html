@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BlendParser</title>
-<meta name="description" content="Convierte un .blend con materiales en un 3MF pintado para Bambu Studio." data-i18n-attr="content:meta.description">
+<meta name="description" content="Convierte un modelo con materiales en un 3MF pintado para Bambu Studio." data-i18n-attr="content:meta.description">
 <script type="module" src="/src/main.ts"></script>
 </head>
 <body>
@@ -60,8 +60,8 @@
       <div class="tray">
         <button class="tray__drop" type="button" id="choose">
           <span class="tray__empty">
-            <strong data-i18n="tray.drop">Suelta un .blend aquí</strong>
-            <span data-i18n="tray.dropHelp">Con sus materiales y texturas. Lo convierto en un 3MF pintado.</span>
+            <strong data-i18n="tray.drop">Suelta un modelo aquí</strong>
+            <span data-i18n="tray.dropHelp">BLEND, OBJ, FBX, glTF/GLB o PLY, con sus materiales y texturas.</span>
             <span class="btn btn--quiet" data-i18n="tray.choose">Elegir archivo</span>
           </span>
           <span class="label tray__ready">
@@ -199,9 +199,11 @@
               <input class="range" id="island" name="island" type="range" min="0" max="50" step="1" value="0">
               <p class="help" data-i18n="colour.islandsHelp">Las manchas pequeñas toman el color vecino: menos cambios de filamento.</p>
             </div>
-            <div class="note" id="detail-note" role="status" hidden>
-              <p data-bind="detailNote"></p>
-              <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix"></button>
+            <div class="reveal is-gone" id="detail-note">
+              <div><div class="note" role="status">
+                <p data-bind="detailNote"></p>
+                <button class="btn btn--quiet btn--sm" type="button" id="detail-fix" data-bind="detailFix"></button>
+              </div></div>
             </div>
           </div>
         </details>
@@ -321,6 +323,8 @@
 
       <section class="mats" aria-labelledby="h-mats">
         <h2 id="h-mats" data-i18n="materials.title">Materiales</h2>
+        <div id="import-warnings" class="import-warnings" role="status" hidden></div>
+        <p id="import-units" class="help" hidden></p>
         <dl id="materials"></dl>
       </section>
     </aside>
@@ -352,6 +356,24 @@
       <div class="dialog__actions">
         <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
         <button class="btn btn--primary" type="submit" value="ok" data-i18n="printability.fixAll">Corregir todo</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog dialog--wide" id="files-dialog" aria-labelledby="h-files">
+    <form method="dialog" class="dialog__body">
+      <div>
+        <h2 id="h-files" data-i18n="files.title">Archivos del modelo</h2>
+        <p class="help mono files__model"></p>
+      </div>
+      <ol class="files__steps"></ol>
+      <section class="files__panel" aria-live="polite"></section>
+      <div class="dialog__actions files__actions">
+        <button class="btn" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <span class="files__spacer"></span>
+        <button class="link" type="button" id="files-now" data-i18n="files.now">Convertir ya</button>
+        <button class="btn" type="button" id="files-back" data-i18n="files.back">Atrás</button>
+        <button class="btn btn--primary" type="button" id="files-next">Siguiente</button>
       </div>
     </form>
   </dialog>
@@ -500,7 +522,7 @@
     </div>
   </dialog>
 
-  <div class="drop-veil" aria-hidden="true"><p data-i18n="tray.veil">Suelta el .blend para convertirlo</p></div>
+  <div class="drop-veil" aria-hidden="true"><p data-i18n="tray.veil">Suelta el modelo para convertirlo</p></div>
   <p class="visually-hidden" aria-live="polite" id="live"></p>
 </div>
 </body>

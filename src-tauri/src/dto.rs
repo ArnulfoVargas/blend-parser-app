@@ -136,6 +136,7 @@ pub struct SettingsDto {
 pub struct Summary {
     pub file_name: String,
     pub file_size: u64,
+    pub import_warnings: Vec<bp_blend::ImportWarning>,
     pub parts: Vec<PartDto>,
     pub materials: Vec<MaterialDto>,
     pub slots: Vec<SlotDto>,
@@ -300,6 +301,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     Summary {
         file_name: doc.file_name.clone(),
         file_size: doc.file_size,
+        import_warnings: doc.import_warnings.clone(),
         parts: p.scene().parts.iter().map(|x| PartDto { name: x.name.clone(), triangles: x.tris.len() }).collect(),
         materials: p
             .scene()
