@@ -22,7 +22,8 @@
         <option value="X1C">Bambu Lab X1 Carbon</option>
         <option value="P1S">Bambu Lab P1S</option>
       </select>
-      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true">Por color (.zip)</button>
+      <!-- Oculto hasta que la exportación por piezas sólidas esté completa (PR #1). -->
+      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" hidden>Por color (.zip)</button>
       <button class="btn btn--primary" type="button" id="export" aria-disabled="true"><span class="btn__warn" aria-hidden="true"></span><span data-bind="exportLabel">Exportar .3mf</span></button>
     </div>
   </header>
