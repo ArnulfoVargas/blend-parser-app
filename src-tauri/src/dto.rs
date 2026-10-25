@@ -125,6 +125,13 @@ pub struct SettingsDto {
     pub flatten_mm: f32,
     pub repair: bool,
     pub min_piece_mm: f32,
+    pub orient: bool,
+    pub fill_holes: bool,
+    pub split_vertices: bool,
+    pub deep_clean: bool,
+    pub drop_floating: bool,
+    /// Rows of the rotation applied to the model as loaded.
+    pub rotation: bp_core::Mat3,
     pub border_detail: u8,
     pub min_island_mm2: f32,
     pub printer: String,
@@ -137,6 +144,7 @@ pub struct SettingsDto {
 pub struct Summary {
     pub file_name: String,
     pub file_size: u64,
+    pub import_warnings: Vec<bp_blend::ImportWarning>,
     pub parts: Vec<PartDto>,
     pub materials: Vec<MaterialDto>,
     pub slots: Vec<SlotDto>,
@@ -306,7 +314,17 @@ pub fn waste_and_plate(
 pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     let p: &Project = &doc.project;
     let stats = p.stats();
-    let MeshOps { keep_ratio, flatten_mm, repair, min_piece_mm } = p.mesh_ops();
+    let MeshOps {
+        keep_ratio,
+        flatten_mm,
+        repair,
+        min_piece_mm,
+        orient,
+        fill_holes,
+        split_vertices,
+        drop_floating,
+        deep_clean,
+    } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
     let min_detail = doc.printer.min_detail_mm2();
@@ -315,6 +333,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     Summary {
         file_name: doc.file_name.clone(),
         file_size: doc.file_size,
+        import_warnings: doc.import_warnings.clone(),
         parts: p.scene().parts.iter().map(|x| PartDto { name: x.name.clone(), triangles: x.tris.len() }).collect(),
         materials: p
             .scene()
@@ -363,6 +382,12 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             flatten_mm,
             repair,
             min_piece_mm,
+            orient,
+            fill_holes,
+            split_vertices,
+            deep_clean,
+            drop_floating,
+            rotation: p.rotation(),
             border_detail,
             min_island_mm2,
             printer: doc.printer.profile.id.clone(),

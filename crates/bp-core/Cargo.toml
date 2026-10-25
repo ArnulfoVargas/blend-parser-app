@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 rayon.workspace = true
 meshopt = "0.7"
+serde.workspace = true

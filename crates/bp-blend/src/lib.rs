@@ -1,4 +1,4 @@
-//! Reads a `.blend` by asking Blender itself: Blender evaluates modifiers and
+//! Reads multicolour model formats by asking Blender itself: Blender evaluates modifiers and
 //! material node trees, `extract.py` dumps the result, and this crate turns the
 //! dump into a [`bp_core::Scene`]. Everything after that happens in Rust.
 
@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use bp_core::{ColorSource, Image, MaterialInfo, Part, Scene};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+pub mod companions;
 
 const SCRIPT: &str = include_str!("extract.py");
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlendError {
+    #[error("Formato de entrada no compatible: {0}")]
+    Unsupported(String),
     #[error("No encontré Blender. Instálalo o indica dónde está blender.exe.")]
     BlenderNotFound,
     #[error("No se pudo leer o escribir un archivo: {0}")]
@@ -61,9 +65,31 @@ fn version_key(p: &Path) -> Vec<u32> {
 
 #[derive(Deserialize)]
 struct Dump {
+    #[serde(default)]
+    warnings: Vec<ImportWarning>,
     images: Vec<DumpImage>,
     materials: Vec<DumpMaterial>,
     parts: Vec<DumpPart>,
+}
+
+/// Stable keys translated by the desktop client; resource names remain literal.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ImportWarning {
+    pub code: String,
+    pub detail: String,
+}
+
+pub struct ImportResult {
+    pub scene: Scene,
+    pub warnings: Vec<ImportWarning>,
+}
+
+pub const INPUT_EXTENSIONS: &[&str] = &["blend", "obj", "fbx", "gltf", "glb", "ply"];
+
+pub fn supports(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| INPUT_EXTENSIONS.contains(&s.to_ascii_lowercase().as_str()))
 }
 
 #[derive(Deserialize)]
@@ -107,25 +133,79 @@ enum DumpSource {
 
 /// Runs Blender on `blend` and returns its scene. `progress` receives each step's name.
 pub fn extract(blender: &Path, blend: &Path, progress: &mut dyn FnMut(&str)) -> Result<Scene, BlendError> {
+    extract_with_report(blender, blend, progress).map(|r| r.scene)
+}
+
+/// Imports a supported model and reports lossy colour approximations and missing resources.
+pub fn extract_with_report(
+    blender: &Path,
+    source: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<ImportResult, BlendError> {
+    extract_with_files(blender, source, &Additions::default(), progress)
+}
+
+/// What the user added before converting (see [`companions`]).
+#[derive(Clone, Debug, Default)]
+pub struct Additions {
+    /// Files for what the model references; folders stand for the files inside them.
+    pub files: Vec<PathBuf>,
+    /// An image for each named material whose texture the model does not name.
+    pub textures: Vec<(String, PathBuf)>,
+    /// An OBJ material library to use instead of the ones the OBJ names.
+    pub library: Option<PathBuf>,
+    /// A .blend whose packed textures go to materials of the same name.
+    pub blend: Option<PathBuf>,
+}
+
+/// As [`extract_with_report`], with what the user added.
+pub fn extract_with_files(
+    blender: &Path,
+    source: &Path,
+    additions: &Additions,
+    progress: &mut dyn FnMut(&str),
+) -> Result<ImportResult, BlendError> {
+    if !supports(source) {
+        return Err(BlendError::Unsupported(source.display().to_string()));
+    }
+    let source = source.canonicalize()?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir().join(format!("blendparser-{}-{stamp}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    let result = run(blender, blend, &dir, progress).and_then(|_| read_dump(&dir));
+    let extras = companions::expand(&additions.files);
+    let textures: serde_json::Map<String, serde_json::Value> =
+        additions.textures.iter().map(|(m, p)| (m.clone(), p.display().to_string().into())).collect();
+    let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string());
+    let added = serde_json::json!({ "textures": textures, "library": path(&additions.library), "blend": path(&additions.blend) });
+    let result = std::fs::write(dir.join("additions.json"), added.to_string())
+        .map_err(BlendError::from)
+        .and_then(|_| run(blender, &source, &extras, &dir, progress))
+        .and_then(|_| read_dump(&dir));
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
 
-fn run(blender: &Path, blend: &Path, dir: &Path, progress: &mut dyn FnMut(&str)) -> Result<(), BlendError> {
+fn run(
+    blender: &Path,
+    blend: &Path,
+    extras: &[PathBuf],
+    dir: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), BlendError> {
     let script = dir.join("extract.py");
     std::fs::write(&script, SCRIPT)?;
     let mut cmd = Command::new(blender);
     cmd.arg("-b")
-        .arg(blend)
         .arg("--factory-startup")
+        .arg("--disable-autoexec")
+        .arg("--python-exit-code")
+        .arg("1")
         .arg("--python")
         .arg(&script)
         .arg("--")
         .arg(dir)
+        .arg(blend)
+        .args(extras)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
@@ -193,7 +273,7 @@ fn u32x3(path: &Path, count: usize) -> Result<Vec<[u32; 3]>, BlendError> {
     Ok(flat.as_chunks::<3>().0.to_vec())
 }
 
-fn read_dump(dir: &Path) -> Result<Scene, BlendError> {
+fn read_dump(dir: &Path) -> Result<ImportResult, BlendError> {
     let json = std::fs::read_to_string(dir.join("scene.json"))?;
     let dump: Dump = serde_json::from_str(&json).map_err(|e| BlendError::Format(e.to_string()))?;
     let images = dump
@@ -258,7 +338,7 @@ fn read_dump(dir: &Path) -> Result<Scene, BlendError> {
         .into_iter()
         .map(|m| MaterialInfo { name: m.name, kind: m.kind, detail: m.detail, faces: m.faces })
         .collect();
-    Ok(Scene { parts, images, materials })
+    Ok(ImportResult { scene: Scene { parts, images, materials }, warnings: dump.warnings })
 }
 
 #[cfg(test)]
