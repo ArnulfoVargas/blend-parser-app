@@ -1,0 +1,15 @@
+[package]
+name = "bp-blend"
+description = "Infraestructura: extrae malla, UV y texturas de un .blend usando Blender en modo headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bp-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+bp-3mf.workspace = true

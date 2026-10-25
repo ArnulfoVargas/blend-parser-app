@@ -1,0 +1,10 @@
+[package]
+name = "bp-3mf"
+description = "Escritor de 3MF compatible con Bambu Studio (paint_color por triangulo)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BlendParser</title>
+<meta name="description" content="Convierte un .blend con materiales en un 3MF pintado para Bambu Studio.">
+<script type="module" src="/src/main.ts"></script>
+</head>
+<body>
+<div class="app" data-app data-state="empty" data-view="filament" data-tool="orbit">
+
+  <header class="bar">
+    <span class="wordmark">BlendParser</span>
+    <p class="bar__file" data-bind="fileName"></p>
+    <div class="bar__end">
+      <label class="visually-hidden" for="printer">Impresora</label>
+      <select class="select" id="printer" name="printer">
+        <option value="A1">Bambu Lab A1</option>
+        <option value="A1M">Bambu Lab A1 mini</option>
+        <option value="X1C">Bambu Lab X1 Carbon</option>
+        <option value="P1S">Bambu Lab P1S</option>
+      </select>
+      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true">Por color (.zip)</button>
+      <button class="btn btn--primary" type="button" id="export" aria-disabled="true"><span class="btn__warn" aria-hidden="true"></span><span data-bind="exportLabel">Exportar .3mf</span></button>
+    </div>
+  </header>
+
+  <main class="work">
+    <!-- Archivo y ajustes -->
+    <aside class="side" aria-label="Archivo y ajustes">
+      <div class="tray">
+        <button class="tray__drop" type="button" id="choose">
+          <span class="tray__empty">
+            <strong>Suelta un .blend aquí</strong>
+            <span>Con sus materiales y texturas. Lo convierto en un 3MF pintado.</span>
+            <span class="btn btn--quiet">Elegir archivo</span>
+          </span>
+          <span class="label tray__ready">
+            <span class="label__name" data-bind="fileName"></span>
+            <span class="label__line"><span class="label__row" data-bind="fileMeta"></span><span class="label__stamp">Convertido</span></span>
+          </span>
+          <span class="label tray__busy">
+            <span class="label__head"><span>Convirtiendo</span></span>
+            <span class="label__name" data-bind="step">Abriendo Blender</span>
+            <span class="progress"><span></span></span>
+          </span>
+          <span class="label label--grey tray__error">
+            <span class="label__head"><span>No se pudo leer</span></span>
+            <span class="label__msg" data-bind="error"></span>
+            <span class="btn btn--quiet">Elegir otro archivo</span>
+          </span>
+        </button>
+        <button class="btn btn--quiet" type="button" id="find-blender" hidden>Buscar blender.exe</button>
+      </div>
+
+      <form class="settings" id="settings" novalidate>
+        <details class="group" open>
+          <summary><h2>Tamaño</h2><span class="group__sum num" data-bind="dims"></span></summary>
+          <div class="group__body">
+            <div class="field">
+              <label for="height">Altura final</label>
+              <div class="field__unit"><input class="input" id="height" name="height" type="number" inputmode="decimal" min="1" max="1000" step="0.5"><span>mm</span></div>
+            </div>
+            <p class="help" data-bind="bedFit"></p>
+            <div class="field">
+              <label for="flatten">Aplanar base</label>
+              <div class="field__unit">
+                <input class="input" id="flatten" name="flatten" type="number" inputmode="decimal" min="0" max="50" step="0.2" value="0" aria-describedby="contact-help">
+                <span>mm</span>
+                <button class="btn btn--quiet" type="button" id="flatten-apply">Aplanar</button>
+              </div>
+              <p class="help" id="contact-help" data-bind="contact"></p>
+            </div>
+          </div>
+        </details>
+
+        <details class="group" id="color-group" open>
+          <summary><h2>Color</h2><span class="group__sum" data-bind="colorSum"></span></summary>
+          <div class="group__body">
+            <fieldset class="keys" id="count">
+              <legend>Detectar de nuevo con</legend>
+              <input type="radio" name="count" id="c2" value="2"><label for="c2">2</label>
+              <input type="radio" name="count" id="c3" value="3"><label for="c3">3</label>
+              <input type="radio" name="count" id="c4" value="4" checked><label for="c4">4</label>
+              <input type="radio" name="count" id="c5" value="5"><label for="c5">5</label>
+              <input type="radio" name="count" id="c6" value="6"><label for="c6">6</label>
+              <input type="radio" name="count" id="c8" value="8"><label for="c8">8</label>
+              <input type="radio" name="count" id="c10" value="10"><label for="c10">10</label>
+              <input type="radio" name="count" id="c12" value="12"><label for="c12">12</label>
+            </fieldset>
+            <p class="help">Vuelve a leer los colores del modelo; descarta lo pintado a mano.</p>
+            <div class="field">
+              <label for="reduce-to">Unir los más parecidos hasta</label>
+              <div class="field__unit reduce">
+                <input class="input" id="reduce-to" type="number" inputmode="numeric" min="1" max="16" value="3" aria-describedby="reduce-help">
+                <span>colores</span>
+                <button class="btn btn--quiet" type="button" id="reduce">Unir</button>
+              </div>
+              <p class="help" id="reduce-help">Conserva lo pintado a mano. Se puede deshacer.</p>
+            </div>
+            <div class="field">
+              <label for="detail">Detalle de bordes <output for="detail" data-bind="detailOut"></output></label>
+              <input class="range" id="detail" name="detail" type="range" min="0" max="5" step="1" value="5">
+            </div>
+            <div class="field" id="island-field">
+              <label for="island">Limpiar islas menores de <output for="island" data-bind="islandOut"></output></label>
+              <input class="range" id="island" name="island" type="range" min="0" max="50" step="1" value="0">
+              <p class="help">Las manchas pequeñas toman el color vecino: menos cambios de filamento.</p>
+            </div>
+          </div>
+        </details>
+
+        <details class="group">
+          <summary><h2>Malla</h2><span class="group__sum" data-bind="meshSum"></span></summary>
+          <div class="group__body">
+            <label class="check"><input type="checkbox" id="repair" checked> Reparar malla</label>
+            <p class="help" data-bind="repairOut"></p>
+            <div class="field">
+              <label for="piece">Quitar piezas sueltas menores de</label>
+              <div class="field__unit"><input class="input" id="piece" name="piece" type="number" inputmode="decimal" min="0" max="100" step="0.5" value="0"><span>mm</span></div>
+            </div>
+            <div class="field">
+              <label for="keep">Simplificar <output for="keep" data-bind="keepOut"></output></label>
+              <input class="range" id="keep" name="keep" type="range" min="5" max="100" step="5" value="100">
+              <p class="help" data-bind="triangles"></p>
+            </div>
+          </div>
+        </details>
+      </form>
+    </aside>
+
+    <!-- Vista previa -->
+    <section class="stage" aria-labelledby="h-preview">
+      <div class="stage__top">
+        <h2 id="h-preview">Vista previa</h2>
+        <div class="stage__tools">
+          <div class="seg" role="group" aria-label="Qué mostrar">
+            <button type="button" data-view="filament" aria-pressed="true">Resultado</button>
+            <button type="button" data-view="texture" aria-pressed="false">Original</button>
+          </div>
+          <div class="seg" role="group" aria-label="Herramienta">
+            <button type="button" data-tool="orbit" aria-pressed="true" title="Orbitar (O)">Orbitar <kbd>O</kbd></button>
+            <button type="button" data-tool="brush" aria-pressed="false" title="Pincel (B)">Pincel <kbd>B</kbd></button>
+          </div>
+          <button class="btn btn--quiet btn--sm" type="button" id="undo" disabled title="Deshacer (Ctrl+Z)">Deshacer</button>
+        </div>
+      </div>
+      <div class="stage__view">
+        <canvas id="viewport" aria-label="Vista 3D del modelo. Arrastra para orbitar, rueda para acercar."></canvas>
+        <div class="banner" id="fit-banner" hidden>
+          <p data-bind="fitBanner"></p>
+          <button class="btn btn--quiet btn--sm" type="button" id="fit">Ajustar a la placa</button>
+        </div>
+        <span class="busybar" aria-hidden="true"></span>
+        <p class="stage__empty">La vista previa aparece cuando sueltas un archivo.</p>
+        <p class="stage__busy" data-bind="step">Abriendo Blender</p>
+        <div class="toast" id="toast" role="status" hidden>
+          <p data-bind="toast"></p>
+          <button class="btn btn--quiet btn--sm" type="button" id="toast-action" hidden></button>
+          <button class="toast__close" type="button" id="toast-close" aria-label="Cerrar aviso">Cerrar</button>
+        </div>
+      </div>
+      <div class="stage__foot">
+        <div class="brush">
+          <span class="brush__chip"><i class="brush__swatch" aria-hidden="true"></i><span data-bind="brushSlot">Ranura 1</span></span>
+          <label for="radius">Radio</label>
+          <input class="range" id="radius" type="range" min="0.5" max="20" step="0.5" value="3">
+          <output for="radius" class="num" data-bind="radiusOut">3&nbsp;mm</output>
+        </div>
+        <p class="stage__hint" data-bind="hint">Arrastra para orbitar, botón derecho para mover, rueda para acercar, F para encuadrar.</p>
+      </div>
+    </section>
+
+    <!-- AMS -->
+    <aside class="ams" aria-labelledby="h-ams">
+      <section class="swaps" aria-labelledby="h-swaps">
+        <h2 id="h-swaps" class="visually-hidden">Cambios de filamento</h2>
+        <p class="swaps__fig"><b class="num" data-bind="swaps">0</b> cambios de filamento <span class="swaps__delta" data-bind="swapsDelta"></span></p>
+        <p class="help" data-bind="swapsDetail"></p>
+        <p class="swaps__how">Para bajarlo:
+          <button class="link" type="button" id="go-reduce">unir colores parecidos</button> o
+          <button class="link" type="button" id="go-islands">limpiar islas</button>.
+        </p>
+      </section>
+
+      <h2 id="h-ams">Ranuras del AMS</h2>
+      <ol class="slots" id="slots"></ol>
+      <p class="ams__hint">Pulsa una ranura para pintar con ella. El círculo cambia su color.</p>
+      <button class="btn btn--quiet" type="button" id="suggest">Volver a sugerir colores</button>
+
+      <section class="mats" aria-labelledby="h-mats">
+        <h2 id="h-mats">Materiales</h2>
+        <dl id="materials"></dl>
+      </section>
+    </aside>
+  </main>
+
+  <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-zip">Exportar por color</h2>
+      <p class="help">Un STL cerrado por color en un .zip, para imprimir cada color como pieza aparte.</p>
+      <div class="field">
+        <label for="shell">Grosor de cada color</label>
+        <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2" aria-describedby="shell-help"><span>mm</span></div>
+        <p class="help" id="shell-help">Entre 0,2 y 20&nbsp;mm.</p>
+      </div>
+      <label class="check"><input type="checkbox" id="main-solid" checked> Color principal como sólido completo</label>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="submit" value="cancel">Cancelar</button>
+        <button class="btn btn--primary" type="button" id="export-zip">Exportar .zip</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="drop-veil" aria-hidden="true"><p>Suelta el .blend para convertirlo</p></div>
+  <p class="visually-hidden" aria-live="polite" id="live"></p>
+</div>
+</body>
+</html>

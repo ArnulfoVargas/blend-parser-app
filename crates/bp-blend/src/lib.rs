@@ -1,0 +1,372 @@
+//! Reads a `.blend` by asking Blender itself: Blender evaluates modifiers and
+//! material node trees, `extract.py` dumps the result, and this crate turns the
+//! dump into a [`bp_core::Scene`]. Everything after that happens in Rust.
+
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use bp_core::{ColorSource, Image, MaterialInfo, Part, Scene};
+use serde::Deserialize;
+
+const SCRIPT: &str = include_str!("extract.py");
+
+#[derive(Debug, thiserror::Error)]
+pub enum BlendError {
+    #[error("No encontré Blender. Instálalo o indica dónde está blender.exe.")]
+    BlenderNotFound,
+    #[error("No se pudo leer o escribir un archivo: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Blender no pudo abrir el archivo:\n{0}")]
+    Blender(String),
+    #[error("El volcado de Blender no tiene el formato esperado: {0}")]
+    Format(String),
+    #[error("El .blend no tiene mallas visibles.")]
+    Empty,
+}
+
+/// Looks for Blender: `BLENDER_PATH`, then the usual install locations, then `PATH`.
+pub fn find_blender() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("BLENDER_PATH").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        for root in [r"C:\Program Files\Blender Foundation", r"C:\Program Files (x86)\Blender Foundation"] {
+            if let Ok(dirs) = std::fs::read_dir(root) {
+                let mut versions: Vec<PathBuf> =
+                    dirs.flatten().map(|d| d.path().join("blender.exe")).filter(|p| p.is_file()).collect();
+                // Newest version last, so it wins.
+                versions.sort_by_key(|p| version_key(p));
+                candidates.extend(versions.into_iter().rev());
+            }
+        }
+        candidates.push(PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Blender\blender.exe"));
+    } else if cfg!(target_os = "macos") {
+        candidates.push(PathBuf::from("/Applications/Blender.app/Contents/MacOS/Blender"));
+    } else {
+        candidates.extend(["/usr/bin/blender", "/usr/local/bin/blender", "/snap/bin/blender"].map(PathBuf::from));
+    }
+    if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
+        return Some(found);
+    }
+    let exe = if cfg!(windows) { "blender.exe" } else { "blender" };
+    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(exe)).find(|p| p.is_file()))
+}
+
+fn version_key(p: &Path) -> Vec<u32> {
+    let dir = p.parent().and_then(|d| d.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    dir.split(|c: char| !c.is_ascii_digit()).filter_map(|s| s.parse().ok()).collect()
+}
+
+#[derive(Deserialize)]
+struct Dump {
+    images: Vec<DumpImage>,
+    materials: Vec<DumpMaterial>,
+    parts: Vec<DumpPart>,
+}
+
+#[derive(Deserialize)]
+struct DumpImage {
+    name: String,
+    width: u32,
+    height: u32,
+    file: String,
+}
+
+#[derive(Deserialize)]
+struct DumpMaterial {
+    name: String,
+    kind: String,
+    detail: String,
+    faces: u32,
+}
+
+#[derive(Deserialize)]
+struct DumpPart {
+    name: String,
+    vertices: usize,
+    triangles: usize,
+    loops: usize,
+    positions: String,
+    tris: String,
+    tri_loops: String,
+    tri_slot: String,
+    uv_layers: Vec<String>,
+    color_layers: Vec<String>,
+    sources: Vec<DumpSource>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum DumpSource {
+    Flat { rgb: [f32; 3] },
+    Image { image: u32, uv: u32 },
+    Vcol { attr: u32 },
+}
+
+/// Runs Blender on `blend` and returns its scene. `progress` receives each step's name.
+pub fn extract(blender: &Path, blend: &Path, progress: &mut dyn FnMut(&str)) -> Result<Scene, BlendError> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("blendparser-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let result = run(blender, blend, &dir, progress).and_then(|_| read_dump(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn run(blender: &Path, blend: &Path, dir: &Path, progress: &mut dyn FnMut(&str)) -> Result<(), BlendError> {
+    let script = dir.join("extract.py");
+    std::fs::write(&script, SCRIPT)?;
+    let mut cmd = Command::new(blender);
+    cmd.arg("-b")
+        .arg(blend)
+        .arg("--factory-startup")
+        .arg("--python")
+        .arg(&script)
+        .arg("--")
+        .arg(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| BlendError::Blender(format!("{}: {e}", blender.display())))?;
+    let stderr = child.stderr.take();
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(e) = stderr {
+            for line in BufReader::new(e).lines().map_while(Result::ok) {
+                s.push_str(&line);
+                s.push('\n');
+            }
+        }
+        s
+    });
+    let mut tail: Vec<String> = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            if let Some(msg) = line.strip_prefix("BP_PROGRESS ") {
+                progress(msg);
+            } else {
+                tail.push(line);
+                if tail.len() > 20 {
+                    tail.remove(0);
+                }
+            }
+        }
+    }
+    let status = child.wait()?;
+    let err = err_thread.join().unwrap_or_default();
+    if !status.success() || !dir.join("scene.json").is_file() {
+        let log = format!("{}\n{}", tail.join("\n"), err);
+        return Err(BlendError::Blender(
+            log.trim().chars().rev().take(2000).collect::<String>().chars().rev().collect(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_vec<T: Copy, const N: usize>(path: &Path, count: usize, conv: fn([u8; N]) -> T) -> Result<Vec<T>, BlendError> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() != count * N {
+        return Err(BlendError::Format(format!(
+            "{} mide {} bytes, esperaba {}",
+            path.display(),
+            bytes.len(),
+            count * N
+        )));
+    }
+    Ok(bytes.as_chunks::<N>().0.iter().map(|c| conv(*c)).collect())
+}
+
+fn f32s<const K: usize>(path: &Path, count: usize) -> Result<Vec<[f32; K]>, BlendError> {
+    let flat = read_vec::<f32, 4>(path, count * K, f32::from_le_bytes)?;
+    Ok(flat.as_chunks::<K>().0.to_vec())
+}
+
+fn u32x3(path: &Path, count: usize) -> Result<Vec<[u32; 3]>, BlendError> {
+    let flat = read_vec::<u32, 4>(path, count * 3, u32::from_le_bytes)?;
+    Ok(flat.as_chunks::<3>().0.to_vec())
+}
+
+fn read_dump(dir: &Path) -> Result<Scene, BlendError> {
+    let json = std::fs::read_to_string(dir.join("scene.json"))?;
+    let dump: Dump = serde_json::from_str(&json).map_err(|e| BlendError::Format(e.to_string()))?;
+    let images = dump
+        .images
+        .into_iter()
+        .map(|i| {
+            let rgb = std::fs::read(dir.join(&i.file))?;
+            if rgb.len() != (i.width * i.height * 3) as usize {
+                return Err(BlendError::Format(format!("textura {} incompleta", i.name)));
+            }
+            Ok(Image { name: i.name, width: i.width, height: i.height, rgb })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut parts = Vec::with_capacity(dump.parts.len());
+    for p in dump.parts {
+        let tris = u32x3(&dir.join(&p.tris), p.triangles)?;
+        let tri_loops = u32x3(&dir.join(&p.tri_loops), p.triangles)?;
+        if tris.iter().flatten().any(|&v| v as usize >= p.vertices)
+            || tri_loops.iter().flatten().any(|&l| l as usize >= p.loops)
+        {
+            return Err(BlendError::Format(format!("{}: índices fuera de rango", p.name)));
+        }
+        let sources: Vec<ColorSource> = p
+            .sources
+            .into_iter()
+            .map(|s| match s {
+                DumpSource::Flat { rgb } => ColorSource::Flat(rgb),
+                DumpSource::Image { image, uv } => ColorSource::Image { image, uv },
+                DumpSource::Vcol { attr } => ColorSource::VertexColor { attr },
+            })
+            .collect();
+        let uv_layers = p.uv_layers.iter().map(|f| f32s::<2>(&dir.join(f), p.loops)).collect::<Result<Vec<_>, _>>()?;
+        let color_layers =
+            p.color_layers.iter().map(|f| f32s::<3>(&dir.join(f), p.loops)).collect::<Result<Vec<_>, _>>()?;
+        for s in &sources {
+            let ok = match *s {
+                ColorSource::Image { image, uv } => (image as usize) < images.len() && (uv as usize) < uv_layers.len(),
+                ColorSource::VertexColor { attr } => (attr as usize) < color_layers.len(),
+                ColorSource::Flat(_) => true,
+            };
+            if !ok {
+                return Err(BlendError::Format(format!("{}: material con referencias rotas", p.name)));
+            }
+        }
+        parts.push(Part {
+            name: p.name,
+            positions: f32s::<3>(&dir.join(&p.positions), p.vertices)?,
+            tris,
+            tri_loops,
+            tri_source: read_vec::<u16, 2>(&dir.join(&p.tri_slot), p.triangles, u16::from_le_bytes)?,
+            sources,
+            uv_layers,
+            color_layers,
+        });
+    }
+    if parts.is_empty() {
+        return Err(BlendError::Empty);
+    }
+    let materials = dump
+        .materials
+        .into_iter()
+        .map(|m| MaterialInfo { name: m.name, kind: m.kind, detail: m.detail, faces: m.faces })
+        .collect();
+    Ok(Scene { parts, images, materials })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs against a real model with Blender installed:
+    /// `BP_SAMPLE_BLEND=ruta/al/modelo.blend cargo test --release -p bp-blend -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn extracts_the_sample_blend() {
+        let Some(blend) = std::env::var_os("BP_SAMPLE_BLEND").map(std::path::PathBuf::from) else {
+            eprintln!("BP_SAMPLE_BLEND no está definido; se omite.");
+            return;
+        };
+        let blender = find_blender().expect("Blender");
+        let mut steps = vec![];
+        let scene = extract(&blender, &blend, &mut |s| steps.push(s.to_string())).unwrap();
+        assert!(!scene.parts.is_empty() && scene.triangle_count() > 0);
+        assert!(!steps.is_empty());
+        // The spider model used during development, when that is the sample.
+        if blend.to_string_lossy().contains("spider_hito2v5") {
+            assert_eq!(scene.parts.len(), 2);
+            assert_eq!(scene.triangle_count(), 145_054 + 181_702);
+            assert_eq!(scene.images.len(), 9);
+        }
+
+        let t = std::time::Instant::now();
+        let mut project = bp_core::Project::new(scene, 4);
+        eprintln!("project in {:?}", t.elapsed());
+        assert_eq!(project.palette().len(), 4);
+
+        let report = |label: &str, p: &bp_core::Project| {
+            let s = p.stats();
+            eprintln!(
+                "{label:<28} tris {:>7}  size {:>5.1}x{:>5.1}x{:>5.1}  contact {:>7.0} mm2  swaps {:>4}  multicolor layers {:>3}/{:<3}  purge {:>5.1} g",
+                s.triangles, s.size_mm[0], s.size_mm[1], s.size_mm[2], s.contact_mm2, s.swaps.swaps, s.swaps.multicolor_layers, s.swaps.layers, s.swaps.purge_grams
+            );
+            s
+        };
+        let t = std::time::Instant::now();
+        project.set_height_mm(75.0);
+        let base = report(&format!("75 mm ({:?})", t.elapsed()), &project);
+        assert!((base.size_mm[2] - 75.0).abs() < 0.01);
+
+        let t = std::time::Instant::now();
+        project.set_color_ops(bp_core::ColorOps { border_detail: 5, min_island_mm2: 4.0 });
+        let clean = report(&format!("+ islands < 4 mm2 ({:?})", t.elapsed()), &project);
+        assert!(clean.swaps.swaps <= base.swaps.swaps);
+
+        let t = std::time::Instant::now();
+        project.set_mesh_ops(bp_core::MeshOps { keep_ratio: 1.0, flatten_mm: 1.0, ..Default::default() });
+        let flat = report(&format!("+ flatten 1 mm ({:?})", t.elapsed()), &project);
+        assert!((flat.size_mm[2] - 74.0).abs() < 0.01);
+
+        let t = std::time::Instant::now();
+        project.set_mesh_ops(bp_core::MeshOps { keep_ratio: 0.4, flatten_mm: 1.0, ..Default::default() });
+        let lite = report(&format!("+ keep 40% ({:?})", t.elapsed()), &project);
+        assert!(lite.triangles < flat.triangles / 2);
+
+        // Export and check every paint_color decodes.
+        let parts = project.export_parts();
+        let filaments: Vec<String> = project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+        let model = bp_3mf::Model {
+            name: "spider",
+            parts: parts
+                .iter()
+                .map(|p| bp_3mf::Part { name: &p.name, positions: &p.positions, tris: &p.tris, paint: &p.paint })
+                .collect(),
+            filaments,
+            printer: bp_3mf::Printer::A1,
+        };
+        let out = std::env::temp_dir().join("blendparser-integration.3mf");
+        bp_3mf::write(std::fs::File::create(&out).unwrap(), &model).unwrap();
+        for p in &parts {
+            assert!(p.paint.iter().all(|c| bp_core::encode::decode(c).is_ok()));
+        }
+        eprintln!("3MF: {} ({} KB)", out.display(), std::fs::metadata(&out).unwrap().len() / 1024);
+
+        // 10 detected colours reduced to 5 by closeness.
+        let pal10 = project.suggest_palette(10);
+        project.set_palette(pal10);
+        let ten = report("10 colours", &project);
+        let t = std::time::Instant::now();
+        project.reduce_palette(5);
+        let five = report(&format!("reduced to 5 ({:?})", t.elapsed()), &project);
+        assert_eq!(project.palette().len(), 5);
+        assert!(five.swaps.swaps <= ten.swaps.swaps);
+        eprintln!("palette 5: {:?}", project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect::<Vec<_>>());
+
+        // One closed STL per colour.
+        let t = std::time::Instant::now();
+        let pieces = project.color_pieces(1.2, true);
+        let hexes: Vec<String> =
+            pieces.iter().map(|p| bp_core::color::to_hex(project.palette()[p.slot as usize])).collect();
+        let files: Vec<bp_3mf::ColorFile> = pieces
+            .iter()
+            .zip(&hexes)
+            .map(|(p, h)| bp_3mf::ColorFile { hex: h, positions: &p.positions, tris: &p.tris, solid: p.solid })
+            .collect();
+        let zip = std::env::temp_dir().join("blendparser-colores.zip");
+        bp_3mf::write_color_zip(std::fs::File::create(&zip).unwrap(), "spider", &files).unwrap();
+        eprintln!(
+            "color zip in {:?}: {} pieces, {} KB, tris {:?}",
+            t.elapsed(),
+            files.len(),
+            std::fs::metadata(&zip).unwrap().len() / 1024,
+            pieces.iter().map(|p| p.tris.len()).collect::<Vec<_>>()
+        );
+        assert!(!files.is_empty() && files.len() <= 5);
+    }
+}

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Propuesta 1: bandeja AMS. Papel cálido, bandeja verde, cuatro compartimentos de plástico. -->
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFBF2"/><stop offset="1" stop-color="#F1E9D8"/></linearGradient>
+    <linearGradient id="tray" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1E8F63"/><stop offset="1" stop-color="#11603F"/></linearGradient>
+    <linearGradient id="glint" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".6"/><stop offset=".35" stop-color="#fff" stop-opacity="0"/><stop offset=".8" stop-color="#0B3D2A" stop-opacity="0"/><stop offset="1" stop-color="#0B3D2A" stop-opacity=".22"/></linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#paper)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#3B2E1A" stroke-opacity=".10" stroke-width="4"/>
+  <rect x="168" y="268" width="688" height="488" rx="84" fill="url(#tray)"/>
+  <rect x="168" y="268" width="688" height="488" rx="84" fill="none" stroke="#fff" stroke-opacity=".25" stroke-width="8" transform="translate(0 4)"/>
+  <g>
+    <rect x="212" y="316" width="128" height="392" rx="44" fill="#F6D57A"/>
+    <rect x="364" y="316" width="128" height="392" rx="44" fill="#F2A08C"/>
+    <rect x="516" y="316" width="128" height="392" rx="44" fill="#9CCBEA"/>
+    <rect x="668" y="316" width="128" height="392" rx="44" fill="#FFF8EC"/>
+  </g>
+  <g fill="url(#glint)">
+    <rect x="212" y="316" width="128" height="392" rx="44"/><rect x="364" y="316" width="128" height="392" rx="44"/>
+    <rect x="516" y="316" width="128" height="392" rx="44"/><rect x="668" y="316" width="128" height="392" rx="44"/>
+  </g>
+</svg>

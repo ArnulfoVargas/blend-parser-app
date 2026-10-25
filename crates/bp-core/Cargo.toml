@@ -1,0 +1,10 @@
+[package]
+name = "bp-core"
+description = "Dominio puro: escena, paleta, pintura por triangulo de Bambu, optimizaciones y proyecto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true
+meshopt = "0.7"

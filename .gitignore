@@ -1,0 +1,21 @@
+# Dependencias y salidas de compilación
+node_modules/
+dist/
+target/
+target-*/
+src-tauri/target-*/
+
+# Generado por Tauri en cada compilación
+src-tauri/gen/
+
+# Editores y sistema
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Archivos de trabajo
+.hallmark/
+*.blend1
