@@ -26,7 +26,7 @@ import {
 import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, onLangChange, setLang, t, tKey, volume, type Key, type Lang } from "./i18n";
 import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
-import { gatherCompanions } from "./companions";
+import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { Viewer, type Tool, type View } from "./viewer";
 
@@ -857,7 +857,15 @@ $("#find-blender").addEventListener("click", async () => {
 
 void getCurrentWebview().onDragDropEvent((e) => {
   const p = e.payload;
-  if (p.type === "enter" || p.type === "over") app.classList.add("is-dragging");
+  const over = p.type === "enter" || p.type === "over";
+  // The model files dialog takes what is dropped while it is open.
+  const into = companionsDrop.active;
+  if (into) {
+    $("#files-dialog").classList.toggle("is-dropping", over);
+    if (p.type === "drop" && p.paths.length) into(p.paths);
+    return;
+  }
+  if (over) app.classList.add("is-dragging");
   else app.classList.remove("is-dragging");
   if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") {
     // A model dropped with its .mtl, .bin or textures: the rest go along with it.

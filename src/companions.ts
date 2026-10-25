@@ -46,6 +46,9 @@ function match(materials: string[], images: string[]): Map<string, string> {
   }
   return out;
 }
+/** While the dialog is open, files dropped on the window are added to it, not opened. */
+export const companionsDrop: { active: ((paths: string[]) => void) | null } = { active: null };
+
 /** Formats whose colours can live in other files. */
 const WITH_COMPANIONS = /\.(obj|gltf|fbx)$/i;
 
@@ -205,6 +208,28 @@ export async function gatherCompanions(model: string, extras: string[] = []): Pr
     return list;
   }
 
+  /** Dropped files go where their kind belongs: an .mtl replaces the model's, a
+   *  .blend is the texture source, images are matched to materials by name, and
+   *  anything else (.bin, textures, folders) is added for the model to find. */
+  async function dropped(paths: string[]) {
+    const ext = (p: string) => p.toLowerCase().split(".").pop() ?? "";
+    const mtl = paths.find((p) => ext(p) === "mtl");
+    const blendFile = paths.find((p) => ext(p) === "blend");
+    const images = paths.filter((p) => IMAGES.includes(ext(p)));
+    if (mtl) library = mtl;
+    if (blendFile) blend = blendFile;
+    for (const p of paths) if (p !== mtl && p !== blendFile && !added.includes(p)) added.push(p);
+    await inspect();
+    const pending = found.filter((c) => c.kind === "unmapped" && !assigned.has(c.name)).map((c) => c.name);
+    if (images.length && pending.length) {
+      const pairs = match(pending, images);
+      for (const [m, p] of pairs) assigned.set(m, p);
+      unmatched = images.filter((p) => ![...pairs.values()].includes(p)).length;
+    }
+    refresh();
+    render();
+  }
+
   function progress(ready: number, total: number): HTMLElement {
     const box = el("div", "files__progress");
     const bar = el("div", "files__bar");
@@ -294,7 +319,11 @@ export async function gatherCompanions(model: string, extras: string[] = []): Pr
     back.addEventListener("click", onBack);
     next.addEventListener("click", onNext);
     now.addEventListener("click", onNow);
+    companionsDrop.active = (paths) => void dropped(paths);
+    dialog.dataset.drop = t("files.drop");
     dialog.addEventListener("close", () => {
+      companionsDrop.active = null;
+      dialog.classList.remove("is-dropping");
       back.removeEventListener("click", onBack);
       next.removeEventListener("click", onNext);
       now.removeEventListener("click", onNow);
