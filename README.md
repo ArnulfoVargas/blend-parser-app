@@ -87,7 +87,7 @@ estima 430 cambios, 164,4 g de purga, 15,0 g de torre y 179,5 g en total.
 
 Los textos de la interfaz están en `src/i18n/`: `es.ts` es la referencia y el respaldo, y cada
 idioma es un archivo con las mismas claves. En el primer arranque se usa el idioma del sistema
-si hay catálogo para él; si no, el español. La elección se guarda en el almacenamiento de la
+si hay catálogo para él; si no, el inglés. La elección se guarda en el almacenamiento de la
 ventana. El backend no redacta mensajes: envía una clave (`error.*`, `progress.*`) con sus
 valores y la interfaz la traduce.
 
