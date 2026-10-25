@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { api, type PrinterProfile, type Printers, type Summary } from "./api";
+import { Picker, type PickerItem } from "./picker";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { Viewer, type Tool, type View } from "./viewer";
 
@@ -497,31 +498,49 @@ $("#detail-fix").addEventListener("click", () => {
 
 // ---- printers ------------------------------------------------------------------------------
 
-const printerSelect = $<HTMLSelectElement>("#printer");
 const nozzleSelect = $<HTMLSelectElement>("#nozzle");
 const profileOf = (id: string) => printers?.profiles.find((p) => p.id === id);
 const closest = (list: number[], n: number) => list.reduce((a, b) => (Math.abs(b - n) < Math.abs(a - n) ? b : a), list[0]);
+const volumeText = (p: PrinterProfile) => `${mm(p.volumeMm[0])} × ${mm(p.volumeMm[1])} × ${mm(p.volumeMm[2])} mm`;
+/** "Bambu Lab A1" reads as "A1" under its Bambu Lab heading. */
+const shortName = (p: PrinterProfile) => (p.vendor && p.name.startsWith(`${p.vendor} `) ? p.name.slice(p.vendor.length + 1) : p.name);
+const nozzleList = (ns: number[]) => {
+  const t = ns.map(mm);
+  return `${t.length > 1 ? `${t.slice(0, -1).join(", ")} o ${t[t.length - 1]}` : t[0]} mm`;
+};
 
-/** The bar's printer and nozzle pickers, grouped as Bambu Studio and "mine". */
+/** Every printer as a picker item: the user's first, then by brand as the catalogue orders them. */
+function printerItems(): PickerItem[] {
+  const all = printers?.profiles ?? [];
+  return [...all.filter((p) => p.custom), ...all.filter((p) => !p.custom)].map((p) => ({
+    value: p.id,
+    label: shortName(p),
+    group: p.custom ? "Mis impresoras" : p.vendor,
+    detail: `${volumeText(p)}, boquilla de ${nozzleList(p.nozzles)}`,
+    keywords: p.name,
+    full: p.name,
+  }));
+}
+
+const printerPicker = new Picker($("#printer-picker"), {
+  label: "Impresora",
+  placeholder: "Buscar impresora o marca",
+  empty: (q) => `Ninguna impresora coincide con «${q}».`,
+  emptyAction: { label: "Crear una impresora propia", run: (q) => openPrinterDialog(q) },
+  onPick: (id) => void choosePrinter(id, Number(nozzleSelect.value)),
+});
+
+/** The bar's printer and nozzle pickers. */
 function renderPrinterPick(id: string, nozzle: number) {
   if (!printers) return;
   printers.selected = id;
   printers.nozzleMm = nozzle;
-  const option = (p: PrinterProfile) => new Option(p.custom ? p.name : p.name.replace(/^Bambu Lab /, ""), p.id);
-  const bambu = document.createElement("optgroup");
-  bambu.label = "Bambu Lab";
-  bambu.append(...printers.profiles.filter((p) => !p.custom).map(option));
-  const mine = printers.profiles.filter((p) => p.custom);
-  const own = document.createElement("optgroup");
-  own.label = "Mis impresoras";
-  own.append(...mine.map(option));
-  printerSelect.replaceChildren(bambu, ...(mine.length ? [own] : []));
-  printerSelect.value = id;
+  printerPicker.setItems(printerItems());
+  printerPicker.setValue(id);
   const profile = profileOf(id);
   nozzleSelect.replaceChildren(...(profile?.nozzles ?? [nozzle]).map((n) => new Option(`${mm(n)} mm`, String(n))));
   nozzleSelect.value = String(nozzle);
   nozzleSelect.disabled = (profile?.nozzles.length ?? 1) < 2;
-  printerSelect.title = profile ? `${profile.name}: ${mm(profile.volumeMm[0])} × ${mm(profile.volumeMm[1])} × ${mm(profile.volumeMm[2])} mm` : "";
 }
 
 /** Picks a printer; the open model is prepared again for its nozzle. */
@@ -540,8 +559,7 @@ async function choosePrinter(id: string, nozzle: number) {
   });
 }
 
-printerSelect.addEventListener("change", () => void choosePrinter(printerSelect.value, Number(nozzleSelect.value)));
-nozzleSelect.addEventListener("change", () => void choosePrinter(printerSelect.value, Number(nozzleSelect.value)));
+nozzleSelect.addEventListener("change", () => void choosePrinter(printerPicker.value, Number(nozzleSelect.value)));
 
 // The custom printer dialog: a list of the user's printers and one form to add or edit.
 const printerDialog = $<HTMLDialogElement>("#printer-dialog");
@@ -552,9 +570,29 @@ const pf = {
   w: $<HTMLInputElement>("#pf-w"),
   d: $<HTMLInputElement>("#pf-d"),
   h: $<HTMLInputElement>("#pf-h"),
-  base: $<HTMLSelectElement>("#pf-base"),
 };
 let editing = "";
+
+// The Bambu Studio profile a custom printer borrows; picking one fills in its volume when still empty.
+const basePicker = new Picker($("#pf-base"), {
+  label: "Perfil de Bambu Studio",
+  placeholder: "Buscar impresora o marca",
+  empty: (q) => `Bambu Studio no trae ninguna impresora que coincida con «${q}». Déjala genérica.`,
+  onPick: (id) => {
+    const base = profileOf(id);
+    if (!base) return;
+    [pf.w, pf.d, pf.h].forEach((el, i) => {
+      if (!el.value) el.value = String(base.volumeMm[i]);
+    });
+  },
+});
+
+basePicker.button.setAttribute("aria-describedby", "pf-base-help");
+
+function baseItems(): PickerItem[] {
+  const generic: PickerItem = { value: "", label: "Ninguno: impresora genérica", group: "", detail: "El 3MF lleva solo el volumen y la boquilla" };
+  return [generic, ...printerItems().filter((i) => i.group !== "Mis impresoras")];
+}
 
 function renderPrinterList() {
   if (!printers) return;
@@ -566,8 +604,7 @@ function renderPrinterList() {
     const li = document.createElement("li");
     li.className = "printers__row";
     li.toggleAttribute("aria-current", p.id === editing);
-    const nozzles = p.nozzles.map(mm);
-    const base = printers!.bases.find((b) => b.id === p.base)?.name;
+    const base = p.base ? profileOf(p.base)?.name : undefined;
     li.innerHTML = `
       <div class="printers__text">
         <strong></strong>
@@ -576,8 +613,7 @@ function renderPrinterList() {
       <button class="btn btn--quiet btn--sm" type="button" data-act="edit">Editar</button>
       <button class="btn btn--quiet btn--sm" type="button" data-act="delete">Borrar</button>`;
     li.querySelector("strong")!.textContent = p.name;
-    li.querySelector(".help")!.textContent =
-      `${mm(p.volumeMm[0])} × ${mm(p.volumeMm[1])} × ${mm(p.volumeMm[2])} mm, boquilla de ${nozzles.length > 1 ? `${nozzles.slice(0, -1).join(", ")} o ${nozzles[nozzles.length - 1]}` : nozzles[0]} mm. ${base ? `Perfil de ${base}.` : "Genérica."}`;
+    li.querySelector(".help")!.textContent = `${volumeText(p)}, boquilla de ${nozzleList(p.nozzles)}. ${base ? `Perfil de ${base}.` : "Genérica."}`;
     li.querySelector('[data-act="edit"]')!.addEventListener("click", () => fillPrinterForm(p));
     li.querySelector('[data-act="delete"]')!.addEventListener("click", () => void deletePrinter(p));
     return li;
@@ -590,7 +626,7 @@ function fillPrinterForm(p: PrinterProfile | null) {
   $<HTMLButtonElement>("#printer-new").hidden = !p;
   pf.name.value = p?.name ?? "";
   [pf.w.value, pf.d.value, pf.h.value] = (p?.volumeMm ?? ["", "", ""]).map(String);
-  pf.base.value = p?.base ?? "";
+  basePicker.setValue(p?.base ?? "");
   const nozzles = p?.nozzles ?? [0.4];
   document.querySelectorAll<HTMLInputElement>("#pf-nozzles input").forEach((i) => (i.checked = nozzles.includes(Number(i.value))));
   for (const el of [pf.name, pf.w, pf.d, pf.h]) el.removeAttribute("aria-invalid");
@@ -598,9 +634,10 @@ function fillPrinterForm(p: PrinterProfile | null) {
   renderPrinterList();
 }
 
-function openPrinterDialog() {
+/** Opens the custom printer dialog, the name filled in when it comes from a search. */
+function openPrinterDialog(name = "") {
   if (!printers) return;
-  pf.base.replaceChildren(new Option("Ninguno: impresora genérica", ""), ...printers.bases.map((b) => new Option(b.name, b.id)));
+  basePicker.setItems(baseItems());
   $("#pf-nozzles").replaceChildren(
     Object.assign(document.createElement("legend"), { textContent: "Boquillas que admite, en mm" }),
     ...printers.nozzles.flatMap((n) => {
@@ -610,18 +647,10 @@ function openPrinterDialog() {
     }),
   );
   fillPrinterForm(null);
+  pf.name.value = name;
   printerDialog.showModal();
   pf.name.focus();
 }
-
-// A Bambu Lab base fills in its volume when the fields are still empty.
-pf.base.addEventListener("change", () => {
-  const base = profileOf(pf.base.value);
-  if (!base) return;
-  [pf.w, pf.d, pf.h].forEach((el, i) => {
-    if (!el.value) el.value = String(base.volumeMm[i]);
-  });
-});
 
 function printerFormError(message: string, field?: HTMLElement) {
   printerError.textContent = message;
@@ -643,7 +672,7 @@ printerForm.addEventListener("submit", async (e) => {
   if (bad) return printerFormError("Ancho, fondo y alto van entre 20 y 2000 mm.", bad);
   const nozzles = [...document.querySelectorAll<HTMLInputElement>("#pf-nozzles input:checked")].map((i) => Number(i.value));
   if (!nozzles.length) return printerFormError("Marca al menos una boquilla.", document.querySelector<HTMLInputElement>("#pf-nozzles input") ?? undefined);
-  const profile: PrinterProfile = { id: editing, name, volumeMm: volume as [number, number, number], nozzles, base: pf.base.value || null, custom: true };
+  const profile: PrinterProfile = { id: editing, name, volumeMm: volume as [number, number, number], nozzles, base: basePicker.value || null, vendor: "", custom: true };
   save.setAttribute("aria-busy", "true");
   save.textContent = "Guardando…";
   try {
@@ -697,7 +726,7 @@ async function deletePrinter(p: PrinterProfile) {
   }
 }
 
-$("#open-printers").addEventListener("click", openPrinterDialog);
+$("#open-printers").addEventListener("click", () => openPrinterDialog());
 $("#printer-new").addEventListener("click", () => {
   fillPrinterForm(null);
   pf.name.focus();

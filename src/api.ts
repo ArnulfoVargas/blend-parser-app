@@ -11,13 +11,14 @@ export interface Settings { heightMm: number; keepRatio: number; flattenMm: numb
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
+  vendor: string; // brand; empty for the user's own
   name: string;
   volumeMm: Vec3; // width, depth, height
   nozzles: number[];
   base: string | null; // Bambu Lab printer whose presets the 3MF names
   custom: boolean;
 }
-export interface Printers { profiles: PrinterProfile[]; selected: string; nozzleMm: number; nozzles: number[]; bases: { id: string; name: string }[] }
+export interface Printers { profiles: PrinterProfile[]; selected: string; nozzleMm: number; nozzles: number[] }
 
 export interface Summary {
   fileName: string;

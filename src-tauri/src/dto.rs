@@ -109,13 +109,6 @@ pub struct PaintDto {
     pub tris: Vec<u32>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BaseDto {
-    pub id: &'static str,
-    pub name: &'static str,
-}
-
 /// Every printer to pick from, the current pick, and what a custom one can use.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,8 +116,8 @@ pub struct PrintersDto {
     pub profiles: Vec<bp_3mf::PrinterProfile>,
     pub selected: String,
     pub nozzle_mm: f32,
+    /// Nozzles a custom printer can take.
     pub nozzles: Vec<f32>,
-    pub bases: Vec<BaseDto>,
 }
 
 pub fn printers(store: &crate::profiles::Store) -> PrintersDto {
@@ -134,7 +127,6 @@ pub fn printers(store: &crate::profiles::Store) -> PrintersDto {
         selected: p.profile.id,
         nozzle_mm: p.nozzle_mm,
         nozzles: bp_3mf::NOZZLES.to_vec(),
-        bases: bp_3mf::bambu_bases().into_iter().map(|(id, name)| BaseDto { id, name }).collect(),
     }
 }
 

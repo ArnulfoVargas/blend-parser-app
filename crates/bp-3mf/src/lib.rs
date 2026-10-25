@@ -8,7 +8,7 @@ use std::io::{Seek, Write};
 use zip::write::SimpleFileOptions;
 
 mod printer;
-pub use printer::{bambu_bases, catalog, Printer, PrinterProfile, NOZZLES};
+pub use printer::{canonical_id, catalog, Printer, PrinterProfile, NOZZLES};
 
 pub struct Part<'a> {
     pub name: &'a str,
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn names_the_presets_for_the_nozzle() {
-        let x1c = catalog().into_iter().find(|p| p.id == "X1C").unwrap();
+        let x1c = catalog().into_iter().find(|p| p.id == "Bambu Lab X1 Carbon").unwrap();
         let v = config(Printer::new(x1c, 0.6));
         assert_eq!(v["printer_model"], "Bambu Lab X1 Carbon");
         assert_eq!(v["printer_settings_id"], "Bambu Lab X1 Carbon 0.6 nozzle");
@@ -272,6 +272,7 @@ mod tests {
     fn custom_printer_carries_its_volume() {
         let p = PrinterProfile {
             id: "custom-1".into(),
+            vendor: String::new(),
             name: "Ender 3".into(),
             volume_mm: [220.0, 120.0, 250.0],
             nozzles: vec![0.4, 0.6],

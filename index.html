@@ -15,10 +15,7 @@
     <button class="version" type="button" id="version" title="Buscar actualizaciones"><span data-bind="version">v…</span><i class="version__dot" aria-hidden="true"></i></button>
     <p class="bar__file" data-bind="fileName"></p>
     <div class="bar__end">
-      <label class="visually-hidden" for="printer">Impresora</label>
-      <select class="select" id="printer" name="printer">
-        <option value="A1">Bambu Lab A1</option>
-      </select>
+      <div id="printer-picker"></div>
       <label class="visually-hidden" for="nozzle">Boquilla</label>
       <select class="select" id="nozzle" name="nozzle" title="Diámetro de la boquilla">
         <option value="0.4">0,4 mm</option>
@@ -254,9 +251,9 @@
           <legend>Boquillas que admite, en mm</legend>
         </fieldset>
         <div class="field">
-          <label for="pf-base">Perfil de Bambu Studio</label>
-          <select class="select" id="pf-base" name="pf-base" aria-describedby="pf-base-help"></select>
-          <p class="help" id="pf-base-help">Con un perfil de Bambu Lab, el 3MF abre con esa impresora, su proceso y su filamento. Sin perfil, el 3MF lleva el volumen y la boquilla, y lo abre cualquier slicer compatible con 3MF de Bambu.</p>
+          <label for="pf-base-button">Perfil de Bambu Studio</label>
+          <div class="picker--block" id="pf-base"></div>
+          <p class="help" id="pf-base-help">Con el perfil de una impresora de Bambu Studio, el 3MF abre con esa impresora, su proceso y su filamento. Sin perfil, el 3MF lleva el volumen y la boquilla, y lo abre cualquier slicer compatible con 3MF de Bambu.</p>
         </div>
         <p class="form-error" id="printer-error" role="alert" hidden></p>
         <div class="dialog__actions">

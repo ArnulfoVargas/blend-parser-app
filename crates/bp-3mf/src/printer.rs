@@ -1,17 +1,26 @@
 //! Printer profiles: the print volume, the nozzles a printer takes and, for the
 //! printers Bambu Studio ships, the presets the 3MF names so it opens ready to
-//! slice. Every preset name below exists in Bambu Studio's `resources/profiles/BBL`.
+//! slice. The catalogue is `catalog.json`, generated from Bambu Studio's
+//! `resources/profiles` by `scripts/sync-printers.mjs`.
+
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-/// Nozzle diameters the app offers, in millimetres.
+/// Nozzle diameters a custom printer can take, in millimetres.
 pub const NOZZLES: [f32; 4] = [0.2, 0.4, 0.6, 0.8];
+
+/// Filament preset when the catalogue has none for a nozzle, or for a generic printer.
+const GENERIC_PLA: &str = "Generic PLA";
 
 /// A printer as the UI picks it: from the catalogue or made by the user.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrinterProfile {
     pub id: String,
+    /// Brand, to group and search by; empty for the user's own printers.
+    #[serde(default)]
+    pub vendor: String,
     pub name: String,
     /// Printable width, depth and height in millimetres.
     pub volume_mm: [f32; 3],
@@ -25,149 +34,81 @@ pub struct PrinterProfile {
     pub custom: bool,
 }
 
-/// Presets for one nozzle: (diameter, process, filament).
-type NozzlePresets = [(f32, &'static str, &'static str); 4];
-
-struct Bambu {
-    id: &'static str,
-    /// `printer_model` and the start of `printer_settings_id`.
-    model: &'static str,
-    volume: [f32; 3],
-    presets: NozzlePresets,
+#[derive(Deserialize)]
+struct CatalogFile {
+    printers: Vec<CatalogPrinter>,
 }
 
-const BAMBU: [Bambu; 9] = [
-    Bambu {
-        id: "A1",
-        model: "Bambu Lab A1",
-        volume: [256.0, 256.0, 256.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL A1 0.2 nozzle", "Bambu PLA Basic @BBL A1 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL A1", "Bambu PLA Basic @BBL A1"),
-            (0.6, "0.30mm Strength @BBL A1 0.6 nozzle", "Bambu PLA Basic @BBL A1"),
-            (0.8, "0.40mm Standard @BBL A1 0.8 nozzle", "Bambu PLA Basic @BBL A1"),
-        ],
-    },
-    Bambu {
-        id: "A1M",
-        model: "Bambu Lab A1 mini",
-        volume: [180.0, 180.0, 180.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL A1M 0.2 nozzle", "Bambu PLA Basic @BBL A1M 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL A1M", "Bambu PLA Basic @BBL A1M"),
-            (0.6, "0.30mm Standard @BBL A1M 0.6 nozzle", "Bambu PLA Basic @BBL A1M"),
-            (0.8, "0.40mm Standard @BBL A1M 0.8 nozzle", "Bambu PLA Basic @BBL A1M"),
-        ],
-    },
-    Bambu {
-        id: "P1P",
-        model: "Bambu Lab P1P",
-        volume: [256.0, 256.0, 256.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL P1P 0.2 nozzle", "Bambu PLA Basic @BBL P1P 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL P1P", "Bambu PLA Basic @BBL P1P"),
-            (0.6, "0.30mm Standard @BBL P1P 0.6 nozzle", "Bambu PLA Basic @BBL P1P 0.6 nozzle"),
-            (0.8, "0.40mm Standard @BBL P1P 0.8 nozzle", "Bambu PLA Basic @BBL P1P"),
-        ],
-    },
-    Bambu {
-        id: "P1S",
-        model: "Bambu Lab P1S",
-        volume: [256.0, 256.0, 256.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL X1C 0.2 nozzle", "Bambu PLA Basic @BBL X1C 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL X1C", "Bambu PLA Basic @BBL P1S 0.4 nozzle"),
-            (0.6, "0.30mm Standard @BBL X1C 0.6 nozzle", "Bambu PLA Basic @BBL P1S 0.6 nozzle"),
-            (0.8, "0.40mm Standard @BBL X1C 0.8 nozzle", "Bambu PLA Basic @BBL X1C 0.8 nozzle"),
-        ],
-    },
-    Bambu {
-        id: "P2S",
-        model: "Bambu Lab P2S",
-        volume: [256.0, 256.0, 256.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL P2S 0.2 nozzle", "Bambu PLA Basic @BBL P2S 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL P2S", "Bambu PLA Basic @BBL P2S"),
-            (0.6, "0.30mm Standard @BBL P2S 0.6 nozzle", "Bambu PLA Basic @BBL P2S 0.6 nozzle"),
-            (0.8, "0.40mm Standard @BBL P2S 0.8 nozzle", "Bambu PLA Basic @BBL P2S 0.8 nozzle"),
-        ],
-    },
-    Bambu {
-        id: "X1",
-        model: "Bambu Lab X1",
-        volume: [256.0, 256.0, 256.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL X1C 0.2 nozzle", "Bambu PLA Basic @BBL X1C 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL X1C", "Bambu PLA Basic @BBL X1"),
-            (0.6, "0.30mm Standard @BBL X1 0.6 nozzle", "Bambu PLA Basic @BBL X1"),
-            (0.8, "0.40mm Standard @BBL X1 0.8 nozzle", "Bambu PLA Basic @BBL X1"),
-        ],
-    },
-    Bambu {
-        id: "X1C",
-        model: "Bambu Lab X1 Carbon",
-        volume: [256.0, 256.0, 256.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL X1C 0.2 nozzle", "Bambu PLA Basic @BBL X1C 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL X1C", "Bambu PLA Basic @BBL X1C"),
-            (0.6, "0.30mm Standard @BBL X1C 0.6 nozzle", "Bambu PLA Basic @BBL X1C 0.6 nozzle"),
-            (0.8, "0.40mm Standard @BBL X1C 0.8 nozzle", "Bambu PLA Basic @BBL X1C 0.8 nozzle"),
-        ],
-    },
-    Bambu {
-        id: "X1E",
-        model: "Bambu Lab X1E",
-        volume: [256.0, 256.0, 256.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL X1C 0.2 nozzle", "Bambu PLA Basic @BBL X1C 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL X1C", "Bambu PLA Basic @BBL X1C"),
-            (0.6, "0.30mm Standard @BBL X1C 0.6 nozzle", "Bambu PLA Basic @BBL X1C"),
-            (0.8, "0.40mm Standard @BBL X1C 0.8 nozzle", "Bambu PLA Basic @BBL X1C 0.8 nozzle"),
-        ],
-    },
-    Bambu {
-        id: "H2S",
-        model: "Bambu Lab H2S",
-        volume: [340.0, 320.0, 340.0],
-        presets: [
-            (0.2, "0.10mm Standard @BBL H2S 0.2 nozzle", "Bambu PLA Basic @BBL H2S 0.2 nozzle"),
-            (0.4, "0.20mm Standard @BBL H2S", "Bambu PLA Basic @BBL H2S"),
-            (0.6, "0.30mm Standard @BBL H2S 0.6 nozzle", "Bambu PLA Basic @BBL H2S 0.6 nozzle"),
-            (0.8, "0.40mm Standard @BBL H2S 0.8 nozzle", "Bambu PLA Basic @BBL H2S 0.8 nozzle"),
-        ],
-    },
-];
-
-fn bambu(id: &str) -> Option<&'static Bambu> {
-    BAMBU.iter().find(|b| b.id == id)
+#[derive(Deserialize)]
+struct CatalogPrinter {
+    id: String,
+    vendor: String,
+    name: String,
+    /// Printable area as min x, min y, max x, max y.
+    area: [f32; 4],
+    height: f32,
+    nozzles: Vec<CatalogNozzle>,
 }
 
-/// The printers the app knows, Bambu Lab first as Bambu Studio lists them.
+#[derive(Deserialize)]
+struct CatalogNozzle {
+    diameter: f32,
+    printer: String,
+    process: Option<String>,
+    layer: Option<f32>,
+    filament: Option<String>,
+}
+
+fn printers() -> &'static [CatalogPrinter] {
+    static CATALOG: OnceLock<Vec<CatalogPrinter>> = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        serde_json::from_str::<CatalogFile>(include_str!("catalog.json")).expect("catalog.json is valid").printers
+    })
+}
+
+fn find(id: &str) -> Option<&'static CatalogPrinter> {
+    let id = canonical_id(id);
+    printers().iter().find(|p| p.id == id)
+}
+
+/// Ids of the first catalogue, kept so older saved choices still resolve.
+pub fn canonical_id(id: &str) -> &str {
+    match id {
+        "A1" => "Bambu Lab A1",
+        "A1M" => "Bambu Lab A1 mini",
+        "P1P" => "Bambu Lab P1P",
+        "P1S" => "Bambu Lab P1S",
+        "P2S" => "Bambu Lab P2S",
+        "X1" => "Bambu Lab X1",
+        "X1C" => "Bambu Lab X1 Carbon",
+        "X1E" => "Bambu Lab X1E",
+        "H2S" => "Bambu Lab H2S",
+        other => other,
+    }
+}
+
+/// Every printer the app knows: Bambu Lab first, then the other brands.
 pub fn catalog() -> Vec<PrinterProfile> {
-    BAMBU
+    printers()
         .iter()
-        .map(|b| PrinterProfile {
-            id: b.id.into(),
-            name: b.model.into(),
-            volume_mm: b.volume,
-            nozzles: NOZZLES.to_vec(),
-            base: Some(b.id.into()),
+        .map(|p| PrinterProfile {
+            id: p.id.clone(),
+            vendor: p.vendor.clone(),
+            name: p.name.clone(),
+            volume_mm: [p.area[2] - p.area[0], p.area[3] - p.area[1], p.height],
+            nozzles: p.nozzles.iter().map(|n| n.diameter).collect(),
+            base: Some(p.id.clone()),
             custom: false,
         })
         .collect()
 }
 
-/// Catalogue printers whose presets a custom profile can borrow, as (id, name).
-pub fn bambu_bases() -> Vec<(&'static str, &'static str)> {
-    BAMBU.iter().map(|b| (b.id, b.model)).collect()
-}
-
 /// What Bambu Studio is told about the printer.
 pub(crate) struct Presets {
-    pub printer_model: &'static str,
+    pub printer_model: String,
     pub printer_settings_id: String,
-    pub process: &'static str,
-    pub filament: &'static str,
+    pub process: String,
+    pub filament: String,
 }
 
 /// The printer and nozzle a model is prepared and exported for.
@@ -179,7 +120,8 @@ pub struct Printer {
 
 impl Default for Printer {
     fn default() -> Self {
-        Self::new(catalog().swap_remove(0), 0.4)
+        let a1 = catalog().into_iter().find(|p| p.id == "Bambu Lab A1").expect("the A1 is in the catalogue");
+        Self::new(a1, 0.4)
     }
 }
 
@@ -204,26 +146,33 @@ impl Printer {
         self.profile.volume_mm[2]
     }
 
-    /// Where the model's centre goes on the plate.
+    /// Where the model's centre goes: the middle of the catalogue printer's
+    /// printable area, which does not always start at 0, 0.
     pub(crate) fn plate_centre(&self) -> (f32, f32) {
-        let (w, d) = self.bed_mm();
-        (w / 2.0, d / 2.0)
+        match find(&self.profile.id).filter(|_| !self.profile.custom) {
+            Some(p) => ((p.area[0] + p.area[2]) / 2.0, (p.area[1] + p.area[3]) / 2.0),
+            None => (self.profile.volume_mm[0] / 2.0, self.profile.volume_mm[1] / 2.0),
+        }
+    }
+
+    fn nozzle(&self) -> Option<(&'static CatalogPrinter, &'static CatalogNozzle)> {
+        let p = find(self.profile.base.as_deref()?)?;
+        Some((p, p.nozzles.iter().find(|n| (n.diameter - self.nozzle_mm).abs() < 1e-3)?))
     }
 
     pub(crate) fn presets(&self) -> Option<Presets> {
-        let b = bambu(self.profile.base.as_deref()?)?;
-        let &(n, process, filament) = b.presets.iter().find(|p| (p.0 - self.nozzle_mm).abs() < 1e-3)?;
+        let (p, n) = self.nozzle()?;
         Some(Presets {
-            printer_model: b.model,
-            printer_settings_id: format!("{} {n} nozzle", b.model),
-            process,
-            filament,
+            printer_model: p.id.clone(),
+            printer_settings_id: n.printer.clone(),
+            process: n.process.clone().unwrap_or_default(),
+            filament: n.filament.clone().unwrap_or_else(|| GENERIC_PLA.into()),
         })
     }
 
     /// Layer height of the process the 3MF names (half the nozzle when there is none).
     pub fn layer_mm(&self) -> f32 {
-        self.presets().and_then(|p| p.process.split("mm").next()?.parse().ok()).unwrap_or(self.nozzle_mm / 2.0)
+        self.nozzle().and_then(|(_, n)| n.layer).unwrap_or(self.nozzle_mm / 2.0)
     }
 
     /// Smallest colour patch the nozzle draws cleanly: two lines wide each way.
@@ -237,19 +186,42 @@ mod tests {
     use super::*;
 
     fn by_id(id: &str) -> PrinterProfile {
-        catalog().into_iter().find(|p| p.id == id).unwrap()
+        catalog().into_iter().find(|p| p.id == canonical_id(id)).unwrap()
     }
 
     #[test]
-    fn every_catalogue_printer_has_presets_for_every_nozzle() {
+    fn catalogue_covers_bambu_lab_and_other_brands() {
+        let all = catalog();
+        for id in ["A1", "A1M", "Bambu Lab A2L", "P1S", "X1C", "Prusa MK3S", "Creality K1"] {
+            assert!(all.iter().any(|p| p.id == canonical_id(id)), "{id}");
+        }
+        assert!(all.len() > 50);
+        assert_eq!(all[0].vendor, "Bambu Lab");
+        assert!(all.iter().all(|p| !p.nozzles.is_empty() && p.volume_mm.iter().all(|&v| v > 0.0)));
+    }
+
+    #[test]
+    fn every_catalogue_nozzle_names_a_machine_preset() {
         for p in catalog() {
-            for n in NOZZLES {
+            for &n in &p.nozzles {
                 let printer = Printer::new(p.clone(), n);
                 let pr = printer.presets().unwrap_or_else(|| panic!("{} {n}", p.id));
-                assert_eq!(pr.printer_settings_id, format!("{} {n} nozzle", p.name));
-                assert!((printer.layer_mm() - n / 2.0).abs() < 1e-6, "{} {n}", p.id);
+                assert!(pr.printer_settings_id.ends_with(" nozzle"), "{}", pr.printer_settings_id);
+                assert!(printer.layer_mm() > 0.0 && printer.layer_mm() <= n, "{} {n}", p.id);
             }
         }
+    }
+
+    #[test]
+    fn bambu_presets_match_bambu_studio() {
+        let p = Printer::new(by_id("X1C"), 0.6);
+        let pr = p.presets().unwrap();
+        assert_eq!(pr.printer_model, "Bambu Lab X1 Carbon");
+        assert_eq!(pr.printer_settings_id, "Bambu Lab X1 Carbon 0.6 nozzle");
+        assert_eq!(pr.process, "0.30mm Standard @BBL X1C 0.6 nozzle");
+        assert_eq!(pr.filament, "Bambu PLA Basic @BBL X1C 0.6 nozzle");
+        assert_eq!(p.layer_mm(), 0.3);
+        assert_eq!(Printer::new(by_id("A1M"), 0.4).plate_centre(), (90.0, 90.0));
     }
 
     #[test]
@@ -264,6 +236,7 @@ mod tests {
     fn generic_profile_has_no_presets() {
         let p = PrinterProfile {
             id: "custom-1".into(),
+            vendor: String::new(),
             name: "Ender 3".into(),
             volume_mm: [220.0, 220.0, 250.0],
             nozzles: vec![0.4],

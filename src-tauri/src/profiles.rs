@@ -29,6 +29,13 @@ impl Store {
     pub fn load(path: PathBuf) -> Self {
         let mut store: Store =
             std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        // Choices saved with the first catalogue's short ids ("A1", "X1C").
+        for p in &mut store.custom {
+            p.base = p.base.take().map(|b| bp_3mf::canonical_id(&b).to_string());
+        }
+        if let Some(sel) = &mut store.selected {
+            sel.id = bp_3mf::canonical_id(&sel.id).to_string();
+        }
         store.custom.retain(|p| validate(p).is_ok());
         store.path = Some(path);
         store
@@ -54,6 +61,7 @@ impl Store {
     }
 
     pub fn select(&mut self, id: &str, nozzle_mm: f32) -> Result<Printer, String> {
+        let id = bp_3mf::canonical_id(id);
         let profile =
             self.profiles().into_iter().find(|p| p.id == id).ok_or(format!("No conozco la impresora {id}."))?;
         let printer = Printer::new(profile, nozzle_mm);
@@ -65,6 +73,7 @@ impl Store {
     pub fn upsert(&mut self, mut p: PrinterProfile) -> Result<PrinterProfile, String> {
         p.name = p.name.trim().to_string();
         p.custom = true;
+        p.vendor.clear();
         p.nozzles.sort_by(f32::total_cmp);
         p.nozzles.dedup();
         validate(&p)?;
@@ -107,8 +116,8 @@ fn validate(p: &PrinterProfile) -> Result<(), String> {
         return Err("Elige al menos una boquilla.".into());
     }
     if let Some(base) = &p.base {
-        if !bp_3mf::bambu_bases().iter().any(|(id, _)| id == base) {
-            return Err(format!("{base} no es una impresora de Bambu Lab conocida."));
+        if !bp_3mf::catalog().iter().any(|c| &c.id == base) {
+            return Err(format!("{base} no está entre las impresoras de Bambu Studio."));
         }
     }
     Ok(())
@@ -131,6 +140,7 @@ mod tests {
     fn ender() -> PrinterProfile {
         PrinterProfile {
             id: String::new(),
+            vendor: "Creality".into(),
             name: " Ender 3 ".into(),
             volume_mm: [220.0, 220.0, 250.0],
             nozzles: vec![0.6, 0.4, 0.4],
@@ -173,6 +183,17 @@ mod tests {
         let p = s.upsert(ender()).unwrap();
         s.select(&p.id, 0.4).unwrap();
         s.remove(&p.id);
-        assert_eq!(s.printer().profile.id, "A1");
+        assert_eq!(s.printer().profile.id, "Bambu Lab A1");
+    }
+
+    #[test]
+    fn old_short_ids_still_resolve() {
+        let path = std::env::temp_dir().join(format!("bp-printers-old-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"custom":[{"id":"custom-1","name":"Mía","volumeMm":[200,200,200],"nozzles":[0.4],"base":"X1C","custom":true}],"selected":{"id":"A1M","nozzleMm":0.6}}"#).unwrap();
+        let s = Store::load(path.clone());
+        assert_eq!(s.printer().profile.id, "Bambu Lab A1 mini");
+        assert_eq!(s.printer().nozzle_mm, 0.6);
+        assert_eq!(s.custom[0].base.as_deref(), Some("Bambu Lab X1 Carbon"));
+        let _ = std::fs::remove_file(&path);
     }
 }
