@@ -393,8 +393,14 @@ export class Viewer {
   private async onMove(e: PointerEvent) {
     if (this.drag) return this.dragTo(e);
     if (this.tool === "size" && e.buttons === 0) {
-      this.hoverGrip = this.gripAt(e);
-      this.canvas.style.cursor = this.hoverGrip === null ? "" : "grab";
+      const grip = this.gripAt(e);
+      if (grip !== this.hoverGrip) {
+        // Grows under the pointer.
+        this.hoverGrip = grip;
+        this.placeGrips();
+        this.requestRender();
+      }
+      this.canvas.style.cursor = grip === null ? "" : "grab";
       return;
     }
     // Measuring: the point under the pointer, and the tape stretched to it.
@@ -456,7 +462,7 @@ export class Viewer {
     this.sizeBox.position.copy(c);
     this.sizeBox.scale.copy(box.getSize(new THREE.Vector3()));
     const r = this.markerSize();
-    const gap = r * 4;
+    const gap = r * 6;
     const cam = this.camera.position;
     const spots = [
       new THREE.Vector3(box.max.x + gap, c.y, c.z),
@@ -467,8 +473,16 @@ export class Viewer {
     ];
     this.grips.children.forEach((g, i) => {
       g.position.copy(spots[i]);
-      g.scale.setScalar(r * (g.userData.grip === this.hoverGrip || g.userData.grip === this.drag?.grip ? 3.2 : 2.4));
+      // The same size on screen at any zoom: 18 px, 24 px under the pointer.
+      const px = g.userData.grip === this.hoverGrip || g.userData.grip === this.drag?.grip ? 24 : 18;
+      g.scale.setScalar(px * this.unitsPerPixel(g.position));
     });
+  }
+
+  /** Preview units one screen pixel spans at `at`. */
+  private unitsPerPixel(at: THREE.Vector3) {
+    const dist = this.camera.position.distanceTo(at);
+    return (2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) / Math.max(1, this.canvas.clientHeight);
   }
 
   private gripAt(e: PointerEvent): Grip | null {
