@@ -89,6 +89,7 @@ export interface Progress { key: string; name: string }
 export interface Summary {
   fileName: string;
   fileSize: number;
+  importWarnings: { code: string; detail: string }[];
   parts: { name: string; triangles: number }[];
   materials: Material[];
   slots: Slot[];

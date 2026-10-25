@@ -506,3 +506,6 @@ details.group[open] .group__sum { visibility: hidden; }
 .size-chip.is-x .size-chip__axis, .tape-label.is-x { background: var(--axis-x); color: var(--glint); }
 .size-chip.is-y .size-chip__axis, .tape-label.is-y { background: var(--axis-y); color: var(--glint); }
 .size-chip.is-z .size-chip__axis, .tape-label.is-z { background: var(--axis-z); color: var(--glint); }
+
+.import-warnings { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; padding: 0 0 12px; }
+.import-warnings p { margin: 0 0 8px; }

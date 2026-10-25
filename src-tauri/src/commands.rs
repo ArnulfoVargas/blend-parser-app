@@ -80,10 +80,10 @@ pub fn blender_status(app: AppHandle) -> Option<String> {
     blender_path(&app).ok().map(|p| p.display().to_string())
 }
 
-/// A `.blend` passed on the command line ("Open with…"), if any.
+/// A supported model passed on the command line ("Open with…"), if any.
 #[tauri::command]
 pub fn initial_file() -> Option<String> {
-    std::env::args().skip(1).find(|a| a.to_lowercase().ends_with(".blend"))
+    std::env::args().skip(1).find(|a| bp_blend::supports(Path::new(a)))
 }
 
 #[tauri::command]
@@ -110,9 +110,9 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
             let _ = handle.emit("progress", ProgressDto { key: key.to_string(), name: name.to_string() });
         };
         emit("blender");
-        let scene = bp_blend::extract(&blender, file, &mut |m| emit(m))?;
+        let imported = bp_blend::extract_with_report(&blender, file, &mut |m| emit(m))?;
         emit("palette");
-        let mut project = bp_core::Project::new(scene, 4);
+        let mut project = bp_core::Project::new(imported.scene, 4);
         let state = handle.state::<AppState>();
         let prefs = state.prefs.lock()?;
         project.set_print_ops(print_ops(&printer, &prefs));
@@ -120,6 +120,7 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
             project,
             file_name: file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path.clone()),
             file_size: size,
+            import_warnings: imported.warnings,
             printer,
             flush: Default::default(),
         };

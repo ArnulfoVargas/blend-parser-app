@@ -295,6 +295,13 @@ function render(s: Summary) {
 
   renderWaste(s);
   renderSlots(s);
+  const warnings = $("#import-warnings");
+  warnings.hidden = s.importWarnings.length === 0;
+  warnings.replaceChildren(...s.importWarnings.map((w) => {
+    const p = document.createElement("p");
+    p.textContent = tKey(`import.${w.code}`, { detail: w.detail }, w.detail);
+    return p;
+  }));
   const mats = $<HTMLDListElement>("#materials");
   mats.replaceChildren(...s.materials.flatMap((m) => {
     const dt = document.createElement("dt");
@@ -752,7 +759,7 @@ async function openFile(path: string) {
   const lower = path.toLowerCase();
   const name = path.split(/[\\/]/).pop() ?? path;
   if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
-  if (!lower.endsWith(".blend")) return setState("error", { key: "error.notBlend", params: { name } });
+  if (!/\.(blend|obj|fbx|gltf|glb|ply)$/.test(lower)) return setState("error", { key: "error.notBlend", params: { name } });
   step = { key: "blender", name: "" };
   setState("converting");
   hideToast();
@@ -779,7 +786,7 @@ async function openFile(path: string) {
 }
 
 $("#choose").addEventListener("click", async () => {
-  const path = await open({ multiple: false, directory: false, filters: [{ name: "Blender", extensions: ["blend"] }] });
+  const path = await open({ multiple: false, directory: false, filters: [{ name: t("import.formats"), extensions: ["blend", "obj", "fbx", "gltf", "glb", "ply"] }] });
   if (typeof path === "string") await openFile(path);
 });
 
@@ -820,7 +827,7 @@ $("#export").addEventListener("click", async () => {
   const btn = $<HTMLButtonElement>("#export");
   if (app.dataset.state !== "ready" || !summary || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
-  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(/\.(blend|obj|fbx|gltf|glb|ply)$/i, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
   if (!path) return;
   btn.setAttribute("aria-busy", "true");
   btn.setAttribute("aria-disabled", "true");
@@ -854,7 +861,7 @@ $("#export-zip").addEventListener("click", async () => {
   zipDialog.close();
   if (!(await confirmOversize())) return;
   const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
-  const path = await save({ defaultPath: summary.fileName.replace(/\.blend$/i, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  const path = await save({ defaultPath: summary.fileName.replace(/\.(blend|obj|fbx|gltf|glb|ply)$/i, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
   await work(async () => {
     const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());
