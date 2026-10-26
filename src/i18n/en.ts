@@ -451,6 +451,8 @@ export const en: Catalog = {
   "export.piecesSaved": { one: "{count} piece saved to {path}", other: "{count} pieces saved to {path}" },
 
   "zip.saved": { one: "{n} piece on {plates} plates, with an assembly guide, saved to {path}.", other: "{n} pieces on {plates} plates, with an assembly guide, saved to {path}." },
+  "zip.review": { one: "{n} piece needs a look: see resumen.html.", other: "{n} pieces need a look: see resumen.html." },
+  "zip.dropped": { one: "{n} region too thin to make a piece was left out.", other: "{n} regions too thin to make a piece were left out." },
   "zip.oversize": { one: "{n} does not fit the plate; see the guide.", other: "{n} do not fit the plate; see the guide." },
   "zip.help": "Splits the model into solid pieces, one or more per colour, that fit together. The .zip holds a 3MF with the pieces laid out on single-colour plates, an STL per piece and an assembly guide with pictures.",
   "zip.detail": "Joint detail",

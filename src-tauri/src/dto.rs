@@ -18,6 +18,9 @@ pub struct KitDto {
     pub plates: usize,
     /// Pieces larger than the plate.
     pub oversize: usize,
+    /// Pieces to look at before printing them, and regions too thin to make a piece.
+    pub review: usize,
+    pub dropped: usize,
 }
 
 #[derive(Serialize)]

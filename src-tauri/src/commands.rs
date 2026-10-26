@@ -679,7 +679,7 @@ pub async fn export_color_zip(
     in_range(voxel_mm, 0.2..=2.0, "error.kitDetailRange")?;
     in_range(depth_mm, 0.0..=50.0, "error.kitDepthRange")?;
     let handle = app.clone();
-    with_doc(app, move |d, _| {
+    with_doc(app, move |d, prefs| {
         let emit = |key: &str| {
             let _ = handle.emit("progress", ProgressDto { key: key.to_string(), name: String::new() });
         };
@@ -702,12 +702,31 @@ pub async fn export_color_zip(
         let palette: Vec<String> = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let slots: Vec<_> =
             d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
+        let filament_names: Vec<Option<String>> = d
+            .slot_filaments()
+            .iter()
+            .map(|f| f.map(|f| format!("{} {} {}", f.brand, f.kind, f.name_es).trim().to_string()))
+            .collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let info = bp_3mf::KitInfo { name: &name, palette: &palette, slots: &slots, printer: &d.printer };
+        let info = bp_3mf::KitInfo {
+            name: &name,
+            palette: &palette,
+            slots: &slots,
+            filament_names: &filament_names,
+            printer: &d.printer,
+            params: d.kit.unwrap_or(bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot, min_piece_mm3 }),
+            density_g_cm3: prefs.waste.density_g_cm3,
+        };
         let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
         let s = bp_3mf::write_kit_zip(std::io::BufWriter::new(file), &kit, &info)
             .map_err(|e| AppError::with("error.zipWrite", json!({ "detail": e.to_string() })))?;
-        Ok(dto::KitDto { pieces: s.pieces, plates: s.plates, oversize: s.oversize })
+        Ok(dto::KitDto {
+            pieces: s.pieces,
+            plates: s.plates,
+            oversize: s.oversize,
+            review: s.review,
+            dropped: s.dropped,
+        })
     })
     .await
 }
