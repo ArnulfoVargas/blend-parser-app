@@ -53,6 +53,20 @@ for (const axis of [0, 1, 2]) {
   });
 }
 
+test("choosing a half keeps the drawn line editable and changes neither geometry nor selection", () => {
+  const { viewer, events } = harness();
+  let cleared = 0, both;
+  viewer.sectionLine = { active: false, clear: () => cleared++ };
+  viewer.handlers.cutChoice = (value) => both = value;
+  viewer.chooseCutSide(false);
+  assert.equal(cleared, 0);
+  assert.equal(both, false);
+  assert.equal(viewer.section.flip, false);
+  assert.deepEqual(viewer.section.point, original().point);
+  assert.deepEqual(viewer.section.selected, original().selected);
+  assert.equal(events.length, 1);
+});
+
 for (const slide of [0, 1, 2, "plane"]) {
   test(`plane translation ${slide} preserves angles and restricts motion to its handle`, () => {
     const { viewer } = harness();

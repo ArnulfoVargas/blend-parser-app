@@ -1,0 +1,15 @@
+.section-line { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; overflow: hidden; }
+.section-line line { stroke: var(--color-accent-deep); stroke-width: 3; stroke-dasharray: 8 4; filter: drop-shadow(0 0 2px var(--glint)); }
+.section-line circle { fill: var(--color-paper); stroke: var(--color-accent-deep); stroke-width: 2; }
+.cut-choice-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 4; overflow: hidden; }
+.cut-half { position: absolute; top: 0; left: 0; display: grid; place-items: center; width: 36px; height: 36px; border: 2px solid var(--color-accent-deep); border-radius: 50%; background: var(--color-paper); color: var(--color-accent-deep); pointer-events: auto; font: 700 var(--text-sm)/1 var(--font-body); cursor: pointer; box-shadow: 0 1px 6px var(--color-rule); }
+.cut-half[aria-pressed="true"] { background: var(--color-accent-deep); color: var(--color-accent-ink); }
+.cut-half[hidden] { display: none; }
+.cut-half:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
+.cut-review { display: flex; flex-wrap: wrap; gap: var(--space-xs) var(--space-md); font: 400 var(--text-xs)/1.5 var(--font-outlier); color: var(--color-muted); }
+#cut-status[data-state="valid"] { color: var(--color-accent-deep); }
+#cut-status[data-state="error"] { color: var(--color-error); font-family: var(--font-body); }
+#cut-pick-part[aria-pressed="true"] { color: var(--color-ink); text-decoration: underline; }
+.app.is-working .cut-choice-overlay { pointer-events: none; }
+.app.is-working .cut-half { pointer-events: none; }
+.app.is-working .cut-draw { pointer-events: none; }

@@ -277,7 +277,7 @@
           <span class="cut-guide-key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7M20 3v5h-5"/></svg><span data-i18n="cut.rotate">Rotate plane</span></span>
           <label class="cut-guide-snap"><span data-i18n="cut.snap">Snap</span><select id="cut-snap" data-i18n-attr="aria-label:cut.snap"><option value="1">1&deg;</option><option value="5">5&deg;</option><option value="15" selected>15&deg;</option><option value="45">45&deg;</option></select></label>
         </div>
-        <div class="cut-kept"><span id="cut-side"></span><button type="button" id="cut-flip" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16m-4-4 4 4-4 4M20 16H4m4-4-4 4 4 4"/></svg><span data-i18n="cut.flip">Flip</span></button></div>
+        <div class="cut-kept"><span id="cut-side"></span><button type="button" id="cut-flip" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16m-4-4 4 4-4 4M20 16H4m4-4-4 4 4 4"/></svg><span data-i18n="cut.flip">Flip</span></button><button type="button" id="cut-both" aria-pressed="false" data-i18n="cut.bothChoice">Both</button></div>
         <div class="banner" id="fit-banner" hidden>
           <p data-bind="fitBanner"></p>
           <button class="btn btn--quiet btn--sm" type="button" id="fit" data-i18n="size.fit">Ajustar a la placa</button>
@@ -319,12 +319,14 @@
           <div class="cut-controls__values"><fieldset class="cut-values"><legend data-i18n="cut.point">point</legend><div><label class="cut-value" data-axis="x"><span>X</span><input id="cut-x" type="number" step="0.1" value="0" aria-label="X (mm)"></label><label class="cut-value" data-axis="y"><span>Y</span><input id="cut-y" type="number" step="0.1" value="0" aria-label="Y (mm)"></label><label class="cut-value" data-axis="z"><span>Z</span><input id="cut-z" type="number" step="0.1" value="0" aria-label="Z (mm)"></label></div></fieldset><fieldset class="cut-values"><legend data-i18n="cut.rotation">rotation</legend><div><label class="cut-value" data-axis="x"><span>X</span><input id="cut-rx" type="number" step="0.1" value="0" aria-label="X (&deg;)"></label><label class="cut-value" data-axis="y"><span>Y</span><input id="cut-ry" type="number" step="0.1" value="0" aria-label="Y (&deg;)"></label><label class="cut-value" data-axis="z"><span>Z</span><input id="cut-rz" type="number" step="0.1" value="0" aria-label="Z (&deg;)"></label></div></fieldset></div>
           <div class="cut-controls__foot">
             <div class="cut-controls__options">
+              <button class="link" type="button" id="cut-pick-part" aria-pressed="false" data-i18n="cut.pickPart" data-i18n-attr="title:cut.scope">Select in viewport</button>
               <label class="check" data-i18n-attr="title:cut.keepOtherHelp"><input type="checkbox" id="cut-keep-other"><span data-i18n="cut.keepOther">Both halves</span></label>
               <label class="check" data-i18n-attr="title:cut.layHelp"><input type="checkbox" id="cut-lay"><span data-i18n="cut.lay">Lay on cut</span></label>
               <details class="cut-parts" id="cut-parts"><summary data-i18n-attr="title:cut.selectHelp"><span data-i18n="cut.target">Parts</span><span id="cut-target-count"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></summary><div class="cut-parts__menu"><label for="cut-target" data-i18n="cut.target">Parts</label><select id="cut-target" multiple size="4" data-i18n-attr="aria-label:cut.target"></select><p data-i18n="cut.selectHelp">Hold Ctrl to select several parts.</p></div></details>
             </div>
             <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Apply cut</button></div>
           </div>
+          <p class="cut-review"><span id="cut-extents"></span><span id="cut-status" role="status" aria-live="polite"></span></p>
         </div>
         <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
         <p class="stage__hint" data-bind="hint"></p>

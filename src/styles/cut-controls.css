@@ -53,6 +53,12 @@
 .cut-guide-snap { display: flex; align-items: center; gap: var(--space-2xs); padding-inline: var(--space-xs); color: var(--color-muted); }
 .cut-guide-snap select { height: 30px; border: 1px solid var(--color-muted); border-radius: var(--radius-input); background: var(--color-paper); color: var(--color-ink); font: inherit; }
 .cut-guide-key { display: inline-flex; align-items: center; gap: var(--space-2xs); min-height: 32px; padding-inline: var(--space-xs); color: var(--color-muted); }
+.cut-draw { display: none; position: absolute; bottom: var(--space-md); left: var(--space-md); z-index: 4; margin: 0; max-width: min(320px, calc(100% - var(--space-xl))); }
+.app[data-tool="section"] .cut-draw { display: grid; }
+.cut-draw p { display: none; padding: var(--space-xs); border-radius: var(--radius-input); background: var(--color-paper); color: var(--color-ink-2); }
+.cut-draw[data-drawing="true"] p { display: block; }
+.cut-draw button[aria-pressed="true"] { background: var(--color-accent); color: var(--color-accent-ink); }
+.cut-draw button { box-shadow: inset 0 0 0 1px var(--color-rule); }
 .cut-controls :is(button, input, select, summary):focus-visible, .cut-guides :is(button, select):focus-visible, .cut-kept button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .cut-controls button:active, .cut-guides button:active, .cut-kept button:active { transform: translateY(1px); }
 .cut-controls :is(button, input, select):disabled, .cut-guides :is(button, select):disabled { background: var(--color-paper-2); color: var(--color-muted); cursor: not-allowed; }

@@ -176,6 +176,8 @@ export const api = {
   /** The exact preview plane; its coordinates include stretch, before uniform scale. */
   cutModel: (point: Vec3, normal: Vec3, keepLow: boolean, keepOther: boolean, layOnCut: boolean, selected: number[]) =>
     invoke<Summary>("cut_model", { point, normal, keepLow, keepOther, layOnCut, selected }),
+  previewCut: (point: Vec3, normal: Vec3, keepLow: boolean, keepOther: boolean, layOnCut: boolean, selected: number[]) =>
+    invoke<number>("preview_cut", { point, normal, keepLow, keepOther, layOnCut, selected }),
   undoCut: () => invoke<Summary>("undo_cut"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),
