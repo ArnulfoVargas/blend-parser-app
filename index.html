@@ -54,7 +54,7 @@
         <option value="0.4">0,4 mm</option>
       </select>
       <!-- Oculto hasta que la exportación por piezas sólidas esté completa (PR #1). -->
-      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" hidden data-i18n="bar.byColour">Por color (.zip)</button>
+      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" data-i18n="bar.byColour">Por color (.zip)</button>
       <button class="btn btn--primary" type="button" id="export" aria-disabled="true"><span class="btn__warn" aria-hidden="true"></span><span data-bind="exportLabel">Exportar .3mf</span></button>
     </div>
   </header>
@@ -437,7 +437,7 @@
     </form>
   </dialog>
 
-  <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
+  <dialog class="dialog dialog--wide" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>
       <p class="help" data-i18n="zip.help"></p>
@@ -463,15 +463,51 @@
         <div class="field__unit"><input class="input" id="min-piece" type="number" inputmode="decimal" min="0" max="10000" step="5" value="30" aria-describedby="min-piece-help"><span>mm³</span></div>
         <p class="help" id="min-piece-help" data-i18n="zip.minPieceHelp"></p>
       </div>
-      <div class="field">
+      <div class="zip-mix">
         <label class="check"><input type="checkbox" id="zip-mix" aria-describedby="zip-mix-help"> <span data-i18n="zip.mix">Mezclar colores en una placa</span></label>
         <p class="help" id="zip-mix-help" data-i18n="zip.mixHelp"></p>
       </div>
+      <fieldset class="zip-contents" aria-describedby="zip-error">
+        <legend data-i18n="zip.contents">Qué incluir</legend>
+        <label class="check"><input type="checkbox" id="zip-3mf" checked> <span data-i18n="zip.threeMf">3MF con las piezas en sus placas</span></label>
+        <label class="check"><input type="checkbox" id="zip-guide" checked> <span data-i18n="zip.guide">Guía de armado con imágenes (HTML)</span></label>
+        <label class="check"><input type="checkbox" id="zip-text" checked> <span data-i18n="zip.text">Pasos en texto (TXT)</span></label>
+        <div class="field">
+          <label for="zip-stl" data-i18n="zip.stl">Archivos STL</label>
+          <select class="select" id="zip-stl">
+            <option value="piece" data-i18n="zip.stlPiece">Uno por pieza</option>
+            <option value="colour" data-i18n="zip.stlColour">Uno por color, con sus piezas armadas</option>
+            <option value="none" data-i18n="zip.stlNone">Ninguno</option>
+          </select>
+        </div>
+      </fieldset>
+      <div class="field" id="zip-quality-field">
+        <label for="zip-quality" data-i18n="zip.quality">Calidad de las imágenes</label>
+        <select class="select" id="zip-quality" aria-describedby="zip-estimate">
+          <option value="low" data-i18n="zip.qualityLow">Baja: más ligera</option>
+          <option value="medium" selected data-i18n="zip.qualityMedium">Media</option>
+          <option value="high" data-i18n="zip.qualityHigh">Alta: más nítida</option>
+        </select>
+        <p class="help" id="zip-estimate" aria-live="polite"></p>
+      </div>
+      <p class="form-error" id="zip-error" role="alert" hidden data-i18n="zip.nothing"></p>
       <div class="dialog__actions">
         <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
         <button class="btn btn--primary" type="button" id="export-zip" data-i18n="zip.export">Exportar .zip</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog class="dialog" id="kit-progress" aria-labelledby="h-kit-progress">
+    <div class="dialog__body">
+      <h2 id="h-kit-progress" data-i18n="zip.progressTitle">Exportando por color</h2>
+      <p id="kit-stage" aria-live="polite"></p>
+      <div class="meter" role="progressbar" aria-labelledby="kit-stage" aria-valuemin="0" aria-valuemax="100" id="kit-meter"><span></span></div>
+      <p class="help" data-i18n="zip.progressHelp"></p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="button" id="kit-cancel" data-i18n="zip.cancel">Cancelar exportación</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog class="dialog" id="pieces-dialog" aria-labelledby="h-pieces">

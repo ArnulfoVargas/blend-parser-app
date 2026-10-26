@@ -21,6 +21,17 @@ pub struct KitDto {
     /// Pieces to look at before printing them, and regions too thin to make a piece.
     pub review: usize,
     pub dropped: usize,
+    /// Size of the ZIP written.
+    pub bytes: u64,
+}
+
+/// How far the colour kit export has got: `split`, `plates`, `pictures` or
+/// `files`, with how many of `total` are done (0 of 0 when it cannot tell).
+#[derive(Clone, Serialize)]
+pub struct KitProgressDto {
+    pub stage: String,
+    pub done: usize,
+    pub total: usize,
 }
 
 #[derive(Serialize)]
