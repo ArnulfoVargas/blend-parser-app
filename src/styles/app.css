@@ -478,6 +478,8 @@ details.group[open] .group__sum { visibility: hidden; }
 .place { display: none; flex: none; align-items: center; gap: var(--space-xs); font-size: var(--text-sm); color: var(--color-ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .app[data-tool="move"] .place[data-for="move"], .app[data-tool="rotate"] .place[data-for="rotate"], .app[data-tool="section"] .place[data-for="section"] { display: flex; }
 .place .range { width: 120px; }
+.place__step { display: inline-flex; align-items: center; gap: var(--space-2xs); margin-left: var(--space-xs); }
+.place__step .select { min-height: 36px; }
 /* The cut's controls come in groups, set apart by a rule; they wrap a whole group at a time. */
 .place[data-for="section"] { flex: 1 1 auto; flex-wrap: wrap; row-gap: var(--space-xs); column-gap: 0; }
 .place__group { display: flex; flex: none; align-items: center; gap: var(--space-xs); padding: 0 var(--space-sm); }

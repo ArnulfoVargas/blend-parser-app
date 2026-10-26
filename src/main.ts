@@ -252,6 +252,12 @@ async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
 }
 document.querySelectorAll<HTMLButtonElement>("button[data-turn]").forEach((b) => b.addEventListener("click", () => void turn(() => api.rotate(Number(b.dataset.turn), 90))));
 $("#rotate-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
+const turnStep = $<HTMLSelectElement>("#turn-step");
+turnStep.addEventListener("change", () => {
+  viewer.setTurnStep(Number(turnStep.value));
+  if (app.dataset.tool === "rotate") setHint(t("hint.rotate", { step: num(Number(turnStep.value)) }));
+});
+viewer.setTurnStep(Number(turnStep.value));
 
 const cutPos = $<HTMLInputElement>("#cut-pos");
 /** The cut's controls under the view, and the mark on its tool while it is on. */
@@ -1382,7 +1388,9 @@ function setTool(tool: Tool) {
   viewer.setTool(tool);
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
-  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
+  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
+    : tool === "rotate" ? t("hint.rotate", { step: num(Number(turnStep.value)) })
+    : t(`hint.${tool}`));
   syncMeasure();
 }
 
