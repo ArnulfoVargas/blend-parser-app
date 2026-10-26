@@ -435,8 +435,8 @@ fn cap(
         // Rightmost hole first, as each bridge has to see the outline it joins.
         let right = |r: &Vec<u32>| r.iter().map(|&i| at(i)[0]).fold(f32::MIN, f32::max);
         own.sort_by(|a, b| right(b).total_cmp(&right(a)));
-        for hole in own {
-            bridge(&mut outline, hole, &at);
+        for (k, hole) in own.iter().enumerate() {
+            bridge(&mut outline, hole, &own[k + 1..], &at);
         }
         // One colour for the whole cap: the surface's where its rim starts.
         out.extend(earclip(&outline, &at).into_iter().map(|t| (t, [*corner; 3], *src)));
@@ -457,46 +457,75 @@ fn inside(p: [f32; 2], ring: &[u32], at: &impl Fn(u32) -> [f32; 2]) -> bool {
 
 /// Joins a hole to its outline with a two-way cut from the hole's rightmost
 /// vertex to an outline vertex it sees, so one polygon can be ear-clipped.
-fn bridge(outline: &mut Vec<u32>, hole: &[u32], at: &impl Fn(u32) -> [f32; 2]) {
+/// Outline vertices are tried nearest first; a cut is taken when it leaves
+/// the vertex inside its corner of the outline and crosses no edge of the
+/// outline, of this hole or of the holes still to join (`rest`).
+fn bridge(outline: &mut Vec<u32>, hole: &[u32], rest: &[&Vec<u32>], at: &impl Fn(u32) -> [f32; 2]) {
     let hi = (0..hole.len()).max_by(|&a, &b| at(hole[a])[0].total_cmp(&at(hole[b])[0])).unwrap_or(0);
-    let h = at(hole[hi]);
-    // The nearest outline edge a ray to the right hits; its right end is a candidate.
-    let mut best: Option<(f32, usize)> = None;
-    for k in 0..outline.len() {
-        let (pk, qk) = (k, (k + 1) % outline.len());
-        let (p, q) = (at(outline[pk]), at(outline[qk]));
-        if (p[1] <= h[1]) == (q[1] <= h[1]) {
-            continue;
-        }
-        let x = p[0] + (h[1] - p[1]) * (q[0] - p[0]) / (q[1] - p[1]);
-        if x >= h[0] && best.is_none_or(|(bx, _)| x < bx) {
-            best = Some((x, if p[0] > q[0] { pk } else { qk }));
-        }
-    }
+    let m = hole[hi];
+    let h = at(m);
     let dist = |k: usize| {
         let p = at(outline[k]);
         (p[0] - h[0]).powi(2) + (p[1] - h[1]).powi(2)
     };
-    let mut join = match best {
-        Some((_, k)) => k,
-        None => (0..outline.len()).min_by(|&a, &b| dist(a).total_cmp(&dist(b))).unwrap_or(0),
+    let mut order: Vec<usize> = (0..outline.len()).collect();
+    order.sort_by(|&a, &b| dist(a).total_cmp(&dist(b)));
+    let n = outline.len();
+    // The cut into vertex k runs inside the outline's corner there (counter-clockwise outline).
+    let in_corner = |k: usize| {
+        let o = at(outline[k]);
+        let (prev, next) = (at(outline[(k + n - 1) % n]), at(outline[(k + 1) % n]));
+        let angle = |p: [f32; 2]| (p[1] - o[1]).atan2(p[0] - o[0]);
+        let turn = |from: f32, to: f32| (to - from).rem_euclid(std::f32::consts::TAU);
+        let (e1, e0, d) = (angle(next), angle(prev), angle(h));
+        let open = turn(e1, e0);
+        let towards = turn(e1, d);
+        towards > 1e-6 && towards < open - 1e-6
     };
-    // An outline vertex inside the triangle hole–hit–candidate would block the view: take the nearest such.
-    if let Some((x, _)) = best {
-        let c = at(outline[join]);
-        let tri = [h, [x, h[1]], c];
-        if let Some(k) = (0..outline.len())
-            .filter(|&k| k != join && in_triangle(at(outline[k]), tri))
-            .min_by(|&a, &b| dist(a).total_cmp(&dist(b)))
-        {
-            join = k;
+    let edges = || {
+        let ring = |r: &[u32]| (0..r.len()).map(move |k| (r[k], r[(k + 1) % r.len()])).collect::<Vec<_>>();
+        let mut all = ring(outline);
+        all.extend(ring(hole));
+        for r in rest {
+            all.extend(ring(r));
         }
-    }
+        all
+    };
+    let all = edges();
+    let clear = |o: u32| {
+        let p = at(o);
+        all.iter().all(|&(a, b)| a == o || b == o || a == m || b == m || !touches(h, p, at(a), at(b)))
+    };
+    let join = order.iter().copied().find(|&k| in_corner(k) && clear(outline[k])).unwrap_or(order[0]);
     let mut merged = Vec::with_capacity(outline.len() + hole.len() + 2);
     merged.extend_from_slice(&outline[..=join]);
     merged.extend(hole[hi..].iter().chain(&hole[..=hi]));
     merged.extend_from_slice(&outline[join..]);
     *outline = merged;
+}
+
+/// Segments `p`–`q` and `a`–`b` meet: cross, touch or overlap.
+fn touches(p: [f32; 2], q: [f32; 2], a: [f32; 2], b: [f32; 2]) -> bool {
+    let side = |x: [f32; 2], y: [f32; 2], z: [f32; 2]| {
+        let c = (y[0] as f64 - x[0] as f64) * (z[1] as f64 - x[1] as f64)
+            - (y[1] as f64 - x[1] as f64) * (z[0] as f64 - x[0] as f64);
+        if c.abs() < 1e-12 {
+            0
+        } else {
+            c.signum() as i32
+        }
+    };
+    let within = |x: [f32; 2], y: [f32; 2], z: [f32; 2]| {
+        z[0] >= x[0].min(y[0]) && z[0] <= x[0].max(y[0]) && z[1] >= x[1].min(y[1]) && z[1] <= x[1].max(y[1])
+    };
+    let (d1, d2, d3, d4) = (side(a, b, p), side(a, b, q), side(p, q, a), side(p, q, b));
+    if d1 * d2 < 0 && d3 * d4 < 0 {
+        return true;
+    }
+    (d1 == 0 && within(a, b, p))
+        || (d2 == 0 && within(a, b, q))
+        || (d3 == 0 && within(p, q, a))
+        || (d4 == 0 && within(p, q, b))
 }
 
 fn cross(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
@@ -842,6 +871,61 @@ mod tests {
         assert_eq!(unplaced, 0);
         assert!(valid_solid(&low, 1e-6) && valid_solid(&high, 1e-6));
         assert!((volume(&low) + volume(&high) - (1000.0 - 2.0 * polygon_area(24, 1.5) * 3.0)).abs() < 2e-2);
+    }
+
+    #[test]
+    fn several_openings_in_one_cap_close_on_every_axis() {
+        // Pseudo-random spots on a 40 × 30 section, cut across X, Y and Z, on both sides.
+        let mut seed = 7u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for axis in 0..3 {
+            let mut size = [30.0f32; 3];
+            size[axis] = 100.0;
+            size[(axis + 1) % 3] = 40.0;
+            let part = cube([0.0; 3], size);
+            let mut point = [0.0; 3];
+            point[axis] = 50.0;
+            let mut normal = [0.0; 3];
+            normal[axis] = 1.0;
+            let plane = Plane::new(point, normal).unwrap();
+            let (u, v) = plane.basis();
+            for _ in 0..24 {
+                // Up to four openings 2.7 mm across, kept 8 mm apart and 4 mm inside the edges.
+                let mut centres: Vec<Vec3> = vec![];
+                for _ in 0..(1 + (next() * 4.0) as usize) {
+                    let mut c = point;
+                    c[(axis + 1) % 3] = 4.0 + next() * 32.0;
+                    c[(axis + 2) % 3] = 4.0 + next() * 22.0;
+                    if centres.iter().all(|o| geom::len(geom::sub(*o, c)) > 8.0) {
+                        centres.push(c);
+                    }
+                }
+                let ring = |c: Vec3| -> Vec<Vec3> {
+                    (0..32)
+                        .map(|k| {
+                            let a = k as f32 / 32.0 * std::f32::consts::TAU;
+                            geom::add(c, geom::add(geom::scale(u, 2.7 * a.cos()), geom::scale(v, 2.7 * a.sin())))
+                        })
+                        .collect()
+                };
+                let features: Vec<Feature> = centres
+                    .iter()
+                    .flat_map(|&c| {
+                        [0, 1].map(|side| Feature {
+                            ring: ring(c),
+                            depth: geom::scale(normal, if side == 0 { -6.0 } else { 6.0 }),
+                            side,
+                        })
+                    })
+                    .collect();
+                let ([(low, _), (high, _)], unplaced) = split_plane_with_features(&part, plane, 1e-4, &features);
+                assert_eq!(unplaced, 0);
+                assert!(valid_solid(&low, 1e-4) && valid_solid(&high, 1e-4), "axis {axis}: {centres:?}");
+            }
+        }
     }
 
     #[test]
