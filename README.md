@@ -4,6 +4,12 @@ App de escritorio (Tauri 2 + Rust) que convierte modelos `.blend`, OBJ, FBX, glT
 texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
 
 - Carga por arrastrar y soltar, por el diálogo o con "Abrir con…".
+- Proyectos `.bpproj` (`Ctrl+S`, `Ctrl+Shift+S`): guardan el modelo extraído con sus texturas,
+  la paleta y sus uniones, la pintura manual, las zonas de la cubeta, el tamaño, el giro,
+  los cortes, las operaciones de malla y color, la impresora y la purga por par. Se reabren
+  sin Blender, desde el menú Archivo (con los recientes), arrastrándolos o con "Abrir con…".
+  El historial de deshacer no se guarda. Al cerrar o abrir otro archivo con cambios sin
+  guardar se pide confirmación. Exportar el 3MF pasa a `Ctrl+E`.
 - Importación multicolor mediante Blender, con avisos persistentes de recursos faltantes y
   aproximaciones de color. Consulta [formatos, unidades y limitaciones](docs/importacion.md).
 - Materiales a pintura por triángulo (`paint_color`), con bordes subdivididos como hace Bambu.

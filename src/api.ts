@@ -164,6 +164,9 @@ export const api = {
   setBlenderPath: (path: string) => invoke<string>("set_blender_path", { path }),
   openBlend: (path: string, added: { files: string[]; textures: [string, string][]; library: string | null; blend: string | null }) =>
     invoke<Summary>("open_blend", { path, extras: added.files, textures: added.textures, library: added.library, blend: added.blend }),
+  /** Opens a saved `.bpproj` in place of the open document; Blender is not needed. */
+  openProject: (path: string) => invoke<Summary>("open_project", { path }),
+  saveProject: (path: string) => invoke<void>("save_project", { path }),
   inspectModel: (path: string, extras: string[], library: string | null = null) =>
     invoke<Companion[]>("inspect_model", { path, extras, library }),
   setPalette: (colors: string[]) => invoke<Summary>("set_palette", { colors }),

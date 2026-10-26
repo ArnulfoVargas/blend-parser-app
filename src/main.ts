@@ -10,6 +10,7 @@ import "./styles/app.css";
 
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import {
   api,
@@ -45,8 +46,12 @@ const dims = (v: number[], d = 1) => `${v.map((x) => nf(x, d)).join(" × ")} mm`
 /** What Blender can import for us; `bp_blend::INPUT_EXTENSIONS` is the same list. */
 const MODEL_EXTENSIONS = ["blend", "obj", "fbx", "gltf", "glb", "ply"];
 const MODEL_EXT = new RegExp(`\\.(${MODEL_EXTENSIONS.join("|")})$`, "i");
+const PROJECT_EXT = /\.bpproj$/i;
 
 let summary: Summary | null = null;
+/** Where the open document was last saved or opened as a project, and whether it changed since. */
+let projectPath: string | null = null;
+let dirty = false;
 let printers: Printers | null = null;
 let prefs: Prefs | null = null;
 /** Swaps before the last change, to show what a setting did. */
@@ -143,6 +148,7 @@ const apply = (call: () => Promise<Summary | null>, done?: () => void) =>
     previousSwaps = summary?.estimate.swaps ?? null;
     const s = await call();
     if (s) {
+      dirty = true;
       render(s);
       await reloadMesh();
     }
@@ -164,6 +170,7 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   },
   endStroke: () => {
     previousSwaps = summary?.estimate.swaps ?? null;
+    dirty = true;
     void api.endStroke().then(render);
   },
   bucket: (o, d) => {
@@ -193,7 +200,10 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   move: async (mm) => {
     previousSwaps = summary?.estimate.swaps ?? null;
     const s = summary ? await work(() => api.setOffset(mm)) : undefined;
-    if (s) render(s);
+    if (s) {
+      dirty = true;
+      render(s);
+    }
     return s !== undefined;
   },
   rotate: async (axis, degrees) => (summary ? turn(() => api.rotate(axis, degrees)) : false),
@@ -232,7 +242,11 @@ function renderPlace(s: Summary) {
   $<HTMLButtonElement>("#rotate-reset").disabled = !s.plate.rotated;
   $<HTMLButtonElement>("#cut-undo").disabled = !s.plate.canUndoCut;
 }
-$("#place-centre").addEventListener("click", () => void work(() => api.setOffset([0, 0])).then((s) => s && render(s)));
+$("#place-centre").addEventListener("click", () => void work(() => api.setOffset([0, 0])).then((s) => {
+  if (!s) return;
+  dirty = true;
+  render(s);
+}));
 
 /**
  * A turn. When the whole model turned as it is, the preview is moved where it
@@ -243,6 +257,7 @@ async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
   previousSwaps = summary?.estimate.swaps ?? null;
   const done = await work(async () => {
     const r = await call();
+    dirty = true;
     render(r.summary);
     if (r.rigid) {
       viewer.moveMesh(r.rigid.matrix, r.rigid.shift);
@@ -974,8 +989,21 @@ function renderSlots(s: Summary) {
 
 let unlistenProgress: (() => void) | null = null;
 
+/** Whether the open document may be replaced: unsaved changes are confirmed first. */
+async function mayDiscard(): Promise<boolean> {
+  if (!dirty || !summary || state !== "ready") return true;
+  return ask(t("project.unsaved", { name: projectName() }), {
+    title: t("project.unsavedTitle"),
+    kind: "warning",
+    okLabel: t("project.discard"),
+    cancelLabel: t("common.cancel"),
+  });
+}
+
 /** `extras`: files dropped with the model, offered for what it references. */
 async function openFile(path: string, extras: string[] = []) {
+  if (!(await mayDiscard())) return;
+  if (PROJECT_EXT.test(path)) return openProject(path);
   const lower = path.toLowerCase();
   const name = path.split(/[\\/]/).pop() ?? path;
   if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
@@ -994,6 +1022,8 @@ async function openFile(path: string, extras: string[] = []) {
     previousSwaps = null;
     measured = [];
     render(await api.openBlend(path, added));
+    projectPath = null;
+    dirty = false;
     setSection(null);
     await reloadMesh(true);
     setState("ready");
@@ -1009,8 +1039,107 @@ async function openFile(path: string, extras: string[] = []) {
 }
 
 $("#choose").addEventListener("click", async () => {
-  const path = await open({ multiple: false, directory: false, filters: [{ name: t("import.formats"), extensions: MODEL_EXTENSIONS }] });
+  const path = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: t("import.formats"), extensions: [...MODEL_EXTENSIONS, "bpproj"] }, { name: t("project.filter"), extensions: ["bpproj"] }],
+  });
   if (typeof path === "string") await openFile(path);
+});
+
+// ---- projects ------------------------------------------------------------------------------
+
+/** The project's name as the user knows it: its file, or the model's before it is saved. */
+const projectName = () => (projectPath ?? summary?.fileName ?? "").split(/[\\/]/).pop() ?? "";
+
+/** Opens a saved project; Blender is not needed. A failure keeps what is open. */
+async function openProject(path: string) {
+  const was = state;
+  step = { key: "project", name: "" };
+  setState("converting");
+  hideToast();
+  try {
+    previousSwaps = null;
+    measured = [];
+    render(await api.openProject(path));
+    projectPath = path;
+    dirty = false;
+    remember(path);
+    setSection(null);
+    await reloadMesh(true);
+    setState("ready");
+  } catch (e) {
+    if (summary && was === "ready") {
+      setState("ready");
+      toast(errText(e), "error");
+    } else {
+      setState("error", e);
+    }
+  }
+}
+
+/** Saves the project where it was, or asks where with `as` or the first time. */
+async function saveProject(as = false) {
+  if (!summary || state !== "ready") return;
+  let path = as ? null : projectPath;
+  if (!path) {
+    path = await save({
+      defaultPath: projectPath ?? summary.fileName.replace(MODEL_EXT, ".bpproj"),
+      filters: [{ name: t("project.filter"), extensions: ["bpproj"] }],
+    });
+    if (!path) return;
+  }
+  const target = path;
+  const ok = await work(async () => {
+    await api.saveProject(target);
+    return true;
+  });
+  if (!ok) return;
+  projectPath = target;
+  dirty = false;
+  remember(target);
+  toast(t("project.saved", { path: target }));
+}
+
+// Recent projects, newest first, in the File menu.
+const RECENT_KEY = "blendparser.recent";
+const RECENT_MAX = 6;
+function recents(): string[] {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+    return Array.isArray(list) ? list.filter((x): x is string => typeof x === "string").slice(0, RECENT_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+function remember(path: string) {
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify([path, ...recents().filter((p) => p !== path)].slice(0, RECENT_MAX)));
+  } catch {
+    // Not remembered.
+  }
+  renderRecents();
+}
+function renderRecents() {
+  const sep = $("#recent-sep");
+  sep.parentElement!.querySelectorAll("[data-recent]").forEach((li) => li.remove());
+  const list = recents();
+  sep.hidden = list.length === 0;
+  sep.after(...list.map((path, i) => {
+    const li = Object.assign(document.createElement("li"), { role: "none" });
+    li.dataset.recent = "";
+    const item = Object.assign(document.createElement("button"), { className: "menu__item", type: "button", title: path });
+    item.setAttribute("role", "menuitem");
+    item.dataset.cmd = `recent:${i}`;
+    item.textContent = t("menu.recent", { name: path.split(/[\\/]/).pop() ?? path });
+    li.append(item);
+    return li;
+  }));
+}
+
+// Closing the window with unsaved changes asks first.
+void getCurrentWindow().onCloseRequested(async (e) => {
+  if (!(await mayDiscard())) e.preventDefault();
 });
 
 $("#find-blender").addEventListener("click", async () => {
@@ -1040,7 +1169,7 @@ void getCurrentWebview().onDragDropEvent((e) => {
   else app.classList.remove("is-dragging");
   if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") {
     // A model dropped with its .mtl, .bin or textures: the rest go along with it.
-    const model = p.paths.find((f) => MODEL_EXT.test(f) || /\.blend\d+$/i.test(f)) ?? p.paths[0];
+    const model = p.paths.find((f) => MODEL_EXT.test(f) || PROJECT_EXT.test(f) || /\.blend\d+$/i.test(f)) ?? p.paths[0];
     void openFile(model, p.paths.filter((f) => f !== model));
   }
 });
@@ -1304,6 +1433,7 @@ async function choosePrinter(id: string, nozzle: number) {
     const s = await api.setPrinter(id, n);
     renderPrinterPick(id, n);
     if (s) {
+      dirty = true;
       render(s);
       await reloadMesh();
     }
@@ -1685,6 +1815,8 @@ function openPrefs() {
 const ready = () => app.dataset.state === "ready";
 const COMMANDS: Record<string, { run: () => void; enabled?: () => boolean }> = {
   open: { run: () => $("#choose").click(), enabled: () => state !== "converting" },
+  save: { run: () => void saveProject(), enabled: ready },
+  saveAs: { run: () => void saveProject(true), enabled: ready },
   export: { run: () => $("#export").click(), enabled: ready },
   printers: { run: () => openPrinterDialog() },
   undo: { run: () => void undo(), enabled: () => ready() && Boolean(summary?.canUndo) },
@@ -1694,15 +1826,26 @@ const COMMANDS: Record<string, { run: () => void; enabled?: () => boolean }> = {
   updates: { run: () => versionBtn.click() },
   shortcuts: { run: () => toast(t("menu.shortcutList"), "ok", undefined, true) },
 };
+/** A recent project from the File menu. */
+function recentCommand(cmd: string): string | null {
+  const m = /^recent:(\d+)$/.exec(cmd);
+  return m ? recents()[Number(m[1])] ?? null : null;
+}
 menubar($("#menubar"), {
-  run: (cmd) => COMMANDS[cmd]?.run(),
-  enabled: (cmd) => COMMANDS[cmd]?.enabled?.() ?? true,
+  run: (cmd) => {
+    const recent = recentCommand(cmd);
+    if (recent) void openFile(recent);
+    else COMMANDS[cmd]?.run();
+  },
+  enabled: (cmd) => (recentCommand(cmd) ? state !== "converting" : COMMANDS[cmd]?.enabled?.() ?? true),
 });
+renderRecents();
 
 // Menu shortcuts work in any state and outside text fields.
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || document.querySelector("dialog[open]")) return;
-  const cmd = { o: "open", s: "export", ",": "prefs" }[e.key.toLowerCase()];
+  const key = e.key.toLowerCase();
+  const cmd = key === "s" && e.shiftKey ? "saveAs" : { o: "open", s: "save", e: "export", ",": "prefs" }[key];
   if (!cmd || !(COMMANDS[cmd].enabled?.() ?? true)) return;
   e.preventDefault();
   COMMANDS[cmd].run();
@@ -1731,6 +1874,7 @@ onLangChange(() => {
   syncLock();
   syncOutputs();
   bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
+  renderRecents();
   if (summary) render(summary);
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();

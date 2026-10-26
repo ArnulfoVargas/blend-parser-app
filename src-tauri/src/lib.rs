@@ -5,6 +5,7 @@ mod dto;
 mod error;
 mod prefs;
 mod profiles;
+mod saved;
 mod state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -27,6 +28,8 @@ pub fn run() {
             commands::initial_file,
             commands::set_blender_path,
             commands::open_blend,
+            commands::open_project,
+            commands::save_project,
             commands::inspect_model,
             commands::set_palette,
             commands::suggest_palette,

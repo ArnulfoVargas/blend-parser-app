@@ -9,6 +9,7 @@ use zip::write::SimpleFileOptions;
 
 pub mod plate;
 mod printer;
+pub mod project_file;
 pub use plate::{PlateCheck, Rect, Reserve};
 pub use printer::{canonical_id, catalog, Printer, PrinterProfile, NOZZLES};
 
