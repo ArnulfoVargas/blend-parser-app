@@ -268,6 +268,7 @@
           <button class="toolbar__btn" type="button" data-tool="rotate" aria-pressed="false" data-i18n-attr="title:stage.rotateTitle;aria-label:stage.rotateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.8 3.5v4h-4"/><ellipse cx="12" cy="12" rx="7.5" ry="2.6"/></svg><span class="toolbar__label" data-i18n="stage.rotate"></span><kbd>R</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="section" aria-pressed="false" data-on="false" data-i18n-attr="title:stage.sectionTitle;aria-label:stage.sectionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M2.5 12.5 12 7.5l9.5 5-9.5 5z" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.section"></span><kbd>C</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="separate" aria-pressed="false" data-i18n-attr="title:stage.separateTitle;aria-label:stage.separateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 11 6.5 9l4 2v5l-4 2-4-2z"/><path d="M13.5 8 17.5 6l4 2v5l-4 2-4-2z" class="cut"/><path d="M10 6.5 12.5 4M11.5 18.5 14 16"/></svg><span class="toolbar__label" data-i18n="stage.separate"></span><kbd>D</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="region" aria-pressed="false" data-i18n-attr="title:stage.regionTitle;aria-label:stage.regionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5 12 3.5l8 4v9l-8 4-8-4z"/><path d="M8.5 9.5c1.5-1.6 4.6-1.4 5.6.4 1 1.9-.6 3.1.6 4.6" class="cut"/><circle cx="16.5" cy="15.5" r="1.6" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.region"></span><kbd>X</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
@@ -356,6 +357,32 @@
             <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="sep-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="sep-apply" data-i18n="sep.apply" data-i18n-attr="title:sep.applyHelp">Separate</button></div>
           </div>
           <p class="sep-status" id="sep-status" role="status" aria-live="polite"></p>
+        </div>
+        <div class="reg-controls" id="reg-controls" aria-labelledby="reg-title">
+          <div class="reg-row">
+            <h3 class="sep-title" id="reg-title" data-i18n="reg.title">Region</h3>
+            <span class="sep-count" id="reg-count" role="status"></span>
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.mode"><button type="button" id="reg-add" aria-pressed="true" data-i18n="reg.add">Select</button><button type="button" id="reg-erase" aria-pressed="false" data-i18n="reg.erase" data-i18n-attr="title:reg.eraseHelp">Erase</button></div>
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.reach"><button type="button" id="reg-visible" aria-pressed="true" data-i18n="reg.visible" data-i18n-attr="title:reg.visibleHelp">Visible faces</button><button type="button" id="reg-through" aria-pressed="false" data-i18n="reg.through" data-i18n-attr="title:reg.throughHelp">Through the model</button></div>
+            <div class="reg-tools" role="group" data-i18n-attr="aria-label:reg.tools">
+              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="grow" data-i18n="reg.grow" data-i18n-attr="title:reg.growHelp">Grow</button>
+              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="connected" data-i18n="reg.connected" data-i18n-attr="title:reg.connectedHelp">Whole piece</button>
+              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="smooth" data-i18n="reg.smooth" data-i18n-attr="title:reg.smoothHelp">Smooth border</button>
+              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="invert" data-i18n="reg.invert">Invert</button>
+              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="clear" data-i18n="reg.clear">Clear</button>
+            </div>
+          </div>
+          <div class="reg-row">
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.action"><button type="button" id="reg-extract" aria-pressed="true" data-i18n="reg.extract">Extract as a piece</button><button type="button" id="reg-remove" aria-pressed="false" data-i18n="reg.remove">Remove</button></div>
+            <label class="reg-field"><span data-i18n="reg.closure">Close with</span><select class="sep-goes" id="reg-closure"><option value="shell" data-i18n="reg.shell">a shell</option><option value="cap" data-i18n="reg.cap">a cap</option></select></label>
+            <label class="reg-field"><span id="reg-mm-label"></span><span class="unit-input"><input class="input" id="reg-mm" type="number" inputmode="decimal" min="0.1" max="50" step="0.1" value="2"><span aria-hidden="true">mm</span></span></label>
+            <div class="sep-place" id="reg-place"><span data-i18n="sep.place">New objects</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:sep.place"><button type="button" id="reg-assembled" aria-pressed="true" data-i18n="sep.assembled">Where they are</button><button type="button" id="reg-flat" aria-pressed="false" data-i18n="reg.flat" data-i18n-attr="title:reg.flatHelp">On the plate</button></div></div>
+            <label class="check" id="reg-pull-row"><input type="checkbox" id="reg-pull"><span data-i18n="reg.pull">Show apart</span></label>
+          </div>
+          <div class="sep-foot">
+            <p class="sep-status" id="reg-status" role="status" aria-live="polite"></p>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="reg-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="reg-apply" data-i18n-attr="title:reg.applyHelp">Apply</button></div>
+          </div>
         </div>
         <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
         <p class="stage__hint" data-bind="hint"></p>

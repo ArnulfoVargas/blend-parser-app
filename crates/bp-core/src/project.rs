@@ -17,6 +17,9 @@ use crate::separate;
 use crate::split::{self, ColorPiece};
 use std::collections::HashMap;
 
+mod selection;
+pub use selection::{RegionAction, RegionFailure, RegionPreview};
+
 /// Colour settings, in final millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorOps {
@@ -388,6 +391,8 @@ pub struct Project {
     painted: Vec<Vec<u8>>,
     picker: (Bvh, TriSoup),
     tri_offsets: Vec<u32>,
+    /// Triangles picked for a region, per part of `work`. It never changes the painting.
+    selection: Vec<Vec<bool>>,
     stroke: Vec<Change>,
     undo: Vec<UndoEntry>,
 }
@@ -422,6 +427,7 @@ impl Project {
             adjacency: vec![],
             painted: vec![],
             picker: (Bvh::default(), TriSoup::default()),
+            selection: vec![],
             tri_offsets: vec![],
             stroke: vec![],
             undo: vec![],
@@ -892,27 +898,13 @@ impl Project {
                 }
             })
             .collect();
-        // Simplified triangles lost their source face: the nearest one stands in.
         let mut work = Vec::with_capacity(self.work.triangle_count());
-        for (pi, shape) in self.shape.parts.iter().enumerate() {
-            let source = &self.scene.parts[pi];
-            let lookup = shape.origin.is_none().then(|| {
-                let mut soup = TriSoup::default();
-                for ti in 0..source.tris.len() {
-                    soup.push(source.corners(ti), 0, ti as u32);
-                }
-                (Bvh::build(&soup), soup)
-            });
-            for ti in 0..shape.tris.len() {
-                let src = match (&shape.origin, &lookup) {
-                    (Some(origin), _) => Some(origin[ti].0),
-                    (None, Some((bvh, soup))) => {
-                        bvh.nearest(soup, geom::at(&shape.corners(ti), [1.0 / 3.0; 3])).map(|h| h.0)
-                    }
-                    _ => None,
-                };
-                work.push(src.and_then(|s| by_tri[pi].get(s as usize).copied()).unwrap_or(u32::MAX));
-            }
+        for (pi, by_tri) in by_tri.iter().enumerate() {
+            work.extend(
+                self.work_sources(pi)
+                    .into_iter()
+                    .map(|src| src.and_then(|s| by_tri.get(s as usize).copied()).unwrap_or(u32::MAX)),
+            );
         }
         (pieces, work)
     }
@@ -1003,26 +995,7 @@ impl Project {
             }
         }
         if lay_flat {
-            // Each object down on the plate, then side by side along X past the rest, 5 mm apart.
-            let bed_z = self.source_positions.iter().flatten().map(|v| v[2]).fold(f32::INFINITY, f32::min);
-            let bounds = |parts: &mut dyn Iterator<Item = &Part>| {
-                parts.flat_map(|p| p.positions.iter()).fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
-                    (std::array::from_fn(|i| lo[i].min(v[i])), std::array::from_fn(|i| hi[i].max(v[i])))
-                })
-            };
-            let (klo, khi) = bounds(&mut kept.iter());
-            let mut x = if kept.is_empty() { None } else { Some(khi[0]) };
-            let centre_y = if kept.is_empty() { 0.0 } else { (klo[1] + khi[1]) / 2.0 };
-            let gap = 5.0 / self.scale / stretch[0];
-            for object in &mut moved {
-                let (lo, hi) = bounds(&mut object.iter().map(|(p, _)| p));
-                let to_x = x.map_or(lo[0], |x| x + gap);
-                let shift = [to_x - lo[0], centre_y - (lo[1] + hi[1]) / 2.0, bed_z - lo[2]];
-                for v in object.iter_mut().flat_map(|(p, _)| p.positions.iter_mut()) {
-                    *v = geom::add(*v, shift);
-                }
-                x = Some(hi[0] + shift[0]);
-            }
+            self.lay_beside(&kept, &mut moved);
         }
         for (p, paint) in moved.into_iter().flatten() {
             kept.push(p);
@@ -1030,6 +1003,48 @@ impl Project {
         }
         self.commit_parts(kept, kept_paint, &transfers, "separate");
         Ok(self.object_count())
+    }
+
+    /// Sets each object of `moved` down on the plate, then side by side along X
+    /// past `kept`, 5 mm apart and centred with it on Y. Positions are unstretched.
+    fn lay_beside(&self, kept: &[Part], moved: &mut [Vec<(Part, Option<CutPaint>)>]) {
+        let bed_z = self.source_positions.iter().flatten().map(|v| v[2]).fold(f32::INFINITY, f32::min);
+        let bounds = |parts: &mut dyn Iterator<Item = &Part>| {
+            parts.flat_map(|p| p.positions.iter()).fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
+                (std::array::from_fn(|i| lo[i].min(v[i])), std::array::from_fn(|i| hi[i].max(v[i])))
+            })
+        };
+        let (klo, khi) = bounds(&mut kept.iter());
+        let mut x = if kept.is_empty() { None } else { Some(khi[0]) };
+        let centre_y = if kept.is_empty() { 0.0 } else { (klo[1] + khi[1]) / 2.0 };
+        let gap = 5.0 / self.scale / self.stretch[0];
+        for object in moved {
+            let (lo, hi) = bounds(&mut object.iter().map(|(p, _)| p));
+            let to_x = x.map_or(lo[0], |x| x + gap);
+            let shift = [to_x - lo[0], centre_y - (lo[1] + hi[1]) / 2.0, bed_z - lo[2]];
+            for v in object.iter_mut().flat_map(|(p, _)| p.positions.iter_mut()) {
+                *v = geom::add(*v, shift);
+            }
+            x = Some(hi[0] + shift[0]);
+        }
+    }
+
+    /// The scene triangle each triangle of `work` part `pi` lies on. Simplified
+    /// triangles lost their source face: the nearest one stands in.
+    fn work_sources(&self, pi: usize) -> Vec<Option<u32>> {
+        let shape = &self.shape.parts[pi];
+        let source = &self.scene.parts[pi];
+        if let Some(origin) = &shape.origin {
+            return origin.iter().map(|o| Some(o.0)).collect();
+        }
+        let mut soup = TriSoup::default();
+        for ti in 0..source.tris.len() {
+            soup.push(source.corners(ti), 0, ti as u32);
+        }
+        let bvh = Bvh::build(&soup);
+        (0..shape.tris.len())
+            .map(|ti| bvh.nearest(&soup, geom::at(&shape.corners(ti), [1.0 / 3.0; 3])).map(|h| h.0))
+            .collect()
     }
 
     /// Planes worth reviewing to split a continuous mesh, in preview
@@ -1430,6 +1445,10 @@ impl Project {
                 o
             })
             .collect();
+        // A selection belongs to the triangles it was made on.
+        if self.selection.iter().map(Vec::len).ne(self.work.parts.iter().map(|p| p.tris.len())) {
+            self.selection = self.work.parts.iter().map(|p| vec![false; p.tris.len()]).collect();
+        }
     }
 
     // ---- painting from the model -----------------------------------------

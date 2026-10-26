@@ -1,0 +1,33 @@
+/* The region tool's panel under the view: the separation panel's rhythm and controls. */
+@import url("./tokens.css");
+
+.reg-controls { display: none; width: 100%; min-width: 0; padding-top: var(--space-sm); border-top: 1px solid var(--color-rule); color: var(--color-ink-2); font-size: var(--text-sm); }
+.app[data-tool="region"] .reg-controls { display: flex; flex-direction: column; gap: var(--space-sm); }
+.app[data-tool="region"] .stage__foot { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-xs); }
+.app[data-tool="region"] .stage__hint { flex-basis: auto; text-align: left; white-space: normal; }
+.app[data-tool="region"] .brush__chip { display: none; }
+.app[data-tool="region"] #viewport { cursor: crosshair; }
+
+.reg-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs) var(--space-sm); }
+.reg-row .seg { background: var(--color-paper-2); }
+.reg-row .seg button { min-height: 30px; padding: 0 var(--space-sm); font-size: var(--text-xs); }
+.reg-tools { display: flex; flex-wrap: wrap; gap: var(--space-2xs); margin-left: auto; }
+.reg-tools .btn { min-height: 30px; padding: 0 var(--space-sm); font-size: var(--text-xs); white-space: nowrap; }
+.reg-field { display: flex; align-items: center; gap: var(--space-xs); font-size: var(--text-xs); color: var(--color-muted); white-space: nowrap; }
+.reg-field .unit-input { display: inline-flex; width: 6.5rem; }
+.reg-field .unit-input span { right: var(--space-xs); font-size: var(--text-xs); }
+.reg-field .input { min-height: 32px; padding: 0 2.2rem 0 var(--space-xs); font: 400 var(--text-sm)/1.2 var(--font-outlier); }
+.reg-controls .check { min-height: 32px; gap: var(--space-2xs); white-space: nowrap; font-size: var(--text-xs); }
+.reg-controls .check input { accent-color: var(--color-accent); }
+.reg-controls .sep-foot { flex-wrap: nowrap; }
+.reg-controls .sep-status { flex: 1; min-width: 0; }
+.reg-controls .btn--primary { background: var(--color-accent); color: var(--color-accent-ink); }
+.reg-controls .cut-controls__actions { margin-left: auto; }
+.reg-controls .cut-controls__actions .btn { min-height: 32px; white-space: nowrap; }
+
+.reg-controls :is(button, input, select):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.reg-controls :is(button, input, select):disabled { opacity: 0.55; cursor: not-allowed; }
+.app.is-working .reg-controls { pointer-events: none; cursor: progress; }
+@media (max-width: 75rem) {
+  .reg-tools { margin-left: 0; }
+}
