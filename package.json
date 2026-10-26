@@ -14,7 +14,8 @@
     "test:section-line": "node --test scripts/section-line.test.mjs",
     "test:viewer-handles": "node --test scripts/viewer-handles.test.mjs",
     "test:cut-preview": "node --test scripts/cut-preview.test.mjs",
-    "test:separate": "node --test scripts/separate-plan.test.mjs"
+    "test:separate": "node --test scripts/separate-plan.test.mjs",
+    "test:connect": "node --test scripts/connect-preview.test.mjs"
   },
   "dependencies": {
     "@fontsource/dm-mono": "^5.1.0",

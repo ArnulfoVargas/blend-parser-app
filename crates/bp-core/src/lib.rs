@@ -3,6 +3,7 @@
 
 pub mod bvh;
 pub mod color;
+pub mod connect;
 pub mod cut;
 pub mod encode;
 pub mod estimate;
@@ -21,7 +22,8 @@ pub mod waste;
 
 pub use mesh::{MeshOps, RepairReport};
 pub use project::{
-    ColorOps, CutProposal, DetectedPiece, ExportPart, Mat3, Preview, PrintOps, Project, SeparateError, Stats, IDENTITY,
+    ColorOps, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, Preview, PrintOps, Project, SeparateError,
+    Stats, IDENTITY,
 };
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;

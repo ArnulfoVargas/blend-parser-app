@@ -323,6 +323,130 @@ pub async fn cut_model(
     .await
 }
 
+/// The connectors of a cut as the UI sends them.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectorsDto {
+    /// "pin" or "dowel".
+    kind: String,
+    /// Pins stand out of half A (below the plane) unless this is false.
+    pins_on_a: bool,
+    /// "round" or "square".
+    shape: String,
+    size_mm: f32,
+    depth_mm: f32,
+    clearance_mm: f32,
+    angle_deg: f32,
+    at: Vec<[f32; 3]>,
+}
+
+impl ConnectorsDto {
+    fn core(self) -> CmdResult<bp_core::connect::Connectors> {
+        use bp_core::connect::{Connectors, Kind, Shape};
+        let kind = match self.kind.as_str() {
+            "pin" => Kind::Pin { on_low: self.pins_on_a },
+            "dowel" => Kind::Dowel,
+            _ => return Err(AppError::new("error.connectParams")),
+        };
+        let shape = match self.shape.as_str() {
+            "round" => Shape::Round,
+            "square" => Shape::Square,
+            _ => return Err(AppError::new("error.connectParams")),
+        };
+        let c = Connectors {
+            kind,
+            shape,
+            size_mm: self.size_mm,
+            depth_mm: self.depth_mm,
+            clearance_mm: self.clearance_mm,
+            angle_deg: self.angle_deg,
+            at: self.at,
+        };
+        if !c.valid() || c.at.len() > 64 {
+            return Err(AppError::new("error.connectParams"));
+        }
+        Ok(c)
+    }
+}
+
+fn issue_key(issue: Option<bp_core::connect::Issue>) -> Option<&'static str> {
+    use bp_core::connect::Issue;
+    issue.map(|i| match i {
+        Issue::Outside => "outside",
+        Issue::Overlap => "overlap",
+        Issue::ThinWall => "thinWall",
+        Issue::TooDeep => "tooDeep",
+    })
+}
+
+fn connect_error(e: bp_core::ConnectError) -> AppError {
+    match e {
+        bp_core::ConnectError::Cut(e) => cut_error(e),
+        bp_core::ConnectError::Params => AppError::new("error.connectParams"),
+        bp_core::ConnectError::NoConnectors => AppError::new("error.connectNone"),
+        bp_core::ConnectError::Connectors(_) => AppError::new("error.connectIssues"),
+    }
+}
+
+/// Where connectors of this size fit on the cut, in preview coordinates.
+#[tauri::command]
+pub async fn suggest_connectors(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+) -> CmdResult<Vec<[f32; 3]>> {
+    let c = connectors.core()?;
+    with_doc(app, move |d, _| d.project.suggest_connectors(point, normal, &selected, &c).map_err(cut_error)).await
+}
+
+/// Dry run of a cut with connectors on a copy: what is wrong with each
+/// connector or, when they are all fine, how many objects the cut leaves.
+#[tauri::command]
+pub async fn preview_connected_cut(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+) -> CmdResult<dto::ConnectReviewDto> {
+    let c = connectors.core()?;
+    let mut project = with_doc(app, |d, _| Ok(d.project.clone())).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let issues = project.check_connectors(point, normal, &selected, &c).map_err(cut_error)?;
+        if issues.iter().any(Option::is_some) || c.at.is_empty() {
+            return Ok(dto::ConnectReviewDto { issues: issues.into_iter().map(issue_key).collect(), objects: None });
+        }
+        let objects = project.cut_connected(point, normal, lay_on_cut, &selected, &c, "").map_err(connect_error)?;
+        Ok(dto::ConnectReviewDto { issues: vec![None; c.at.len()], objects: Some(objects) })
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Cuts keeping both halves with the connectors made in them; one undoable step.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn cut_connected(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+    dowel_label: String,
+) -> CmdResult<Summary> {
+    let c = connectors.core()?;
+    let label: String = dowel_label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        d.project.cut_connected(point, normal, lay_on_cut, &selected, &c, &label).map_err(connect_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {

@@ -515,6 +515,16 @@ pub fn proposal(p: bp_core::CutProposal) -> ProposalDto {
     }
 }
 
+/// A dry run of a cut with connectors.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectReviewDto {
+    /// Per connector: "outside", "overlap", "thinWall", "tooDeep", or null when fine.
+    pub issues: Vec<Option<&'static str>>,
+    /// Objects after the cut, when every connector is fine and the cut closes.
+    pub objects: Option<usize>,
+}
+
 /// The saved print settings and the defaults "Restablecer" goes back to.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

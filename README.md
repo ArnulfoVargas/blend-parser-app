@@ -37,6 +37,10 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   por objeto de destino y permite agrupar piezas, dejarlas en el modelo y elegir si quedan en
   su posición de ensamblaje o sobre la placa. En mallas continuas sólo propone cortes
   (estrechamientos y cambios de color), que se revisan y confirman en Sección.
+- Cortar con conectores (`J`): sobre el plano de corte, pasadores con alojamiento o espigas
+  sueltas, redondos o cuadrados, con diámetro, profundidad, giro y holgura en mm. Cada conector
+  se comprueba antes de cortar (dentro de la sección, separado de los demás, con pared alrededor
+  y sin atravesar el modelo) y se ve en la vista antes de confirmar.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 
@@ -237,6 +241,7 @@ crates/
     waste       Desperdicio: purga por par de colores, purga inicial y torre
     split       Una pieza cerrada por color (cáscara o sólido completo)
     bvh         Picking del pincel, consulta por esfera, punto más cercano
+    connect     Conectores de un corte: geometría, holgura, validación y colocación automática
     separate    Piezas desconectadas con tolerancia de soldadura y propuestas de corte
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
@@ -283,6 +288,28 @@ con Blender unos 2,5 s.
   filamento dominante que se mantiene varias secciones. Cada propuesta dice qué señal la origina
   y se abre en Sección para ajustar el plano y confirmar; no hay porcentajes de confianza.
   El reconocimiento semántico (IA) queda para una etapa posterior.
+
+### Cortar con conectores (#34, primera etapa)
+
+- **Tipos.** *Pasador y alojamiento*: los pasadores salen de una mitad (A, bajo el plano, o B) y
+  entran en alojamientos de la otra. *Espiga suelta*: alojamientos en las dos mitades y espigas
+  impresas aparte, cada una como objeto propio, de pie junto al modelo.
+- **Medidas.** Diámetro (redondo, polígono de 32 lados con los vértices sobre el círculo) o lado
+  (cuadrado, con giro), profundidad en cada mitad y **holgura**: el alojamiento es la forma del
+  conector crecida la holgura en cada lado y también en el fondo. El panel muestra siempre las
+  medidas resultantes (p. ej. *Pasador Ø5 × 6 mm → alojamiento Ø5,4 × 6,2 mm*).
+- **Colocar.** Clic sobre el plano para añadir, clic sobre uno para quitarlo; *Colocar
+  automáticamente* pone uno o dos por sección donde caben con pared. Los conectores siguen al
+  plano si se mueve o gira.
+- **Validación** (en el backend, antes de ofrecer el corte): fuera de la sección, solapado con
+  otro, pared demasiado fina (al borde de la sección o a la superficie alrededor del alojamiento,
+  mínimo dos anchos de boquilla y 0,8 mm) o alojamiento que atraviesa el modelo. Después se
+  hace el corte completo en una copia y se exige que todas las piezas queden cerradas.
+- **Geometría.** Los alojamientos y pasadores se construyen como agujeros en la tapa del corte
+  con su pared y su fondo, sin operaciones booleanas generales: las mitades quedan cerradas y
+  coinciden al volver a su posición de ensamblaje. Las mitades se llaman `… A` y `… B` y las
+  espigas `… espiga N`; cortar con conectores se deshace en un solo paso con `Ctrl+Z`.
+- La unión de cola de milano queda para una etapa posterior.
 
 ### Diagnóstico local de viabilidad FDM (alcance inicial de #7)
 
