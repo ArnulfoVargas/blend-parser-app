@@ -16,13 +16,34 @@
 use std::fmt::Write as _;
 use std::io::{Seek, Write};
 
-use bp_core::kit::{Issue, Kit};
+use bp_core::kit::{Bed, Issue, Kit};
 use bp_core::render::{self, Camera, Frame, Item, Style};
 use rayon::prelude::*;
 use zip::write::SimpleFileOptions;
 
+use crate::plate::Reserve;
 use crate::project_file::KitSettings;
-use crate::{escape, write_plates, write_stl, PlateObject, PlateProject, Printer};
+use crate::{escape, write_plates, write_stl, Flush, PlateObject, PlateProject, Printer};
+
+/// The printer's plate as the kit packs it: its printable area and excluded
+/// zones, the margin to the edges, `gap_mm` between pieces, and the prime
+/// tower (`reserve`, with its gap) for plates where colours mix.
+pub fn kit_bed(printer: &Printer, reserve: &Reserve, gap_mm: f32, mix: bool) -> Bed {
+    let a = printer.printable_area();
+    let tower = reserve.tower.then(|| {
+        let (x, y) = printer.tower_origin();
+        let g = reserve.tower_gap_mm.max(0.0);
+        [x - g, y - g, x + reserve.tower_mm[0] + g, y + reserve.tower_mm[1] + g]
+    });
+    Bed {
+        area: [a.x0, a.y0, a.x1, a.y1],
+        excluded: printer.excluded_areas().iter().map(|e| [e.x0, e.y0, e.x1, e.y1]).collect(),
+        tower,
+        margin_mm: reserve.margin_mm,
+        gap_mm,
+        mix,
+    }
+}
 
 pub struct KitInfo<'a> {
     /// Model name, used for file names and titles.
@@ -38,6 +59,8 @@ pub struct KitInfo<'a> {
     pub params: KitSettings,
     /// Filament density, to weigh each colour.
     pub density_g_cm3: f32,
+    /// Flushes between filaments, for plates where colours mix.
+    pub flush: Flush,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,8 +358,8 @@ fn pictures(kit: &Kit, colours: &[[u8; 3]]) -> std::io::Result<Pictures> {
             // Framed on what is on the plate, not the whole bed, so small pieces stay legible.
             let (mut a, mut b) = bounds(moved.iter().flatten());
             for k in 0..2 {
-                a[k] = (a[k] - 6.0).max(0.0);
-                b[k] = (b[k] + 6.0).min([kit.bed.0, kit.bed.1][k]);
+                a[k] = (a[k] - 6.0).max(kit.bed.area[k]);
+                b[k] = (b[k] + 6.0).min(kit.bed.area[k + 2]);
             }
             let cam = Camera::new(0.0, 89.0, [a[0], a[1], 0.0], [b[0], b[1], b[2].max(1.0)], 520, 360);
             let frame = render::render(&cam, &items, 2);
@@ -546,8 +569,15 @@ impl<'a> Names<'a> {
     }
 
     fn plate_name(&self, k: usize) -> String {
-        let s = self.kit.plates[k].slot;
-        format!("Placa {} · {} {}", k + 1, self.filament(s), self.hex(s))
+        let slots = &self.kit.plates[k].slots;
+        match slots.as_slice() {
+            [s] => format!("Placa {} · {} {}", k + 1, self.filament(*s), self.hex(*s)),
+            _ => format!(
+                "Placa {} · {}",
+                k + 1,
+                slots.iter().map(|&s| format!("{} {}", self.filament(s), self.hex(s))).collect::<Vec<_>>().join(" + ")
+            ),
+        }
     }
 
     fn grams(&self, mm3: f32) -> f32 {
@@ -644,8 +674,13 @@ fn guide_html(n: &Names, pics: &Pictures, paths: &Paths) -> String {
     for &s in &slots {
         let hex = n.hex(s);
         let count_of = kit.pieces.iter().filter(|p| p.slot == s).count();
-        let plates: Vec<String> =
-            kit.plates.iter().enumerate().filter(|(_, p)| p.slot == s).map(|(k, _)| (k + 1).to_string()).collect();
+        let plates: Vec<String> = kit
+            .plates
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.slots.contains(&s))
+            .map(|(k, _)| (k + 1).to_string())
+            .collect();
         let _ = write!(
             h,
             "<div class=\"chip\"><span class=\"sw\" style=\"background:{hex}\"></span><div><b>{name}</b> <span class=\"mono\">{hex}</span>\
@@ -661,15 +696,17 @@ fn guide_html(n: &Names, pics: &Pictures, paths: &Paths) -> String {
 
     h.push_str("<h2>Placas</h2><div class=\"plates\">");
     for (k, plate) in kit.plates.iter().enumerate() {
-        let hex = n.hex(plate.slot);
+        let colours: Vec<String> =
+            plate.slots.iter().map(|&s| format!("{}{}", swatch(&n.hex(s)), escape(&n.filament(s)))).collect();
         let _ = write!(
             h,
-            "<div class=\"plate\" id=\"placa-{n1}\">{shot}<h3>Placa {n1} · {sw}{name}</h3><small>{pieces}: {list}</small></div>",
+            "<div class=\"plate\" id=\"placa-{n1}\">{shot}<h3>Placa {n1} · {name}</h3><small>{pieces} · ocupa el {occ:.0} %{tower}: {list}</small></div>",
             shot = pics.plates[k].html(&paths.plates[k], &format!("Placa {}", k + 1), &label),
             n1 = k + 1,
-            sw = swatch(&hex),
-            name = escape(&n.filament(plate.slot)),
+            name = colours.join(" + "),
             pieces = count(plate.pieces.len(), "pieza", "piezas"),
+            occ = plate.occupancy * 100.0,
+            tower = if plate.mixed() { " · con torre de purga" } else { "" },
             list = plate.pieces.iter().map(|&i| format!("<a href=\"#{0}\">{0}</a>", labels[i])).collect::<Vec<_>>().join(", ")
         );
     }
@@ -793,7 +830,7 @@ fn colour_rows(n: &Names) -> Vec<(u8, usize, usize, f32)> {
         .into_iter()
         .map(|s| {
             let pieces: Vec<&bp_core::Piece> = n.kit.pieces.iter().filter(|p| p.slot == s).collect();
-            let plates = n.kit.plates.iter().filter(|p| p.slot == s).count();
+            let plates = n.kit.plates.iter().filter(|p| p.slots.contains(&s)).count();
             (s, pieces.len(), plates, pieces.iter().map(|p| p.volume_mm3).sum())
         })
         .collect()
@@ -815,6 +852,16 @@ fn params_text(n: &Names) -> Vec<(String, String)> {
             },
         ),
         ("Piezas mínimas".into(), format!("{:.0} mm³; las menores se unen a su vecina", p.min_piece_mm3)),
+        (
+            "Placas".into(),
+            format!(
+                "{}; {:.0} mm al borde, {:.0} mm entre piezas{}",
+                if n.kit.bed.mix { "colores mezclados, con torre de purga" } else { "un color por placa, sin purga" },
+                n.kit.bed.margin_mm,
+                n.kit.bed.gap_mm,
+                if n.kit.bed.excluded.is_empty() { "" } else { ", lejos de las zonas que la impresora excluye" }
+            ),
+        ),
         ("Densidad del filamento".into(), format!("{:.2} g/cm³", n.info.density_g_cm3)),
     ]
 }
@@ -876,14 +923,15 @@ fn summary_html(n: &Names) -> String {
     }
     h.push_str("</tbody></table><p><small>Volumen y peso de las piezas, sin soportes, relleno ni purga.</small></p>");
 
-    h.push_str("<h2>Placas</h2><table><thead><tr><th>Placa</th><th>Piezas</th></tr></thead><tbody>");
+    h.push_str("<h2>Placas</h2><table><thead><tr><th>Placa</th><th>Ocupa</th><th>Piezas</th></tr></thead><tbody>");
     for (k, plate) in kit.plates.iter().enumerate() {
         let list: Vec<&str> = plate.pieces.iter().map(|&i| labels[i].as_str()).collect();
         let _ = write!(
             h,
-            "<tr><td><a href=\"guia-de-armado.html#placa-{}\">{}</a></td><td class=\"mono\">{}</td></tr>",
+            "<tr><td><a href=\"guia-de-armado.html#placa-{}\">{}</a></td><td>{:.0} %</td><td class=\"mono\">{}</td></tr>",
             k + 1,
             escape(&n.plate_name(k)),
+            plate.occupancy * 100.0,
             list.join(" ")
         );
     }
@@ -994,6 +1042,7 @@ pub fn write_kit_zip<W: Write + Seek>(out: W, kit: &Kit, info: &KitInfo) -> zip:
         .collect();
     let project = PlateProject {
         name: info.name,
+        flush: info.flush.clone(),
         objects,
         plates: (0..kit.plates.len()).map(|k| n.plate_name(k)).collect(),
         filaments: info.palette.to_vec(),
@@ -1033,6 +1082,35 @@ mod tests {
     use super::*;
     use bp_core::split::{Piece, Split};
     use std::io::{Cursor, Read};
+
+    #[test]
+    fn the_printers_plate_keeps_its_excluded_zones_and_tower_free() {
+        let x1c = crate::catalog().into_iter().find(|p| p.id == "Bambu Lab X1 Carbon").unwrap();
+        let printer = Printer::new(x1c, 0.4);
+        let reserve = Reserve { tower_mm: [40.0, 40.0], ..Default::default() };
+        let pieces = || -> Vec<Piece> {
+            (0..40)
+                .map(|i| {
+                    let (positions, tris) = cuboid([0.0; 3], [28.0 + (i % 5) as f32 * 6.0, 22.0, 6.0]);
+                    Piece { slot: (i % 2) as u8, positions, tris, volume_mm3: 1.0, contacts: vec![] }
+                })
+                .collect()
+        };
+        for mix in [false, true] {
+            let bed = kit_bed(&printer, &reserve, 4.0, mix);
+            assert!(!bed.excluded.is_empty() && bed.tower.is_some());
+            let kit = bp_core::kit::kit(Split { pieces: pieces(), voxel_mm: 0.5, merged: 0, dropped: 0 }, bed.clone());
+            let tower = bed.tower.filter(|_| mix);
+            for (i, p) in kit.placed.iter().enumerate() {
+                let r = crate::plate::Rect::centred(p.at[0], p.at[1], p.size[0], p.size[1]);
+                assert!(printer.printable_area().grow(-reserve.margin_mm).contains(&r), "P{i} in the margin");
+                for o in bed.excluded.iter().chain(&tower) {
+                    assert!(!r.overlaps(&crate::plate::Rect::new(o[0], o[1], o[2], o[3])), "P{i} on {o:?}, mix {mix}");
+                }
+            }
+            assert_eq!(kit.plates.iter().any(|p| p.mixed()), mix);
+        }
+    }
 
     fn cuboid(lo: [f32; 3], hi: [f32; 3]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
         let p = (0..8).map(|b| [[lo[0], hi[0]][b & 1], [lo[1], hi[1]][(b >> 1) & 1], [lo[2], hi[2]][b >> 2]]).collect();
@@ -1099,7 +1177,7 @@ mod tests {
             Piece { slot: 1, positions: pb, tris: tb, volume_mm3: 1600.0, contacts: vec![(0, 400.0)] },
             Piece { slot: 1, positions: pc, tris: tc, volume_mm3: 140.0, contacts: vec![(0, 280.0)] },
         ];
-        let kit = bp_core::kit::kit(Split { pieces, voxel_mm: 0.5, merged: 3, dropped: 1 }, (256.0, 256.0));
+        let kit = bp_core::kit::kit(Split { pieces, voxel_mm: 0.5, merged: 3, dropped: 1 }, Bed::plain(256.0, 256.0));
         let palette = vec!["#202020".to_string(), "#F5F4F0".to_string()];
         let names = vec![None, Some("Bambu Lab PLA Basic Blanco".to_string())];
         let info = KitInfo {
@@ -1108,8 +1186,9 @@ mod tests {
             slots: &[],
             filament_names: &names,
             printer: &Printer::default(),
-            params: KitSettings { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 30.0 },
+            params: KitSettings { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 30.0, mix: false },
             density_g_cm3: 1.24,
+            flush: Default::default(),
         };
         let mut buf = Cursor::new(Vec::new());
         let summary = write_kit_zip(&mut buf, &kit, &info).unwrap();

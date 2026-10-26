@@ -123,6 +123,7 @@ mod tests {
                 depth_mm: 2.0,
                 core_slot: Some(1),
                 min_piece_mm3: 12.0,
+                mix: true,
             }),
         }
     }

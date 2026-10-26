@@ -52,6 +52,9 @@ pub struct KitSettings {
     pub depth_mm: f32,
     pub core_slot: Option<u8>,
     pub min_piece_mm3: f32,
+    /// Let colours share a plate (see `bp_core::kit::Bed::mix`).
+    #[serde(default)]
+    pub mix: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]

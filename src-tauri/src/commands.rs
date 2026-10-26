@@ -675,7 +675,9 @@ pub async fn export_color_zip(
     depth_mm: f32,
     core_slot: Option<u8>,
     min_piece_mm3: f32,
+    mix: Option<bool>,
 ) -> CmdResult<dto::KitDto> {
+    let mix = mix.unwrap_or(false);
     in_range(voxel_mm, 0.2..=2.0, "error.kitDetailRange")?;
     in_range(depth_mm, 0.0..=50.0, "error.kitDepthRange")?;
     let handle = app.clone();
@@ -690,13 +692,40 @@ pub async fn export_color_zip(
             depth_mm,
             core_slot,
             min_piece_mm3: params.min_piece_mm3,
+            mix,
         });
         let split = d.project.split_by_color(params);
         if split.pieces.is_empty() {
             return Err(AppError::new("error.kitEmpty"));
         }
         emit("kitPlates");
-        let kit = bp_core::kit::kit(split, d.printer.bed_mm());
+        // The plate as the user keeps it: margin, gap and, where colours mix, the tower.
+        let waste = dto::waste_params(d, prefs);
+        let tallest = split
+            .pieces
+            .iter()
+            .map(|p| {
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for v in &p.positions {
+                    lo = std::array::from_fn(|a| lo[a].min(v[a]));
+                    hi = std::array::from_fn(|a| hi[a].max(v[a]));
+                }
+                // Lying on its broad face, a piece stands about its thinnest.
+                (0..3).map(|a| hi[a] - lo[a]).fold(f32::MAX, f32::min)
+            })
+            .fold(0.0, f32::max);
+        let side = prefs
+            .plate
+            .tower_depth_mm
+            .unwrap_or_else(|| bp_core::waste::tower_side(waste.prime_mm3, waste.layer_mm, tallest))
+            + 2.0 * dto::TOWER_BRIM_MM;
+        let reserve = bp_3mf::Reserve {
+            tower: prefs.plate.tower,
+            tower_mm: [side; 2],
+            tower_gap_mm: prefs.plate.tower_gap_mm,
+            margin_mm: prefs.plate.margin_mm,
+        };
+        let kit = bp_core::kit::kit(split, bp_3mf::kit_bed(&d.printer, &reserve, prefs.plate.tower_gap_mm, mix));
         emit("kitGuide");
         // Each slot in the colour it prints, with its filament where one was picked.
         let palette: Vec<String> = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
@@ -714,8 +743,20 @@ pub async fn export_color_zip(
             slots: &slots,
             filament_names: &filament_names,
             printer: &d.printer,
-            params: d.kit.unwrap_or(bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot, min_piece_mm3 }),
+            params: d.kit.unwrap_or(bp_3mf::project_file::KitSettings {
+                voxel_mm,
+                depth_mm,
+                core_slot,
+                min_piece_mm3,
+                mix,
+            }),
             density_g_cm3: prefs.waste.density_g_cm3,
+            flush: bp_3mf::Flush {
+                volumes_mm3: dto::flush_matrix(d).0,
+                multiplier: prefs.waste.flush_multiplier,
+                into_infill: prefs.waste.flush_reuse > 0.0,
+                prime_mm3: prefs.waste.prime_mm3,
+            },
         };
         let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
         let s = bp_3mf::write_kit_zip(std::io::BufWriter::new(file), &kit, &info)

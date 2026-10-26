@@ -13,7 +13,7 @@ pub mod kit;
 pub mod plate;
 mod printer;
 pub mod project_file;
-pub use kit::{write_kit_zip, KitInfo, KitSummary};
+pub use kit::{kit_bed, write_kit_zip, KitInfo, KitSummary};
 pub use plate::{PlateCheck, Rect, Reserve};
 pub use printer::{canonical_id, catalog, Printer, PrinterProfile, NOZZLES};
 
@@ -722,6 +722,8 @@ pub struct PlateObject<'a> {
 
 pub struct PlateProject<'a> {
     pub name: &'a str,
+    /// Flushes between filaments, for plates where colours mix.
+    pub flush: Flush,
     pub objects: Vec<PlateObject<'a>>,
     /// Name shown on each plate.
     pub plates: Vec<String>,
@@ -741,8 +743,8 @@ pub fn plate_origin(printer: &Printer, i: usize, count: usize) -> (f32, f32) {
     ((i % cols) as f32 * w * 1.2, -((i / cols) as f32) * d * 1.2)
 }
 
-/// The project config of a plates 3MF: its filaments and printer, Bambu's
-/// defaults for the rest. Each plate holds one filament, so nothing flushes.
+/// The project config of a plates 3MF: its filaments, printer and flushes,
+/// Bambu's defaults for the rest. A plate of one filament flushes nothing.
 fn plates_model<'a>(project: &'a PlateProject) -> Model<'a> {
     Model {
         name: project.name,
@@ -751,7 +753,7 @@ fn plates_model<'a>(project: &'a PlateProject) -> Model<'a> {
         filaments: project.filaments.clone(),
         slots: project.slots.clone(),
         printer: project.printer.clone(),
-        flush: Flush::default(),
+        flush: project.flush.clone(),
         layer_mm: None,
         offset_mm: [0.0; 2],
         thumbnail: None,
@@ -911,6 +913,7 @@ mod plate_tests {
             at: [50.0, 60.0],
         };
         let project = PlateProject {
+            flush: Flush::default(),
             name: "kit",
             objects: vec![object("P01", 1, 0), object("P02", 2, 1)],
             plates: vec!["Negro".into(), "Blanco".into()],

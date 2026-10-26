@@ -1,6 +1,8 @@
 //! Turns split pieces into a print kit: every piece turned to rest on its
-//! broadest flat face, packed onto plates that hold a single colour, and an
-//! assembly order that always adds the piece touching the built part most.
+//! broadest flat face and to its smallest footprint, packed onto plates
+//! (MaxRects, either way round, clear of the margin, the printer's excluded
+//! zones and, where colours mix, the prime tower), and an assembly order that
+//! always adds the piece touching the built part most.
 
 use std::collections::HashMap;
 
@@ -20,11 +22,54 @@ pub struct Placed {
     pub at: [f32; 2],
     /// False when the piece is larger than the plate.
     pub fits: bool,
+    /// Area the piece covers on the plate (its footprint's convex hull), mm².
+    pub footprint_mm2: f32,
 }
 
 pub struct Plate {
-    pub slot: u8,
+    /// The colours on the plate, most pieces first; one unless colours mix.
+    pub slots: Vec<u8>,
     pub pieces: Vec<usize>,
+    /// Share of the plate's free room the pieces cover, 0–1.
+    pub occupancy: f32,
+}
+
+impl Plate {
+    /// The plate's main colour.
+    pub fn slot(&self) -> u8 {
+        self.slots[0]
+    }
+
+    /// More than one colour: the plate swaps filament and needs the tower.
+    pub fn mixed(&self) -> bool {
+        self.slots.len() > 1
+    }
+}
+
+/// Where pieces may go, in plate millimetres (x0, y0, x1, y1 rectangles).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bed {
+    pub area: [f32; 4],
+    /// Zones the printer keeps free.
+    pub excluded: Vec<[f32; 4]>,
+    /// The prime tower, its gap included; kept free where colours mix.
+    pub tower: Option<[f32; 4]>,
+    /// Room kept to the edges, and between pieces.
+    pub margin_mm: f32,
+    pub gap_mm: f32,
+    /// Let colours share a plate: fewer plates, but each swaps filament.
+    pub mix: bool,
+}
+
+impl Bed {
+    /// A `w` × `d` bed with nothing excluded and the default margin and gap.
+    pub fn plain(w: f32, d: f32) -> Self {
+        Self { area: [0.0, 0.0, w, d], excluded: vec![], tower: None, margin_mm: MARGIN, gap_mm: GAP, mix: false }
+    }
+
+    pub fn size(&self) -> (f32, f32) {
+        (self.area[2] - self.area[0], self.area[3] - self.area[1])
+    }
 }
 
 pub struct Step {
@@ -38,7 +83,7 @@ pub struct Kit {
     pub placed: Vec<Placed>,
     pub plates: Vec<Plate>,
     pub steps: Vec<Step>,
-    pub bed: (f32, f32),
+    pub bed: Bed,
     pub voxel_mm: f32,
     /// Crumbs that went to a neighbour, and regions too thin to make a piece.
     pub merged: usize,
@@ -101,9 +146,9 @@ const GAP: f32 = 5.0;
 /// Contact below this many mm² is a touch, not a joint worth gluing.
 const MIN_JOINT_MM2: f32 = 2.0;
 
-pub fn kit(split: Split, bed: (f32, f32)) -> Kit {
+pub fn kit(split: Split, bed: Bed) -> Kit {
     let mut placed: Vec<Placed> = split.pieces.iter().map(orient).collect();
-    let plates = pack(&split.pieces, &mut placed, bed);
+    let plates = pack(&split.pieces, &mut placed, &bed);
     let steps = assembly(&split.pieces);
     Kit {
         pieces: split.pieces,
@@ -197,27 +242,31 @@ fn orient(p: &Piece) -> Placed {
     let tilt = to_down(down.1);
     let tilted: Vec<Vec3> = p.positions.iter().map(|&v| apply(&tilt, v)).collect();
 
-    // Turn about Z for the smallest footprint, wider than deep.
+    // Turn about Z for the smallest footprint, wider than deep: the smallest
+    // rectangle around the footprint has a side along one of its hull's edges.
+    let hull = hull2(tilted.iter().map(|v| [v[0], v[1]]).collect());
     let footprint = |a: f32| {
         let (s, c) = a.sin_cos();
         let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
-        for v in &tilted {
+        for v in &hull {
             let q = [c * v[0] - s * v[1], s * v[0] + c * v[1]];
             lo = [lo[0].min(q[0]), lo[1].min(q[1])];
             hi = [hi[0].max(q[0]), hi[1].max(q[1])];
         }
         (hi[0] - lo[0], hi[1] - lo[1])
     };
-    let mut best = (f32::MAX, 0.0f32);
-    for k in 0..18 {
-        let a = (k as f32 * 5.0).to_radians();
-        let (w, d) = footprint(a);
-        if w * d < best.0 - 1e-3 {
-            best = (w * d, a);
+    let mut best = (footprint(0.0), 0.0f32);
+    for (k, a) in hull.iter().enumerate() {
+        let b = hull[(k + 1) % hull.len()];
+        // Turning by minus the edge's angle lays it along X.
+        let angle = -(b[1] - a[1]).atan2(b[0] - a[0]);
+        let (w, d) = footprint(angle);
+        if w * d < best.0 .0 * best.0 .1 - 1e-3 {
+            best = ((w, d), angle);
         }
     }
-    let (w, d) = footprint(best.1);
-    let angle = if w < d { best.1 + std::f32::consts::FRAC_PI_2 } else { best.1 };
+    let ((w, d), angle) = best;
+    let angle = if w < d { angle + std::f32::consts::FRAC_PI_2 } else { angle };
     let rot = mul(&yaw(angle), &tilt);
 
     let mut positions: Vec<Vec3> = p.positions.iter().map(|&v| apply(&rot, v)).collect();
@@ -230,64 +279,281 @@ fn orient(p: &Piece) -> Placed {
     for v in &mut positions {
         *v = geom::sub(*v, shift);
     }
-    Placed { rot, positions, size: geom::sub(hi, lo), plate: 0, at: [0.0; 2], fits: true }
+    let footprint_mm2 = area2(&hull);
+    Placed { rot, positions, size: geom::sub(hi, lo), plate: 0, at: [0.0; 2], fits: true, footprint_mm2 }
 }
 
-/// Shelf packing, one colour per plate, each plate's load centred.
-fn pack(pieces: &[Piece], placed: &mut [Placed], bed: (f32, f32)) -> Vec<Plate> {
-    let (w, d) = (bed.0 - 2.0 * MARGIN, bed.1 - 2.0 * MARGIN);
-    let mut plates: Vec<Plate> = vec![];
+/// Convex hull, counter-clockwise (Andrew's monotone chain).
+fn hull2(mut p: Vec<[f32; 2]>) -> Vec<[f32; 2]> {
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    p.dedup();
+    if p.len() < 3 {
+        return p;
+    }
+    let turn = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut h: Vec<[f32; 2]> = Vec::with_capacity(2 * p.len());
+    for pass in 0..2 {
+        let start = h.len();
+        let points: Box<dyn Iterator<Item = &[f32; 2]>> =
+            if pass == 0 { Box::new(p.iter()) } else { Box::new(p.iter().rev()) };
+        for &q in points {
+            while h.len() >= start + 2 && turn(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+                h.pop();
+            }
+            h.push(q);
+        }
+        h.pop();
+    }
+    h
+}
+
+fn area2(poly: &[[f32; 2]]) -> f32 {
+    let n = poly.len();
+    0.5 * (0..n).map(|i| poly[i][0] * poly[(i + 1) % n][1] - poly[(i + 1) % n][0] * poly[i][1]).sum::<f32>().abs()
+}
+
+type Rect = [f32; 4];
+
+fn overlaps(a: &Rect, b: &Rect) -> bool {
+    a[0] < b[2] - 1e-4 && b[0] < a[2] - 1e-4 && a[1] < b[3] - 1e-4 && b[1] < a[3] - 1e-4
+}
+
+fn inside(a: &Rect, b: &Rect) -> bool {
+    a[0] >= b[0] - 1e-4 && a[1] >= b[1] - 1e-4 && a[2] <= b[2] + 1e-4 && a[3] <= b[3] + 1e-4
+}
+
+/// One plate being filled, MaxRects style: the free room is every largest
+/// rectangle left, and a piece goes where the load stays most compact (the
+/// smallest square around it), then where it leaves the least short side over.
+/// Each piece takes its size plus the gap on its far sides, so the room runs a
+/// gap past the margin and obstacles grow by a gap on their far sides too.
+/// A piece's front left corner, whether it turned, and how well it fits.
+type Spot = ([f32; 2], bool, (f32, f32, f32));
+
+struct Sheet {
+    free: Vec<Rect>,
+    gap: f32,
+    /// Around what is on the plate so far, gaps included.
+    load: Option<Rect>,
+}
+
+impl Sheet {
+    fn new(bed: &Bed, tower: bool) -> Self {
+        let (m, g) = (bed.margin_mm.max(0.0), bed.gap_mm.max(0.0));
+        let a = bed.area;
+        let mut sheet = Sheet { free: vec![[a[0] + m, a[1] + m, a[2] - m + g, a[3] - m + g]], gap: g, load: None };
+        let tower = bed.tower.filter(|_| tower);
+        for o in bed.excluded.iter().chain(&tower) {
+            sheet.take(&[o[0], o[1], o[2] + g, o[3] + g]);
+        }
+        sheet
+    }
+
+    /// The best spot for a `w` × `d` piece, either way round: its front left
+    /// corner, whether it turned, and how well it fits (less is better).
+    fn spot(&self, w: f32, d: f32) -> Option<Spot> {
+        let mut best: Option<Spot> = None;
+        for f in &self.free {
+            let (fw, fd) = (f[2] - f[0], f[3] - f[1]);
+            for turned in [false, true] {
+                let (pw, pd) = if turned { (d + self.gap, w + self.gap) } else { (w + self.gap, d + self.gap) };
+                if pw > fw + 1e-4 || pd > fd + 1e-4 {
+                    continue;
+                }
+                let (a, b) = (fw - pw, fd - pd);
+                // The free rectangle's corner, or lined up with the load's front or
+                // left edge: anywhere inside it is free.
+                let xs = [f[0], self.load.map_or(f[0], |l| l[0].clamp(f[0], f[2] - pw))];
+                let ys = [f[1], self.load.map_or(f[1], |l| l[1].clamp(f[1], f[3] - pd))];
+                for x in xs {
+                    for y in ys {
+                        let r = [x, y, x + pw, y + pd];
+                        let box_ =
+                            self.load.map_or(r, |l| [l[0].min(r[0]), l[1].min(r[1]), l[2].max(r[2]), l[3].max(r[3])]);
+                        // The load's longest side, to the millimetre; then the short
+                        // side left over, then the long side; then nearer the front left.
+                        let side = (box_[2] - box_[0]).max(box_[3] - box_[1]).round();
+                        let score = (side, a.min(b), a.max(b) + 1e-3 * (x + y));
+                        if best.is_none_or(|b| score < b.2) {
+                            best = Some(([x, y], turned, score));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Puts a piece's room on the plate.
+    fn place(&mut self, r: &Rect) {
+        self.load = Some(self.load.map_or(*r, |l| [l[0].min(r[0]), l[1].min(r[1]), l[2].max(r[2]), l[3].max(r[3])]));
+        self.take(r);
+    }
+
+    /// Takes `r` out of the free room.
+    fn take(&mut self, r: &Rect) {
+        let mut next = Vec::with_capacity(self.free.len() + 4);
+        for f in self.free.drain(..) {
+            if !overlaps(&f, r) {
+                next.push(f);
+                continue;
+            }
+            for part in
+                [[f[0], f[1], r[0], f[3]], [r[2], f[1], f[2], f[3]], [f[0], f[1], f[2], r[1]], [f[0], r[3], f[2], f[3]]]
+            {
+                if part[2] - part[0] > 1e-3 && part[3] - part[1] > 1e-3 {
+                    next.push(part);
+                }
+            }
+        }
+        // Drop rectangles inside another.
+        let mut keep = vec![true; next.len()];
+        for i in 0..next.len() {
+            for j in 0..next.len() {
+                if i != j && keep[j] && inside(&next[i], &next[j]) && (next[i] != next[j] || i > j) {
+                    keep[i] = false;
+                    break;
+                }
+            }
+        }
+        self.free = next.into_iter().zip(keep).filter_map(|(r, k)| k.then_some(r)).collect();
+    }
+}
+
+/// Packs each colour onto its own plates (or all together when colours mix),
+/// largest pieces first, then centres each plate's load as far as it can go.
+fn pack(pieces: &[Piece], placed: &mut [Placed], bed: &Bed) -> Vec<Plate> {
     let mut slots: Vec<u8> = pieces.iter().map(|p| p.slot).collect();
     slots.sort_unstable();
     slots.dedup();
-    for slot in slots {
-        let mut ids: Vec<usize> = (0..pieces.len()).filter(|&i| pieces[i].slot == slot).collect();
-        ids.sort_by(|&a, &b| placed[b].size[1].total_cmp(&placed[a].size[1]));
-        let first = plates.len();
-        let (mut x, mut y, mut shelf) = (0.0f32, 0.0f32, 0.0f32);
-        let mut current: Option<usize> = None;
-        for i in ids {
-            let s = placed[i].size;
-            if s[0] > w || s[1] > d {
+    let groups: Vec<Vec<usize>> = if bed.mix {
+        vec![(0..pieces.len()).collect()]
+    } else {
+        slots.iter().map(|&s| (0..pieces.len()).filter(|&i| pieces[i].slot == s).collect()).collect()
+    };
+    // A tower only matters where colours can meet.
+    let tower = bed.mix && slots.len() > 1;
+    let mut plates: Vec<Plate> = vec![];
+    for mut left in groups {
+        left.sort_by(|&a, &b| {
+            let (sa, sb) = (placed[a].size, placed[b].size);
+            (sb[0].max(sb[1]), sb[0] * sb[1])
+                .partial_cmp(&(sa[0].max(sa[1]), sa[0] * sa[1]))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        while !left.is_empty() {
+            let mut sheet = Sheet::new(bed, tower);
+            let k = plates.len();
+            let mut on: Vec<usize> = vec![];
+            left.retain(|&i| {
+                let s = placed[i].size;
+                let Some((at, turned, _)) = sheet.spot(s[0], s[1]) else { return true };
+                if turned {
+                    turn_quarter(&mut placed[i]);
+                }
+                let s = placed[i].size;
+                sheet.place(&[at[0], at[1], at[0] + s[0] + sheet.gap, at[1] + s[1] + sheet.gap]);
+                placed[i].at = [at[0] + s[0] * 0.5, at[1] + s[1] * 0.5];
+                placed[i].plate = k;
+                on.push(i);
+                false
+            });
+            if on.is_empty() {
+                // Not even an empty plate holds it: alone, in the middle, flagged.
+                let i = left.remove(0);
+                let a = bed.area;
                 placed[i].fits = false;
-                placed[i].plate = plates.len();
-                placed[i].at = [bed.0 * 0.5, bed.1 * 0.5];
-                plates.push(Plate { slot, pieces: vec![i] });
-                continue;
+                placed[i].plate = k;
+                placed[i].at = [(a[0] + a[2]) * 0.5, (a[1] + a[3]) * 0.5];
+                on.push(i);
+            } else {
+                centre(&on, placed, bed, tower);
             }
-            if current.is_some() && x + s[0] > w {
-                (x, y, shelf) = (0.0, y + shelf + GAP, 0.0);
-            }
-            if current.is_none() || y + s[1] > d {
-                current = Some(plates.len());
-                plates.push(Plate { slot, pieces: vec![] });
-                (x, y, shelf) = (0.0, 0.0, 0.0);
-            }
-            let k = current.unwrap_or_default();
-            placed[i].plate = k;
-            placed[i].at = [MARGIN + x + s[0] * 0.5, MARGIN + y + s[1] * 0.5];
-            plates[k].pieces.push(i);
-            x += s[0] + GAP;
-            shelf = shelf.max(s[1]);
-        }
-        for plate in &plates[first..] {
-            let ids = &plate.pieces;
-            if ids.iter().any(|&i| !placed[i].fits) {
-                continue;
-            }
-            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
-            for &i in ids {
-                let (c, s) = (placed[i].at, placed[i].size);
-                lo = [lo[0].min(c[0] - s[0] * 0.5), lo[1].min(c[1] - s[1] * 0.5)];
-                hi = [hi[0].max(c[0] + s[0] * 0.5), hi[1].max(c[1] + s[1] * 0.5)];
-            }
-            let shift = [bed.0 * 0.5 - (lo[0] + hi[0]) * 0.5, bed.1 * 0.5 - (lo[1] + hi[1]) * 0.5];
-            for &i in ids {
-                placed[i].at = [placed[i].at[0] + shift[0], placed[i].at[1] + shift[1]];
-            }
+            plates.push(plate(on, pieces, placed, bed, tower));
         }
     }
     plates
+}
+
+/// Turns a placed piece a quarter turn about Z, keeping it centred.
+fn turn_quarter(p: &mut Placed) {
+    let q = yaw(std::f32::consts::FRAC_PI_2);
+    p.rot = mul(&q, &p.rot);
+    for v in &mut p.positions {
+        *v = [-v[1], v[0], v[2]];
+    }
+    p.size = [p.size[1], p.size[0], p.size[2]];
+}
+
+/// Moves a plate's load toward the middle of its room, as far as it stays
+/// clear of the margin, excluded zones and tower.
+fn centre(ids: &[usize], placed: &mut [Placed], bed: &Bed, tower: bool) {
+    let rect = |p: &Placed, d: [f32; 2]| {
+        [
+            p.at[0] + d[0] - p.size[0] * 0.5,
+            p.at[1] + d[1] - p.size[1] * 0.5,
+            p.at[0] + d[0] + p.size[0] * 0.5,
+            p.at[1] + d[1] + p.size[1] * 0.5,
+        ]
+    };
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for &i in ids {
+        let r = rect(&placed[i], [0.0; 2]);
+        lo = [lo[0].min(r[0]), lo[1].min(r[1])];
+        hi = [hi[0].max(r[2]), hi[1].max(r[3])];
+    }
+    let a = bed.area;
+    let want = [(a[0] + a[2] - lo[0] - hi[0]) * 0.5, (a[1] + a[3] - lo[1] - hi[1]) * 0.5];
+    let (m, g) = (bed.margin_mm.max(0.0), bed.gap_mm.max(0.0));
+    let room = [a[0] + m, a[1] + m, a[2] - m, a[3] - m];
+    let tower = bed.tower.filter(|_| tower);
+    let clear = |d: [f32; 2]| {
+        ids.iter().all(|&i| {
+            let r = rect(&placed[i], d);
+            inside(&r, &room)
+                && bed.excluded.iter().chain(&tower).all(|o| !overlaps(&r, &[o[0] - g, o[1] - g, o[2] + g, o[3] + g]))
+        })
+    };
+    // Each axis on its own, from all the way down to not at all.
+    let mut d = [0.0f32; 2];
+    for axis in 0..2 {
+        for k in (0..=8).rev() {
+            let mut t = d;
+            t[axis] = want[axis] * k as f32 / 8.0;
+            if clear(t) {
+                d = t;
+                break;
+            }
+        }
+    }
+    for &i in ids {
+        placed[i].at = [placed[i].at[0] + d[0], placed[i].at[1] + d[1]];
+    }
+}
+
+fn plate(ids: Vec<usize>, pieces: &[Piece], placed: &[Placed], bed: &Bed, tower: bool) -> Plate {
+    let mut count: Vec<(u8, usize)> = vec![];
+    for &i in &ids {
+        match count.iter_mut().find(|c| c.0 == pieces[i].slot) {
+            Some(c) => c.1 += 1,
+            None => count.push((pieces[i].slot, 1)),
+        }
+    }
+    count.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let (w, d) = bed.size();
+    let m = bed.margin_mm.max(0.0);
+    let room = [bed.area[0] + m, bed.area[1] + m, bed.area[2] - m, bed.area[3] - m];
+    let cut = |o: &[f32; 4]| {
+        let (x, y) =
+            ((o[2].min(room[2]) - o[0].max(room[0])).max(0.0), (o[3].min(room[3]) - o[1].max(room[1])).max(0.0));
+        x * y
+    };
+    let tower = bed.tower.filter(|_| tower);
+    let free = ((w - 2.0 * m).max(0.0) * (d - 2.0 * m).max(0.0)
+        - bed.excluded.iter().chain(&tower).map(cut).sum::<f32>())
+    .max(1.0);
+    let used: f32 = ids.iter().map(|&i| placed[i].footprint_mm2).sum();
+    Plate { slots: count.into_iter().map(|c| c.0).collect(), pieces: ids, occupancy: (used / free).min(1.0) }
 }
 
 /// Starts from the largest piece and keeps adding the piece with the most
@@ -337,7 +603,7 @@ mod tests {
             flat,
             piece([0.0; 3], [300.0, 300.0, 5.0]),
         ];
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, (256.0, 256.0));
+        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(256.0, 256.0));
         let issues = check(&k, 0.4);
         assert!(issues[0].is_empty(), "{:?}", issues[0]);
         assert!(matches!(issues[1].as_slice(), [Issue::Thin(t)] if (*t - 0.6).abs() < 1e-3), "{:?}", issues[1]);
@@ -367,10 +633,11 @@ mod tests {
     #[test]
     fn plates_hold_one_colour_and_stay_on_the_bed() {
         let pieces: Vec<Piece> = (0..12).map(|i| piece((i % 2) as u8, [0.0; 3], [40.0, 30.0, 5.0], vec![])).collect();
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, (120.0, 120.0));
+        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(120.0, 120.0));
         assert!(k.plates.len() >= 2);
         for plate in &k.plates {
-            assert!(plate.pieces.iter().all(|&i| k.pieces[i].slot == plate.slot));
+            assert!(plate.pieces.iter().all(|&i| k.pieces[i].slot == plate.slot()));
+            assert!(!plate.mixed());
             for &i in &plate.pieces {
                 let (c, s) = (k.placed[i].at, k.placed[i].size);
                 assert!(c[0] - s[0] / 2.0 >= -1e-3 && c[0] + s[0] / 2.0 <= 120.0 + 1e-3);
@@ -387,6 +654,104 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every piece on its plate clear of the margin, the obstacles and the others.
+    fn assert_clear(k: &Kit, obstacles: &[[f32; 4]]) {
+        let b = &k.bed;
+        let (m, g) = (b.margin_mm, b.gap_mm);
+        let rect = |i: usize| {
+            let (c, s) = (k.placed[i].at, k.placed[i].size);
+            [c[0] - s[0] / 2.0, c[1] - s[1] / 2.0, c[0] + s[0] / 2.0, c[1] + s[1] / 2.0]
+        };
+        for plate in &k.plates {
+            for (n, &a) in plate.pieces.iter().enumerate() {
+                let r = rect(a);
+                assert!(
+                    inside(&r, &[b.area[0] + m, b.area[1] + m, b.area[2] - m, b.area[3] - m]),
+                    "{r:?} in the margin"
+                );
+                for o in obstacles {
+                    assert!(!overlaps(&r, &[o[0] - g, o[1] - g, o[2] + g, o[3] + g]), "{r:?} on {o:?}");
+                }
+                for &c in &plate.pieces[n + 1..] {
+                    let q = rect(c);
+                    assert!(
+                        !overlaps(&[r[0] - g + 1e-3, r[1] - g + 1e-3, r[2] + g - 1e-3, r[3] + g - 1e-3], &q),
+                        "{r:?} near {q:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packs_tighter_than_shelves_and_turns_pieces_to_fit() {
+        // Long sticks 150 × 20 on a 160 × 160 bed with a 5 mm margin: lying
+        // along X they fit five deep; the 100 × 60 blocks then fill the rest.
+        let mut pieces: Vec<Piece> = (0..5).map(|_| piece(0, [0.0; 3], [150.0, 20.0, 4.0], vec![])).collect();
+        pieces.extend((0..2).map(|_| piece(0, [0.0; 3], [60.0, 30.0, 4.0], vec![])));
+        let bed = Bed { margin_mm: 5.0, gap_mm: 2.0, ..Bed::plain(160.0, 160.0) };
+        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, bed);
+        assert_eq!(k.plates.len(), 1, "one plate holds them all");
+        assert_clear(&k, &[]);
+        assert!(k.plates[0].occupancy > 0.6 && k.plates[0].occupancy <= 1.0, "{}", k.plates[0].occupancy);
+        // A piece too deep one way turns the other way round to fit.
+        let tall = vec![piece(0, [0.0; 3], [100.0, 40.0, 4.0], vec![])];
+        let bed = Bed { margin_mm: 0.0, gap_mm: 0.0, ..Bed::plain(50.0, 120.0) };
+        let k = kit(Split { pieces: tall, voxel_mm: 0.5, merged: 0, dropped: 0 }, bed);
+        assert!(k.placed[0].fits);
+        assert!((k.placed[0].size[1] - 100.0).abs() < 1e-3, "{:?}", k.placed[0].size);
+        // The STL stays in step with the turn: its extent is the size.
+        let xs = k.placed[0].positions.iter().map(|v| v[0]).fold(f32::MIN, f32::max);
+        assert!((xs - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn keeps_off_excluded_zones_and_the_tower_where_colours_mix() {
+        let pieces: Vec<Piece> = (0..16).map(|i| piece((i % 3) as u8, [0.0; 3], [30.0, 25.0, 5.0], vec![])).collect();
+        let excluded = [0.0, 0.0, 60.0, 60.0];
+        let tower = [150.0, 150.0, 190.0, 190.0];
+        let bed = Bed { excluded: vec![excluded], tower: Some(tower), ..Bed::plain(200.0, 200.0) };
+        // Apart: one colour per plate, and no tower to keep clear of.
+        let apart = kit(
+            Split {
+                pieces: (0..16).map(|i| piece((i % 3) as u8, [0.0; 3], [30.0, 25.0, 5.0], vec![])).collect(),
+                voxel_mm: 0.5,
+                merged: 0,
+                dropped: 0,
+            },
+            bed.clone(),
+        );
+        assert_eq!(apart.plates.len(), 3);
+        assert!(apart.plates.iter().all(|p| !p.mixed()));
+        assert_clear(&apart, &[excluded]);
+        // Mixed: fewer plates, clear of the tower as well.
+        let mixed = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed { mix: true, ..bed });
+        assert_eq!(mixed.plates.len(), 1);
+        assert!(mixed.plates[0].mixed() && mixed.plates[0].slots.len() == 3);
+        assert_clear(&mixed, &[excluded, tower]);
+    }
+
+    #[test]
+    fn the_smallest_footprint_is_found_at_any_angle() {
+        // A 60 × 10 slab turned 30° about Z: its box is 57 × 39 until turned back.
+        let mut p = piece(0, [0.0; 3], [60.0, 10.0, 2.0], vec![]);
+        let r = yaw(30f32.to_radians());
+        p.positions = p.positions.iter().map(|&v| apply(&r, v)).collect();
+        let placed = orient(&p);
+        assert!((placed.size[0] - 60.0).abs() < 0.05 && (placed.size[1] - 10.0).abs() < 0.05, "{:?}", placed.size);
+        assert!((placed.footprint_mm2 - 600.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_piece_larger_than_the_bed_gets_its_own_plate() {
+        let pieces =
+            vec![piece(0, [0.0; 3], [300.0, 40.0, 5.0], vec![]), piece(0, [0.0; 3], [20.0, 20.0, 5.0], vec![])];
+        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(200.0, 200.0));
+        assert_eq!(k.plates.len(), 2);
+        assert!(!k.placed[0].fits && k.placed[1].fits);
+        assert_ne!(k.placed[0].plate, k.placed[1].plate);
     }
 
     #[test]

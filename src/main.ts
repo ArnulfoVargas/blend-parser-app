@@ -1451,6 +1451,7 @@ $("#open-zip").addEventListener("click", () => {
     $<HTMLSelectElement>("#voxel").value = String(last.voxelMm);
     $<HTMLInputElement>("#depth").value = String(last.depthMm);
     $<HTMLInputElement>("#min-piece").value = String(last.minPieceMm3);
+    $<HTMLInputElement>("#zip-mix").checked = last.mix ?? false;
   }
   const wanted = last ? (last.coreSlot === null ? "" : String(last.coreSlot)) : keep;
   core.value = [...core.options].some((o) => o.value === wanted) ? wanted : "";
@@ -1477,6 +1478,7 @@ $("#export-zip").addEventListener("click", async () => {
     depthMm,
     coreSlot: depthMm > 0 && core !== "" ? Number(core) : null,
     minPieceMm3,
+    mix: $<HTMLInputElement>("#zip-mix").checked,
   };
   zipDialog.close();
   if (!(await confirmOversize())) return;
