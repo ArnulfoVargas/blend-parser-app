@@ -71,6 +71,7 @@ fn real_multicolor_imports_and_missing_resources() {
         let parts = project.export_parts();
         let model = bp_3mf::Model {
             name: "fixture",
+            piece: "piece",
             parts: parts
                 .iter()
                 .map(|p| bp_3mf::Part {

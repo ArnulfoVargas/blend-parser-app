@@ -546,15 +546,24 @@ pub async fn export_color_zip(
     .await
 }
 
+/// The open model as a Bambu Studio 3MF. `objects` picks which printed objects
+/// go in (all when `None`); pieces are named in `lang`.
 #[tauri::command]
-pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
+pub async fn export_3mf(app: AppHandle, path: String, lang: String, objects: Option<Vec<u32>>) -> CmdResult<()> {
     with_doc(app, move |d, prefs| {
-        let parts = d.project.export_parts();
+        let mut parts = d.project.export_parts();
+        if let Some(keep) = &objects {
+            parts.retain(|p| keep.contains(&p.object));
+        }
+        if parts.is_empty() {
+            return Err(AppError::new("error.noObjects"));
+        }
         let filaments = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let (volumes_mm3, _) = dto::flush_matrix(d);
         let model = bp_3mf::Model {
             name: &name,
+            piece: bp_3mf::ZipText::for_lang(&lang).piece,
             parts: parts
                 .iter()
                 .map(|p| bp_3mf::Part {

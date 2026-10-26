@@ -1,6 +1,6 @@
-//! Writes a 3MF that Bambu Studio opens already painted: one object, one part
-//! per mesh, millimetre vertices and a `paint_color` per triangle, plus a
-//! project config with one filament per colour.
+//! Writes a 3MF that Bambu Studio opens already painted: one object per printed
+//! piece, one part per mesh, millimetre vertices and a `paint_color` per
+//! triangle, plus a project config with one filament per colour.
 
 use std::fmt::Write as _;
 use std::io::{Seek, Write};
@@ -24,6 +24,8 @@ pub struct Part<'a> {
 
 pub struct Model<'a> {
     pub name: &'a str,
+    /// The word for a piece cut off the model, in the user's language (see [`object_name`]).
+    pub piece: &'a str,
     pub parts: Vec<Part<'a>>,
     /// Filament colours as `#RRGGBB`, slot 1 first.
     pub filaments: Vec<String>,
@@ -68,6 +70,7 @@ fn escape(s: &str) -> String {
 fn objects_xml(model: &Model) -> String {
     let tris: usize = model.parts.iter().map(|p| p.tris.len()).sum();
     let mut x = String::with_capacity(tris * 64);
+    let origins = origins(model);
     let _ = write!(
         x,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" {NS}>\n <metadata name=\"BambuStudio:3mfVersion\">2</metadata>\n <resources>\n"
@@ -75,13 +78,14 @@ fn objects_xml(model: &Model) -> String {
     for (i, p) in model.parts.iter().enumerate() {
         let id = i + 1;
         let _ = write!(x, "  <object id=\"{id}\" p:UUID=\"{id:04x}0000-81cb-4c03-9d28-80fed5dfa1dc\" type=\"model\">\n   <mesh>\n    <vertices>\n");
+        let o = origins[i];
         for v in p.positions {
             x.push_str("     <vertex x=\"");
-            num(&mut x, v[0]);
+            num(&mut x, v[0] - o[0]);
             x.push_str("\" y=\"");
-            num(&mut x, v[1]);
+            num(&mut x, v[1] - o[1]);
             x.push_str("\" z=\"");
-            num(&mut x, v[2]);
+            num(&mut x, v[2] - o[2]);
             x.push_str("\"/>\n");
         }
         x.push_str("    </vertices>\n    <triangles>\n");
@@ -106,17 +110,44 @@ fn objects(model: &Model) -> Vec<Vec<usize>> {
     ids.iter().map(|&o| (0..model.parts.len()).filter(|&i| model.parts[i].object == o).collect()).collect()
 }
 
+/// Where each object sits: the centre of its footprint at its lowest point.
+/// Its vertices are written from there and its plate item carries the rest,
+/// so Bambu Studio turns, arranges and drops each piece about its own centre.
+fn object_origin(model: &Model, parts: &[usize]) -> [f32; 3] {
+    let mut it = parts.iter().flat_map(|&i| model.parts[i].positions.iter().copied());
+    let Some(first) = it.next() else { return [0.0; 3] };
+    let (lo, hi) = it.fold((first, first), |(lo, hi), p| {
+        (std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn::<f32, 3, _>(|i| hi[i].max(p[i])))
+    });
+    [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, lo[2]]
+}
+
+/// The origin of each part's object, by part.
+fn origins(model: &Model) -> Vec<[f32; 3]> {
+    let mut out = vec![[0.0; 3]; model.parts.len()];
+    for parts in objects(model) {
+        let o = object_origin(model, &parts);
+        for i in parts {
+            out[i] = o;
+        }
+    }
+    out
+}
+
 /// The id of the `k`-th object: after the parts' own mesh objects.
 fn object_id(model: &Model, k: usize) -> usize {
     model.parts.len() + 1 + k
 }
 
-/// The first object takes the model's name; pieces cut off it, their first part's.
-fn object_name(model: &Model, k: usize, parts: &[usize]) -> String {
-    if k == 0 {
-        model.name.to_string()
+/// The name of printed object `object`: the model's for the model itself and,
+/// for each piece cut off it, the model's with `piece` and the object's number
+/// ("Dragon – piece 2"). It follows the object, not its place in the file, so a
+/// piece keeps its name when others are left out.
+pub fn object_name(model: &str, piece: &str, object: u32) -> String {
+    if object == 0 {
+        model.to_string()
     } else {
-        parts.first().map_or_else(|| model.name.to_string(), |&i| model.parts[i].name.to_string())
+        format!("{model} – {piece} {}", object + 1)
     }
 }
 
@@ -126,6 +157,8 @@ fn main_xml(model: &Model) -> String {
     let (mut resources, mut items) = (String::new(), String::new());
     for (k, parts) in objects(model).iter().enumerate() {
         let id = object_id(model, k);
+        let o = object_origin(model, parts);
+        let (x, y) = (cx + o[0], cy + o[1]);
         let mut comps = String::new();
         for &i in parts {
             let _ = writeln!(
@@ -143,12 +176,17 @@ fn main_xml(model: &Model) -> String {
 ",
             k + 1
         );
-        // Every piece is placed by its own vertices: they all share the plate's centre.
-        let _ = writeln!(
+        let _ = write!(
             items,
-            "  <item objectid=\"{id}\" p:UUID=\"{:08x}-b1ec-4553-aec9-835e5b724bb4\" transform=\"1 0 0 0 1 0 0 0 1 {cx} {cy} 0\" printable=\"1\"/>",
+            "  <item objectid=\"{id}\" p:UUID=\"{:08x}-b1ec-4553-aec9-835e5b724bb4\" transform=\"1 0 0 0 1 0 0 0 1 ",
             k + 2
         );
+        num(&mut items, x);
+        items.push(' ');
+        num(&mut items, y);
+        items.push(' ');
+        num(&mut items, o[2]);
+        items.push_str("\" printable=\"1\"/>\n");
     }
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -196,7 +234,7 @@ fn settings_xml(model: &Model) -> String {
     <metadata face_count=\"{total}\"/>
 {parts}  </object>
 ",
-            name = escape(&object_name(model, k, ids))
+            name = escape(&object_name(model.name, model.piece, model.parts[ids[0]].object))
         );
         let _ = write!(
             instances,
@@ -339,6 +377,7 @@ mod tests {
         let paint = vec!["4".to_string(), "8".into(), "0C".into(), "40C0C0C30C0C0C30C0C0C3".into()];
         let model = Model {
             name: "test & co",
+            piece: "piece",
             parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint, object: 0 }],
             filaments: vec!["#4d2720".into(), "#222222".into(), "#E8A461".into()],
             printer: Printer::default(),
@@ -355,7 +394,7 @@ mod tests {
         let mut zip = zip::ZipArchive::new(Cursor::new(buf.into_inner())).unwrap();
         let mut s = String::new();
         zip.by_name("3D/Objects/object_1.model").unwrap().read_to_string(&mut s).unwrap();
-        assert!(s.contains("<vertex x=\"10\" y=\"0\" z=\"0\"/>"));
+        assert!(s.contains("<vertex x=\"-5\" y=\"-5\" z=\"0\"/>"));
         assert!(s.contains("paint_color=\"0C\""));
         let mut cfg = String::new();
         zip.by_name("Metadata/project_settings.config").unwrap().read_to_string(&mut cfg).unwrap();
@@ -371,7 +410,9 @@ mod tests {
         let mut main = String::new();
         zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut main).unwrap();
         assert!(main.contains("test &amp; co") && main.contains("objectid=\"2\""));
-        assert!(main.contains("1 0 0 0 1 0 0 0 1 128 128 0"));
+        // The object's origin is the centre of its footprint at its base.
+        assert!(main.contains("1 0 0 0 1 0 0 0 1 133 133 0"));
+        assert!(s.contains("<vertex x=\"5\" y=\"-5\" z=\"0\"/>"), "{s}");
         assert_eq!(v["printer_settings_id"], "Bambu Lab A1 0.4 nozzle");
         assert!(v.get("printable_area").is_none());
     }
@@ -384,6 +425,7 @@ mod tests {
         let part = |name, object| Part { name, positions: &positions, tris: &tris, paint: &paint, object };
         let model = Model {
             name: "m",
+            piece: "pieza",
             parts: vec![part("a", 0), part("b (2)", 1), part("c", 0)],
             filaments: vec!["#FFFFFF".into()],
             printer: Printer::default(),
@@ -397,14 +439,45 @@ mod tests {
         let cfg = settings_xml(&model);
         assert_eq!(cfg.matches("<model_instance>").count(), 2);
         assert!(cfg.contains("value=\"b (2)\""));
+        assert!(cfg.contains("<metadata key=\"name\" value=\"m – pieza 2\"/>"), "{cfg}");
         // The model's object keeps both of its parts.
         let first = &cfg[..cfg.find("<object id=\"5\"").unwrap()];
         assert_eq!(first.matches("<part ").count(), 2);
     }
 
+    #[test]
+    fn each_object_sits_on_its_own_origin() {
+        let left = [[-30.0, -5.0, 0.0], [-10.0, -5.0, 0.0], [-20.0, 5.0, 0.0], [-20.0, 0.0, 8.0]];
+        let right = [[10.0, -2.0, 0.0], [30.0, -2.0, 0.0], [20.0, 2.0, 0.0], [20.0, 0.0, 4.0]];
+        let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
+        let paint = vec!["4".to_string(); 4];
+        let model = Model {
+            name: "m",
+            piece: "piece",
+            parts: vec![
+                Part { name: "a", positions: &left, tris: &tris, paint: &paint, object: 0 },
+                Part { name: "b", positions: &right, tris: &tris, paint: &paint, object: 1 },
+            ],
+            filaments: vec!["#FFFFFF".into()],
+            printer: Printer::default(),
+            flush: Flush::default(),
+            layer_mm: None,
+            offset_mm: [2.0, 0.0],
+        };
+        let main = main_xml(&model);
+        // The plate's centre, the model's offset and each object's own centre.
+        assert!(main.contains("transform=\"1 0 0 0 1 0 0 0 1 110 128 0\""), "{main}");
+        assert!(main.contains("transform=\"1 0 0 0 1 0 0 0 1 150 128 0\""), "{main}");
+        let objects = objects_xml(&model);
+        assert!(objects.contains("<vertex x=\"-10\" y=\"-5\" z=\"0\"/>"), "{objects}");
+        assert!(objects.contains("<vertex x=\"10\" y=\"-2\" z=\"0\"/>"), "{objects}");
+        assert_eq!(object_name("m", "piece", 1), "m – piece 2");
+    }
+
     fn config(printer: Printer) -> serde_json::Value {
         let model = Model {
             name: "t",
+            piece: "piece",
             parts: vec![],
             filaments: vec!["#FFFFFF".into()],
             printer,
@@ -486,6 +559,8 @@ pub struct ZipText {
     pub columns: [&'static str; 3],
     pub solid: &'static str,
     pub footer: &'static str,
+    /// A piece cut off the model, as its 3MF object is named.
+    pub piece: &'static str,
 }
 
 impl ZipText {
@@ -495,6 +570,7 @@ impl ZipText {
         solid: "(sólido completo)",
         footer: "Cada color es una pieza cerrada. Las cáscaras siguen la superficie del modelo hacia dentro;\n\
                  el sólido completo, si lo hay, es el modelo entero en el color principal.\n",
+        piece: "pieza",
     };
     pub const EN: ZipText = ZipText {
         index_file: "colors.txt",
@@ -502,6 +578,7 @@ impl ZipText {
         solid: "(full solid)",
         footer: "Each colour is a closed piece. Shells follow the model's surface inwards;\n\
                  the full solid, if there is one, is the whole model in the main colour.\n",
+        piece: "piece",
     };
 
     /// The text for a BCP 47 language tag; Spanish when there is none for it.

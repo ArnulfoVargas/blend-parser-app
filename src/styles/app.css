@@ -270,6 +270,7 @@ details.group[open] .group__sum { visibility: hidden; }
 .dialog { width: min(420px, calc(100% - 2 * var(--space-lg))); padding: 0; border: 0; border-radius: var(--radius-card); background: var(--grain), var(--color-paper); color: var(--color-ink); box-shadow: var(--shadow-lift); }
 .dialog::backdrop { background: color-mix(in oklab, var(--color-ink) 35%, transparent); }
 .dialog__body { display: flex; flex-direction: column; gap: var(--space-md); padding: var(--space-lg); }
+.pieces { display: flex; flex-direction: column; max-height: 50vh; overflow-y: auto; }
 .dialog__actions { display: flex; justify-content: flex-end; gap: var(--space-sm); padding-top: var(--space-xs); }
 
 .range:disabled + output { opacity: 0.55; }

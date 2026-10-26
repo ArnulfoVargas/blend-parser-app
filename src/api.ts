@@ -81,6 +81,7 @@ export interface Plate {
   rotated: boolean; // turned from the file's orientation
   canUndoCut: boolean;
   objects: number; // the model and the pieces cut off it that were kept
+  objectIds: number[]; // their ids: 0 is the model, piece `id` is named with `id + 1`
 }
 
 /** A turn; `rigid` says how the preview moved when it could follow as it is: p' = matrix · p + shift. */
@@ -197,7 +198,8 @@ export const api = {
   paint: (origin: Vec3, dir: Vec3, radiusMm: number, slot: number) => invoke<PaintResult | null>("paint", { origin, dir, radiusMm, slot }),
   endStroke: () => invoke<Summary>("end_stroke"),
   undo: () => invoke<Summary>("undo"),
-  export3mf: (path: string) => invoke<void>("export_3mf", { path }),
+  /** `objects` picks the printed objects that go in; null for all. Pieces are named in `lang`. */
+  export3mf: (path: string, lang: string, objects: number[] | null = null) => invoke<void>("export_3mf", { path, lang, objects }),
   exportColorZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
     invoke<number>("export_color_zip", { path, thicknessMm, mainSolid, lang }),
 };

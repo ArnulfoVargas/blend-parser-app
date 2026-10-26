@@ -429,6 +429,19 @@
     </form>
   </dialog>
 
+  <dialog class="dialog" id="pieces-dialog" aria-labelledby="h-pieces">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-pieces" data-i18n="export.piecesTitle">Piezas a exportar</h2>
+      <p class="help" data-i18n="export.piecesHelp"></p>
+      <fieldset class="pieces" id="pieces-list" aria-labelledby="h-pieces"></fieldset>
+      <p class="form-error" id="pieces-error" role="alert" hidden data-i18n="export.piecesNone"></p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="button" id="export-pieces" data-i18n="export.label">Exportar .3mf</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="dialog dialog--sheet" id="waste-dialog" aria-labelledby="h-waste-dialog">
     <form class="sheet" id="waste-form" novalidate>
       <header class="sheet__head">

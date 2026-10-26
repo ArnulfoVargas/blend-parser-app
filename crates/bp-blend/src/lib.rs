@@ -424,6 +424,7 @@ mod tests {
         let filaments: Vec<String> = project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let model = bp_3mf::Model {
             name: "spider",
+            piece: "piece",
             parts: parts
                 .iter()
                 .map(|p| bp_3mf::Part {
