@@ -46,6 +46,11 @@ type Tri = ([u32; 3], [u32; 3], u16);
 /// above, each with its opening capped. Vertices within `eps` of the plane are
 /// moved onto it. A side the part does not reach comes back with no triangles.
 pub fn split(part: &Part, axis: usize, value: f32, eps: f32) -> [Part; 2] {
+    split_with_origins(part, axis, value, eps).map(|(part, _)| part)
+}
+
+/// As `split`, with each surface triangle's parent index; new caps have no parent.
+pub(crate) fn split_with_origins(part: &Part, axis: usize, value: f32, eps: f32) -> [(Part, Vec<Option<u32>>); 2] {
     let mut positions = part.positions.clone();
     let mut dist: Vec<f32> = positions
         .iter_mut()
@@ -61,16 +66,19 @@ pub fn split(part: &Part, axis: usize, value: f32, eps: f32) -> [Part; 2] {
         .collect();
     let mut loops = Loops::new(part);
     let mut sides: [Vec<Tri>; 2] = [vec![], vec![]];
+    let mut origins: [Vec<Option<u32>>; 2] = [vec![], vec![]];
     let mut on_edge: HashMap<(u32, u32), u32> = HashMap::new();
     for (ti, (&t, &l)) in part.tris.iter().zip(&part.tri_loops).enumerate() {
         let src = part.tri_source.get(ti).copied().unwrap_or(0);
         let d = t.map(|v| dist[v as usize]);
         if d.iter().all(|&x| x <= 0.0) {
             sides[0].push((t, l, src));
+            origins[0].push(Some(ti as u32));
             continue;
         }
         if d.iter().all(|&x| x >= 0.0) {
             sides[1].push((t, l, src));
+            origins[1].push(Some(ti as u32));
             continue;
         }
         // Round the triangle, each corner goes to its side and each crossing to both.
@@ -112,6 +120,7 @@ pub fn split(part: &Part, axis: usize, value: f32, eps: f32) -> [Part; 2] {
                 let (a, b, c) = (corners[0], corners[k], corners[k + 1]);
                 if a.0 != b.0 && b.0 != c.0 && a.0 != c.0 {
                     sides[side].push(([a.0, b.0, c.0], [a.1, b.1, c.1], src));
+                    origins[side].push(Some(ti as u32));
                 }
             }
         }
@@ -122,8 +131,11 @@ pub fn split(part: &Part, axis: usize, value: f32, eps: f32) -> [Part; 2] {
         // Below the cut the cap faces up the axis; above, down it.
         *caps = cap(tris, &positions, &on_plane, axis, side == 0);
     }
-    let [low, high] = out;
-    [piece(part, &positions, &loops, low), piece(part, &positions, &loops, high)]
+    let [low, high] = out.map(|side| piece(part, &positions, &loops, side));
+    let [mut low_origins, mut high_origins] = origins;
+    low_origins.resize(low.tris.len(), None);
+    high_origins.resize(high.tris.len(), None);
+    [(low, low_origins), (high, high_origins)]
 }
 
 /// The cap that closes one side's opening on the plane.

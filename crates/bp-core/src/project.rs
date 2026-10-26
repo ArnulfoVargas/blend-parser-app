@@ -8,7 +8,7 @@ use crate::encode;
 use crate::estimate::{self, SwapEstimate};
 use crate::field::ColorField;
 use crate::geom::{self, Vec3, ROOT};
-use crate::mesh::{Mesh, MeshOps, RepairReport};
+use crate::mesh::{Mesh, MeshOps, MeshPart, RepairReport};
 use crate::optimize;
 use crate::paint::{self, Node, PaintParams};
 use crate::palette;
@@ -96,6 +96,7 @@ struct SlotSnapshot {
     targets: Vec<(Rgb, u8)>,
     trees: Vec<Vec<Node>>,
     painted: Vec<Vec<u8>>,
+    cut_painted: Vec<Vec<Vec<u8>>>,
 }
 
 #[derive(Clone)]
@@ -137,6 +138,58 @@ pub struct RigidMove {
 struct CutSnapshot {
     parts: Vec<Part>,
     unrotated: Vec<Vec<Vec3>>,
+    painted: Vec<Vec<u8>>,
+}
+
+/// Transfers brush labels within one part. Exact source ancestry takes priority;
+/// simplified geometry uses the same closest-surface rule as source colours.
+struct PaintTransfer {
+    soup: TriSoup,
+    bvh: Bvh,
+    labels: Vec<u8>,
+    by_source: Vec<Option<u8>>,
+}
+
+impl PaintTransfer {
+    fn new(part: &MeshPart, labels: &[u8], source_count: usize) -> Self {
+        let mut by_source = vec![None; source_count];
+        if let Some(origins) = &part.origin {
+            // A removed source face has no brush mark to transfer.
+            by_source.fill(Some(NO_LABEL));
+            let mut seen = vec![false; source_count];
+            for ((src, _), &label) in origins.iter().zip(labels) {
+                let i = *src as usize;
+                if !seen[i] {
+                    by_source[i] = Some(label);
+                    seen[i] = true;
+                } else if by_source[i] != Some(label) {
+                    by_source[i] = None;
+                }
+            }
+        }
+        let mut soup = TriSoup::default();
+        if part.origin.is_none() || by_source.iter().any(Option::is_none) {
+            for ti in 0..part.tris.len() {
+                soup.push(part.corners(ti), 0, ti as u32);
+            }
+        }
+        Self { bvh: Bvh::build(&soup), soup, labels: labels.to_vec(), by_source }
+    }
+
+    fn label(&self, source: Option<u32>, point: Vec3) -> u8 {
+        if let Some(label) = source.and_then(|s| self.by_source.get(s as usize).copied().flatten()) {
+            return label;
+        }
+        self.bvh.nearest(&self.soup, point).map_or(NO_LABEL, |(t, _)| self.labels[t as usize])
+    }
+}
+
+/// A cut piece's surface before it is moved, turned or rebuilt. The working
+/// mesh's barycentric origins can still locate its brush marks in this frame.
+struct CutPaint {
+    part: usize,
+    origins: Vec<Option<u32>>,
+    corners: Vec<[Vec3; 3]>,
 }
 
 /// Turn of `degrees` about X, Y or Z, counter-clockwise looking down the axis.
@@ -481,8 +534,9 @@ impl Project {
     /// Cuts the model where `t` of the way along `axis` falls on the preview (0
     /// at its low end) and keeps the low side, or the high one. With
     /// `keep_other` the other side stays too, as an object of its own resting
-    /// on its cut face beside the model. Both openings are capped. Hand painting
-    /// goes, as the triangles change. False when the plane misses the model.
+    /// on its cut face beside the model. Both openings are capped. Surviving
+    /// surfaces retain their brush labels; caps use source colours.
+    /// False when the plane misses the model.
     pub fn cut(&mut self, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> bool {
         let (Some((lo, hi)), Some((_, shape_hi))) = (self.work.bounds(), self.shape.bounds()) else { return false };
         if axis > 2 || !t.is_finite() {
@@ -493,18 +547,46 @@ impl Project {
         let value = at / self.stretch[axis];
         let eps = geom::len(self.source_size) * 1e-6;
         let (mut kept, mut other) = (vec![], vec![]);
-        for (part, src) in self.scene.parts.iter().zip(&self.source_positions) {
+        let (mut kept_paint, mut other_paint) = (vec![], vec![]);
+        let transfers: Vec<_> = self
+            .scene
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(pi, part)| {
+                self.painted[pi]
+                    .iter()
+                    .any(|&l| l != NO_LABEL)
+                    .then(|| PaintTransfer::new(&self.shape.parts[pi], &self.painted[pi], part.tris.len()))
+            })
+            .collect();
+        for (pi, (part, src)) in self.scene.parts.iter().zip(&self.source_positions).enumerate() {
             let whole = Part { positions: src.clone(), ..part.clone() };
-            let [low, high] = cut::split(&whole, axis, value, eps);
+            let [low, high] = cut::split_with_origins(&whole, axis, value, eps).map(|(part, origins)| {
+                let painted = transfers[pi].as_ref().map(|_| CutPaint {
+                    part: pi,
+                    origins,
+                    corners: (0..part.tris.len())
+                        .map(|ti| part.corners(ti).map(|v| std::array::from_fn(|i| v[i] * self.stretch[i])))
+                        .collect(),
+                });
+                (part, painted)
+            });
             let (k, o) = if keep_low { (low, high) } else { (high, low) };
-            kept.extend((!k.tris.is_empty()).then_some(k));
-            other.extend((!o.tris.is_empty()).then_some(o));
+            if !k.0.tris.is_empty() {
+                kept.push(k.0);
+                kept_paint.push(k.1);
+            }
+            if !o.0.tris.is_empty() {
+                other.push(o.0);
+                other_paint.push(o.1);
+            }
         }
         if kept.is_empty() || other.is_empty() {
             return false;
         }
         let parts = std::mem::take(&mut self.scene.parts);
-        self.cut_history.push(CutSnapshot { parts, unrotated: self.unrotated.clone() });
+        self.cut_history.push(CutSnapshot { parts, unrotated: self.unrotated.clone(), painted: self.painted.clone() });
         if keep_other {
             // Its cut face looks back at the kept side; turned to face the plate.
             let sign = if keep_low { -1.0 } else { 1.0 };
@@ -537,6 +619,7 @@ impl Project {
                 *v = geom::add(*v, shift);
             }
             kept.append(&mut other);
+            kept_paint.append(&mut other_paint);
         }
         self.scene.parts = kept;
         let shift = self.scene.place_on_plate();
@@ -552,6 +635,36 @@ impl Project {
         self.measure_source();
         self.apply_stretch();
         self.rebuild_geometry();
+        for (pi, saved) in kept_paint.iter().enumerate() {
+            let Some(saved) = saved else { continue };
+            let transfer = transfers[saved.part].as_ref().unwrap();
+            let shape = &self.shape.parts[pi];
+            // Simplification breaks ancestry, so locate the source face as the
+            // colour field does; keep caps in the lookup to avoid paint bleeding.
+            let surface = shape.origin.is_none().then(|| {
+                let source = &self.scene.parts[pi];
+                let mut soup = TriSoup::default();
+                for ti in 0..source.tris.len() {
+                    soup.push(source.corners(ti), 0, ti as u32);
+                }
+                (Bvh::build(&soup), soup)
+            });
+            for ti in 0..shape.tris.len() {
+                let source_point = if let Some(origin) = &shape.origin {
+                    let (src, bary) = &origin[ti];
+                    Some((*src, geom::bary_in(bary, [1.0 / 3.0; 3])))
+                } else {
+                    let (bvh, soup) = surface.as_ref().unwrap();
+                    bvh.nearest(soup, geom::at(&shape.corners(ti), [1.0 / 3.0; 3]))
+                };
+                if let Some((src, bary)) = source_point {
+                    if let Some(parent) = saved.origins[src as usize] {
+                        let point = geom::at(&saved.corners[src as usize], bary);
+                        self.painted[pi][ti] = transfer.label(Some(parent), point);
+                    }
+                }
+            }
+        }
         self.rebuild_paint();
         true
     }
@@ -572,6 +685,16 @@ impl Project {
         self.unrotated = s.unrotated;
         self.place_from_file();
         self.rebuild_geometry();
+        for (restored, saved) in self.painted.iter_mut().zip(s.painted) {
+            if restored.len() == saved.len() {
+                *restored = saved;
+                for label in restored {
+                    if *label as usize >= self.palette.len() {
+                        *label = NO_LABEL;
+                    }
+                }
+            }
+        }
         self.rebuild_paint();
         true
     }
@@ -739,7 +862,7 @@ impl Project {
             self.targets = colors.iter().enumerate().map(|(i, &c)| (c, i as u8)).collect();
         }
         self.palette = colors;
-        for l in self.painted.iter_mut().flatten() {
+        for l in self.painted.iter_mut().chain(self.cut_history.iter_mut().flat_map(|s| &mut s.painted)).flatten() {
             if *l != NO_LABEL && *l as usize >= n {
                 *l = NO_LABEL;
             }
@@ -771,6 +894,7 @@ impl Project {
             targets: self.targets.clone(),
             trees: self.trees.clone(),
             painted: self.painted.clone(),
+            cut_painted: self.cut_history.iter().map(|s| s.painted.clone()).collect(),
         };
         for t in &mut self.targets {
             t.1 = map[t.1 as usize];
@@ -780,7 +904,7 @@ impl Project {
                 *n = n.relabel(map);
             }
         }
-        for l in self.painted.iter_mut().flatten() {
+        for l in self.painted.iter_mut().chain(self.cut_history.iter_mut().flat_map(|s| &mut s.painted)).flatten() {
             if *l != NO_LABEL {
                 *l = map[*l as usize];
             }
@@ -867,6 +991,13 @@ impl Project {
             self.rebuild_geometry();
         } else {
             self.rebuild_geometry_keep_paint();
+            // Flattening can add or remove triangles even without another mesh
+            // operation changing. Brush storage must match the rebuilt mesh.
+            for (labels, part) in self.painted.iter_mut().zip(&self.work.parts) {
+                if labels.len() != part.tris.len() {
+                    *labels = vec![NO_LABEL; part.tris.len()];
+                }
+            }
         }
         self.rebuild_paint();
     }
@@ -1004,6 +1135,9 @@ impl Project {
                 self.targets = s.targets;
                 self.trees = s.trees;
                 self.painted = s.painted;
+                for (cut, painted) in self.cut_history.iter_mut().zip(s.cut_painted) {
+                    cut.painted = painted;
+                }
                 true
             }
         }
@@ -1365,6 +1499,187 @@ mod tests {
         assert!(parts.iter().all(|x| x.tris.len() == x.paint.len()));
         assert!(p.undo_cut() && !p.can_undo_cut());
         assert_eq!(p.object_count(), 1);
+    }
+
+    fn brush_front(p: &mut Project) -> u8 {
+        let target = 1 - p.trees[0][0].dominant();
+        p.paint([2.0, -20.0, 3.0], [0.0, 1.0, 0.0], 0.01, target).unwrap();
+        p.end_stroke();
+        assert_eq!(p.painted_count(), 1);
+        target
+    }
+
+    fn brush_area(p: &Project, target: u8) -> f32 {
+        p.work
+            .parts
+            .iter()
+            .zip(&p.painted)
+            .flat_map(|(part, labels)| {
+                labels
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, label)| **label == target)
+                    .map(move |(ti, _)| geom::area(&part.corners(ti)) * p.scale * p.scale)
+            })
+            .sum()
+    }
+
+    #[test]
+    fn cut_keeps_brush_area_on_both_sides_and_exports_it() {
+        for axis in 0..3 {
+            for keep_low in [true, false] {
+                for keep_other in [true, false] {
+                    let mut p = Project::new(tower(), 2);
+                    let target = brush_front(&mut p);
+                    let before = p.export_parts()[0].paint.clone();
+                    let t = if axis == 2 { 0.25 } else { 0.5 };
+                    assert!(p.cut(axis, t, keep_low, keep_other));
+                    // The brush covers one 50 mm² triangle on the front wall.
+                    // X=0 leaves 12.5 on the left; Z=5 leaves 37.5 below.
+                    let below = [12.5, 50.0, 37.5][axis];
+                    let expected = if keep_other {
+                        50.0
+                    } else if keep_low {
+                        below
+                    } else {
+                        50.0 - below
+                    };
+                    assert!(
+                        (brush_area(&p, target) - expected).abs() < 1e-3,
+                        "axis={axis}, low={keep_low}, both={keep_other}"
+                    );
+                    for (pi, part) in p.export_parts().iter().enumerate() {
+                        for (ti, &label) in p.painted[pi].iter().enumerate() {
+                            if label != NO_LABEL {
+                                assert_eq!(part.paint[ti], encode::encode(&Node::Leaf(target)));
+                            }
+                        }
+                    }
+                    assert!(p.undo_cut());
+                    assert_eq!(p.export_parts()[0].paint, before);
+                    assert_eq!(p.painted_count(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cut_paint_survives_repeated_cuts_rotation_resize_and_stroke_undo() {
+        let mut p = Project::new(tower(), 2);
+        let target = brush_front(&mut p);
+        assert!(p.cut(2, 0.25, true, true));
+        let after_first: Vec<_> = p.export_parts().iter().map(|part| part.paint.clone()).collect();
+        assert!(p.cut(0, 0.5, true, true));
+        assert!((brush_area(&p, target) - 50.0).abs() < 1e-3);
+        assert!(p.undo_cut());
+        assert_eq!(p.export_parts().iter().map(|part| part.paint.clone()).collect::<Vec<_>>(), after_first);
+        p.rotate(2, 90.0);
+        p.set_height_mm(30.0);
+        assert_eq!(p.export_parts().iter().map(|part| part.paint.clone()).collect::<Vec<_>>(), after_first);
+        let old_labels = p.painted.clone();
+        let c = p.work.parts[0].corners(0);
+        let centre = geom::at(&c, [1.0 / 3.0; 3]);
+        let n = geom::normalize(geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0])));
+        p.paint(geom::add(centre, geom::scale(n, 5.0)), geom::scale(n, -1.0), 0.01, 1 - target).unwrap();
+        p.end_stroke();
+        assert!(p.undo());
+        assert_eq!(p.painted, old_labels);
+        assert!(p.undo_cut());
+        assert_eq!(p.painted_count(), 1);
+    }
+
+    #[test]
+    fn cut_caps_do_not_inherit_brush_paint_and_missed_cuts_leave_it_intact() {
+        let mut p = Project::new(tower(), 2);
+        let target = brush_front(&mut p);
+        let before = p.export_parts()[0].paint.clone();
+        for (axis, t) in [(3, 0.5), (2, f32::NAN), (2, 1.5)] {
+            assert!(!p.cut(axis, t, true, false));
+            assert_eq!(p.export_parts()[0].paint, before);
+            assert!(!p.can_undo_cut());
+        }
+        assert!(p.cut(2, 0.25, true, false));
+        assert!((brush_area(&p, target) - 37.5).abs() < 1e-3);
+        let part = &p.work.parts[0];
+        let caps: Vec<_> =
+            (0..part.tris.len()).filter(|&ti| part.corners(ti).iter().all(|v| (v[2] - 5.0).abs() < 1e-5)).collect();
+        assert!(!caps.is_empty());
+        assert!(caps.iter().all(|&ti| p.painted[0][ti] == NO_LABEL));
+    }
+
+    #[test]
+    fn cut_paint_undo_tracks_palette_merges_and_their_undo() {
+        for undo_merge in [false, true] {
+            let mut p = Project::new(tower(), 2);
+            let target = brush_front(&mut p);
+            assert!(p.cut(2, 0.25, true, true));
+            p.merge_slots(target as usize, (1 - target) as usize);
+            if undo_merge {
+                assert!(p.undo());
+            }
+            assert!(p.undo_cut());
+            assert_eq!(p.painted_count(), 1);
+            assert_eq!(p.painted[0][0], if undo_merge { target } else { 0 });
+            assert_eq!(p.export_parts()[0].paint[0], encode::encode(&Node::Leaf(p.painted[0][0])));
+        }
+    }
+
+    #[test]
+    fn cut_keeps_brush_paint_with_prior_stretch_or_simplification() {
+        for simplified in [false, true] {
+            let mut p = Project::new(tower(), 2);
+            if simplified {
+                p.set_mesh_ops(MeshOps { keep_ratio: 0.8, ..p.mesh_ops() });
+            } else {
+                p.set_size_mm([20.0, 10.0, 20.0]);
+            }
+            // Paint the entire surface, so any unpainted surviving surface
+            // after rebuilding is a transfer failure, independent of retriangulation.
+            p.paint([0.0, -20.0, 3.0], [0.0, 1.0, 0.0], 100.0, 1).unwrap();
+            p.end_stroke();
+            let before = p.export_parts()[0].paint.clone();
+            assert!(p.cut(2, 0.25, true, true));
+            let mut surfaces = 0;
+            for (part, labels) in p.work.parts.iter().zip(&p.painted) {
+                for (ti, &label) in labels.iter().enumerate() {
+                    let c = part.corners(ti);
+                    // Both caps are horizontal, at the top of the low piece
+                    // or the bottom of the high piece.
+                    if (c[0][2] - c[1][2]).abs() > 1e-4 || (c[0][2] - c[2][2]).abs() > 1e-4 {
+                        assert_eq!(label, 1, "simplified={simplified}");
+                        surfaces += 1;
+                    }
+                }
+            }
+            assert!(surfaces > 0);
+            assert!(p.undo_cut());
+            assert_eq!(p.export_parts()[0].paint, before);
+        }
+    }
+
+    #[test]
+    fn cut_keeps_different_brush_labels_on_children_of_a_flattened_source_face() {
+        let mut p = Project::new(tower(), 2);
+        p.set_mesh_ops(MeshOps { flatten_mm: 2.0, ..p.mesh_ops() });
+        let origins = p.shape.parts[0].origin.as_ref().unwrap();
+        let children: Vec<_> = origins.iter().enumerate().filter(|(_, (src, _))| *src == 1).map(|(ti, _)| ti).collect();
+        assert!(children.len() > 1);
+        let ti = *children.last().unwrap();
+        let c = p.work.parts[0].corners(ti);
+        let centre = geom::at(&c, [1.0 / 3.0; 3]);
+        let n = geom::normalize(geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0])));
+        let target = 1 - p.trees[0][ti].dominant();
+        p.paint(geom::add(centre, geom::scale(n, 5.0)), geom::scale(n, -1.0), 0.01, target).unwrap();
+        p.end_stroke();
+        assert_eq!(p.painted_count(), 1);
+        let area = brush_area(&p, target);
+        let before = p.export_parts()[0].paint.clone();
+        // Cut above this face: its distinct painted and unpainted children stay.
+        assert!(p.cut(2, 0.5, true, false));
+        assert_eq!(p.painted_count(), 1);
+        assert!((brush_area(&p, target) - area).abs() < 1e-3);
+        assert!(p.undo_cut());
+        assert_eq!(p.export_parts()[0].paint, before);
     }
 
     #[test]
