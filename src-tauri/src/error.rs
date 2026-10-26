@@ -80,8 +80,19 @@ impl From<bp_core::RegionFailure> for AppError {
             F::Region(R::AmbiguousCap) => Self::new("error.regionCap"),
             F::Region(R::ThinWall { count }) => Self::with("error.regionThin", json!({ "count": count })),
             F::Region(R::Folded { count }) => Self::with("error.regionFolded", json!({ "count": count })),
+            F::Region(R::Clearance { count }) => Self::with("error.regionClearance", json!({ "count": count })),
+            F::Region(R::Overlap) => Self::new("error.regionOverlap"),
             F::Everything => Self::new("error.regionEverything"),
             F::Flat => Self::new("error.regionFlat"),
+        }
+    }
+}
+
+impl From<bp_core::RefineFailure> for AppError {
+    fn from(e: bp_core::RefineFailure) -> Self {
+        match e {
+            bp_core::RefineFailure::Reshaped => Self::new("error.refineReshaped"),
+            bp_core::RefineFailure::Nothing => Self::new("error.refineNothing"),
         }
     }
 }

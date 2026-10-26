@@ -219,6 +219,7 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   },
   toolClick: (tool, triangle, additive) => {
     if (tool === "separate") separatePanel.click(triangle, additive);
+    if (tool === "region") void regionPanel.click(triangle, additive);
   },
   select: (o, d) => (summary ? regionPanel.stroke(o, d) : Promise.resolve(null)),
   endSelect: () => regionPanel.endStroke(),
@@ -434,6 +435,15 @@ const regionPanel = new RegionPanel({
       toast(action.kind === "remove" ? t("reg.removed") : t("reg.extracted", { count: n, n }), "ok", { label: t("cut.undo"), run: () => void undo() });
     });
     return done;
+  },
+  picking: (on) => {
+    viewer.setRegionPicking(on);
+    if (app.dataset.tool === "region") setHint(t(on ? "hint.regionColour" : "hint.region"));
+  },
+  refine: async () => {
+    const before = summary?.triangles ?? 0;
+    await apply(() => api.refineToPaint(), () =>
+      toast(t("reg.refined", { count: (summary?.triangles ?? 0) - before, n: nf((summary?.triangles ?? 0) - before) }), "ok", { label: t("cut.undo"), run: () => void undo() }));
   },
   close: () => setTool("orbit"),
   error: errText,
@@ -1535,7 +1545,9 @@ function setTool(tool: Tool) {
   if (tool === "region") regionPanel.open(); else regionPanel.close();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
-  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
+  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
+    : tool === "region" ? t(regionPanel.hint())
+    : t(`hint.${tool}`));
   syncMeasure();
 }
 

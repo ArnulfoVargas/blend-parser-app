@@ -1,4 +1,4 @@
-import { api, type Closure, type PaintResult, type RegionAction, type RegionPreview, type Selection, type Summary, type Vec3 } from "./api";
+import { api, type Closure, type ColourMatch, type PaintResult, type RegionAction, type RegionPreview, type Selection, type Summary, type Vec3 } from "./api";
 import { num, t, volume } from "./i18n";
 import "./styles/region.css";
 
@@ -10,8 +10,9 @@ const PICKED_MIX = 0.55;
 const GHOST: Vec3 = [236, 236, 232];
 
 /**
- * The region tool: a brush that selects part of the surface without painting
- * it, tools to reshape that selection, and the choice of what to do with it
+ * The region tool: a brush, or a click that picks every face of a colour,
+ * selects part of the surface without painting it; tools reshape that
+ * selection, and the choice of what to do with it
  * (remove it or extract it) and how to close what is left (a shell of a given
  * thickness or a cap at a given depth). The result is previewed before it can
  * be applied: the closing faces in the warning colour and, if asked, the
@@ -24,6 +25,10 @@ export class RegionPanel {
   private through = false;
   private action: "remove" | "extract" = "extract";
   private layFlat = false;
+  private byColour = false;
+  /** The last colour pick, to try it again when its criteria change: the face, how it added, and the selection before it. */
+  private lastPick: { seed: number; add: boolean; before: number[] } | null = null;
+  private picks = 0;
   private picked = new Set<number>();
   private info: Selection = { tris: [], count: 0, regions: 0 };
   private preview: RegionPreview | null = null;
@@ -34,6 +39,11 @@ export class RegionPanel {
   private mm = $<HTMLInputElement>("#reg-mm");
   private closure = $<HTMLSelectElement>("#reg-closure");
   private pull = $<HTMLInputElement>("#reg-pull");
+  private clearance = $<HTMLInputElement>("#reg-clearance");
+  private group = $<HTMLInputElement>("#reg-group");
+  private match = $<HTMLSelectElement>("#reg-match");
+  private tolerance = $<HTMLInputElement>("#reg-tolerance");
+  private contiguous = $<HTMLInputElement>("#reg-contiguous");
 
   constructor(private deps: {
     summary(): Summary | null;
@@ -41,6 +51,10 @@ export class RegionPanel {
     tint(colors: (Vec3 | null)[] | null, mix: number): void;
     overlay(preview: RegionPreview | null, pull: number): void;
     apply(closure: Closure, action: RegionAction): Promise<boolean>;
+    /** Switches the view between brushing and picking faces with a click. */
+    picking(on: boolean): void;
+    /** Makes the colour borders that cross triangles edges of the mesh. */
+    refine(): Promise<void>;
     close(): void;
     error(e: unknown): string;
   }) {
@@ -54,6 +68,16 @@ export class RegionPanel {
     seg("#reg-flat", "#reg-assembled", (v) => (this.layFlat = v));
     this.closure.addEventListener("change", () => this.changed());
     this.mm.addEventListener("input", () => this.changed());
+    this.clearance.addEventListener("input", () => this.changed());
+    this.group.addEventListener("change", () => this.changed());
+    seg("#reg-by-colour", "#reg-by-brush", (v) => {
+      this.byColour = v;
+      deps.picking(v);
+    });
+    // A new criterion, tolerance or reach tries the last pick again on the selection it started from.
+    for (const el of [this.match, this.tolerance, this.contiguous]) el.addEventListener("change", () => void this.repick());
+    this.tolerance.addEventListener("input", () => void this.repick());
+    $("#reg-refine-apply").addEventListener("click", () => void deps.refine());
     this.pull.addEventListener("change", () => this.show());
     document.querySelectorAll<HTMLButtonElement>("[data-reg-op]").forEach((b) =>
       b.addEventListener("click", () => void this.op(b.dataset.regOp as "grow" | "connected" | "smooth" | "invert" | "clear")));
@@ -77,6 +101,7 @@ export class RegionPanel {
 
   close() {
     this.active = false;
+    this.lastPick = null;
     this.generation++;
     clearTimeout(this.timer);
     this.deps.tint(null, 1);
@@ -85,9 +110,15 @@ export class RegionPanel {
 
   /** A new preview mesh: the backend keeps the selection only if the triangles are the same. */
   meshChanged() {
+    this.lastPick = null;
     this.preview = null;
     this.fresh = false;
     if (this.active) void this.refresh();
+  }
+
+  /** The shortcuts the tool has now: brushing, or picking by colour. */
+  hint(): "hint.region" | "hint.regionColour" {
+    return this.byColour ? "hint.regionColour" : "hint.region";
   }
 
   /** Words again, for a new language. */
@@ -111,12 +142,49 @@ export class RegionPanel {
     return r;
   }
 
+  /** A click on the view while picking by colour: the faces like the one under it, added (Ctrl or Shift) or instead of the selection; Alt takes them out. */
+  async click(triangle: number | null, additive: boolean) {
+    if (!this.byColour || triangle === null) return;
+    const add = !this.alt;
+    const before = additive || !add ? [...this.picked] : [];
+    this.lastPick = { seed: triangle, add, before };
+    await this.pick();
+  }
+
+  private how(): ColourMatch | null {
+    if (this.match.value !== "similar") return { kind: this.match.value as "material" | "filament" };
+    const deltaE = this.tolerance.valueAsNumber;
+    const ok = Number.isFinite(deltaE) && deltaE >= 0 && deltaE <= 100;
+    this.tolerance.setAttribute("aria-invalid", String(!ok));
+    return ok ? { kind: "similar", deltaE } : null;
+  }
+
+  private async repick() {
+    this.render();
+    if (this.lastPick) await this.pick();
+  }
+
+  private async pick() {
+    const p = this.lastPick;
+    const how = this.how();
+    if (!p || !how) return;
+    // Only the last of several quick tries counts.
+    const token = ++this.picks;
+    try {
+      const got = await api.selectByColour(p.seed, how, this.contiguous.checked, p.add, p.before);
+      if (token === this.picks) this.got(got);
+    } catch (e) {
+      if (token === this.picks) this.status(this.deps.error(e), "error");
+    }
+  }
+
   /** The brush was lifted: count the regions again and preview the cut. */
   endStroke() {
     void this.refresh();
   }
 
   private async op(op: "grow" | "connected" | "smooth" | "invert" | "clear") {
+    this.lastPick = null;
     try {
       this.got(await api.selectionOp(op));
     } catch (e) {
@@ -144,10 +212,15 @@ export class RegionPanel {
     const shell = this.closure.value === "shell";
     const ok = Number.isFinite(mm) && (shell ? mm > 0 && mm <= 50 : mm >= -50 && mm <= 50);
     this.mm.setAttribute("aria-invalid", String(!ok));
-    if (!ok) return null;
+    // Clearance only matters for a piece that comes out to fit back.
+    const fits = shell && this.action === "extract";
+    const clearanceMm = fits ? this.clearance.valueAsNumber : 0;
+    const clearanceOk = !fits || (Number.isFinite(clearanceMm) && clearanceMm >= 0 && clearanceMm <= 5 && clearanceMm < mm);
+    this.clearance.setAttribute("aria-invalid", String(!clearanceOk));
+    if (!ok || !clearanceOk) return null;
     return {
-      closure: shell ? { kind: "shell", mm } : { kind: "cap", mm },
-      action: this.action === "remove" ? { kind: "remove" } : { kind: "extract", layFlat: this.layFlat },
+      closure: shell ? { kind: "shell", mm, clearanceMm } : { kind: "cap", mm },
+      action: this.action === "remove" ? { kind: "remove" } : { kind: "extract", layFlat: this.layFlat, group: this.group.checked },
     };
   }
 
@@ -213,7 +286,18 @@ export class RegionPanel {
     $("#reg-flat").setAttribute("aria-pressed", String(this.layFlat));
     $("#reg-place").hidden = this.action !== "extract";
     $("#reg-pull-row").hidden = this.action !== "extract";
+    $("#reg-group-row").hidden = this.action !== "extract";
     const shell = this.closure.value === "shell";
+    $("#reg-clearance-row").hidden = !shell || this.action !== "extract";
+    $("#reg-by-brush").setAttribute("aria-pressed", String(!this.byColour));
+    $("#reg-by-colour").setAttribute("aria-pressed", String(this.byColour));
+    document.querySelectorAll<HTMLElement>("[data-reg-brush]").forEach((el) => (el.hidden = this.byColour));
+    document.querySelectorAll<HTMLElement>("[data-reg-colour]").forEach((el) => (el.hidden = !this.byColour));
+    $("#reg-tolerance-row").hidden = !this.byColour || this.match.value !== "similar";
+    // Borders inside triangles only matter when picking by filament.
+    const split = this.deps.summary()?.splitTriangles ?? 0;
+    $("#reg-refine").hidden = !this.byColour || this.match.value !== "filament" || split === 0;
+    $("#reg-refine-note").textContent = t("reg.refineNote", { count: split, n: num(split) });
     $("#reg-mm-label").textContent = t(shell ? "reg.thickness" : "reg.depth");
     this.mm.min = shell ? "0.1" : "-50";
     this.mm.title = t(shell ? "reg.thicknessHelp" : "reg.depthHelp");
@@ -236,8 +320,9 @@ export class RegionPanel {
         : t("reg.extracts", { count: p.pieceMm3.length, n: num(p.pieceMm3.length), volume: volume(pieces), rest: volume(p.restMm3) }),
       p.closure.length ? t("reg.closureShown") : "",
       p.closed ? "" : t("reg.open"),
+      p.small ? t("reg.small", { count: p.small, n: num(p.small) }) : "",
     ];
-    this.status(parts.filter(Boolean).join(" "), p.closed ? "valid" : "warn");
+    this.status(parts.filter(Boolean).join(" "), p.closed && !p.small ? "valid" : "warn");
   }
 
   private status(text: string, state: "pending" | "valid" | "error" | "warn" | "info") {

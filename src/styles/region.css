@@ -31,3 +31,7 @@
 @media (max-width: 75rem) {
   .reg-tools { margin-left: 0; }
 }
+.reg-tolerance { width: 4.5rem; min-height: 32px; padding: 0 var(--space-xs); font: 400 var(--text-sm)/1.2 var(--font-outlier); }
+.reg-refine { padding: var(--space-2xs) var(--space-xs); border-radius: var(--radius-input); background: var(--color-paper-2); font-size: var(--text-xs); }
+.reg-refine .btn { min-height: 30px; margin-left: auto; padding: 0 var(--space-sm); font-size: var(--text-xs); white-space: nowrap; }
+.reg-controls [hidden] { display: none !important; }
