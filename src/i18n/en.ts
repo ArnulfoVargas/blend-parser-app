@@ -100,6 +100,11 @@ export const en: Catalog = {
   "files.now": "Convert now",
   "files.convert": "Convert",
   "prefs.langHelp": "Applies at once and is remembered next time you open BlendParser.",
+  "prefs.thumb": "3MF thumbnail",
+  "prefs.thumbIso": "Three-quarter",
+  "prefs.thumbFront": "Front",
+  "prefs.thumbCurrent": "As shown now",
+  "prefs.thumbHelp": "Where the model is drawn from, in its filament colours, for the preview Bambu Studio and the file browser show.",
   "side.label": "File and settings",
 
   "tray.drop": "Drop a model here",

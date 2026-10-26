@@ -104,6 +104,11 @@ export const es = {
   "files.now": "Convertir ya",
   "files.convert": "Convertir",
   "prefs.langHelp": "Se aplica al momento y se recuerda la próxima vez que abras BlendParser.",
+  "prefs.thumb": "Miniatura del 3MF",
+  "prefs.thumbIso": "Tres cuartos",
+  "prefs.thumbFront": "De frente",
+  "prefs.thumbCurrent": "Como se ve ahora",
+  "prefs.thumbHelp": "Desde dónde se dibuja el modelo, con los colores de filamento, para la vista previa que muestran Bambu Studio y el explorador de archivos.",
   "side.label": "Archivo y ajustes",
 
   "tray.drop": "Suelta un modelo aquí",

@@ -440,6 +440,7 @@ mod tests {
             flush: bp_3mf::Flush { volumes_mm3: matrix, ..Default::default() },
             layer_mm: None,
             offset_mm: [0.0; 2],
+            thumbnail: None,
         };
         let out = std::env::temp_dir().join("blendparser-integration.3mf");
         bp_3mf::write(std::fs::File::create(&out).unwrap(), &model).unwrap();
