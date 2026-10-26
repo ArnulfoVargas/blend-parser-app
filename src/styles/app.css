@@ -477,7 +477,13 @@ details.group[open] .group__sum { visibility: hidden; }
 
 /* What moving, turning and the cut need, under the view */
 .place { display: none; flex: none; align-items: center; gap: var(--space-xs); font-size: var(--text-sm); color: var(--color-ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.app[data-tool="move"] .place[data-for="move"], .app[data-tool="rotate"] .place[data-for="rotate"], .app[data-tool="section"] .place[data-for="section"] { display: flex; }
+.app[data-tool="move"] .place[data-for="move"], .app[data-tool="rotate"] .place[data-for="rotate"], .app[data-tool="section"] .place[data-for="section"], .app[data-tool="bucket"] .place[data-for="bucket"] { display: flex; }
+.app[data-tool="bucket"] #viewport { cursor: crosshair; }
+.app[data-tool="bucket"] .brush > :not(.brush__chip) { display: none; }
+.app[data-tool="bucket"] .stage__foot { flex-wrap: wrap; row-gap: var(--space-xs); }
+.app[data-tool="bucket"] .stage__hint { flex-basis: 100%; text-align: left; }
+.bucket__pick { margin: 0; font-size: var(--text-sm); color: var(--color-ink-2); }
+.bucket__pick .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 4px; vertical-align: -1px; border-radius: 3px; background: var(--t); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-ink) 25%, transparent); }
 .place .range { width: 120px; }
 .turn-step { position: absolute; top: var(--space-md); right: var(--space-md); z-index: 3; display: none; align-items: center; gap: var(--space-2xs); min-height: 40px; padding: var(--space-2xs) var(--space-2xs) var(--space-2xs) var(--space-sm); border-radius: var(--radius-input); background: color-mix(in oklab, var(--color-paper) 96%, transparent); box-shadow: inset 0 0 0 1px var(--color-rule), 0 2px 8px -4px var(--color-muted); color: var(--color-muted); font-size: var(--text-xs); }
 .app[data-state="ready"][data-tool="rotate"] .turn-step { display: flex; }

@@ -13,6 +13,11 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   a mano) y persisten aunque se recalcule.
 - Vista previa 3D: orbitar, mover y acercar; vista de filamentos o de textura original.
 - Pincel sobre la malla con los colores objetivo, con deshacer (`Ctrl+Z`).
+- Cubeta por color original (`K`): un clic elige el color que el modelo tiene ahí (aunque
+  la paleta lo haya unido a otra ranura) y lo manda a la ranura del pincel, en esa zona
+  conectada o en todo el modelo, o lo añade como color nuevo. La zona se resalta antes de
+  aplicar, se vuelve a clasificar con los bordes finos del modelo original, sobrevive a
+  recalcular la pintura mientras no cambien los triángulos y se deshace con `Ctrl+Z`.
 - Impresora y boquilla, con buscador: las 87 impresoras de una sola boquilla que trae Bambu
   Studio (Bambu Lab, Anker, Anycubic, Creality, Elegoo, Geeetech, Prusa, Qidi, Tronxy, Troodon,
   Voron y Voxelab), con las boquillas de su perfil, o una impresora propia con su volumen, sus

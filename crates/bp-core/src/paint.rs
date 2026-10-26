@@ -54,6 +54,14 @@ impl Node {
         }
     }
 
+    /// Whether any leaf has `label`.
+    pub fn has(&self, label: u8) -> bool {
+        match self {
+            Node::Leaf(l) => *l == label,
+            Node::Split(k) => k.iter().any(|n| n.has(label)),
+        }
+    }
+
     pub fn is_split(&self) -> bool {
         matches!(self, Node::Split(_))
     }
@@ -139,6 +147,19 @@ fn build_node(cx: &Ctx, t: &BaryTri, edge: f32, depth: u8) -> Node {
     }
     counts[labels[0] as usize] += 1;
     Node::Leaf(counts.iter().enumerate().max_by_key(|c| *c.1).map_or(0, |(i, _)| i as u8))
+}
+
+/// Paints triangle `tri` of part `part` alone, as [`build`] does.
+pub fn build_one(
+    field: &ColorField,
+    shape: &Mesh,
+    cls: &Classifier,
+    params: PaintParams,
+    part: usize,
+    tri: usize,
+) -> Node {
+    let cx = Ctx { field, shape, cls, params, part, tri };
+    build_node(&cx, &ROOT, geom::longest_edge(&shape.parts[part].corners(tri)), 0)
 }
 
 /// Paints every triangle of every part, in parallel.

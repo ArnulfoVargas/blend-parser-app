@@ -14,6 +14,7 @@ import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import {
   api,
   isAppError,
+  type BucketPick,
   type PlatePrefs,
   type PrinterProfile,
   type Printers,
@@ -165,6 +166,10 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     previousSwaps = summary?.estimate.swaps ?? null;
     void api.endStroke().then(render);
   },
+  bucket: (o, d) => {
+    bucketRay = [o, d];
+    void probeBucket();
+  },
   measure: (p) => {
     const st = summary?.size.stretch ?? [1, 1, 1];
     if (measured.length >= 2) measured = [];
@@ -299,6 +304,68 @@ function undoCut() {
 }
 $("#cut-undo").addEventListener("click", undoCut);
 
+// ---- bucket by original colour ---------------------------------------------------------
+
+/** The last bucket click and what it would fill; applied with the brush's slot. */
+let bucketRay: [Vec3, Vec3] | null = null;
+let bucketFound: BucketPick | null = null;
+let bucketRegion = true;
+const bucketAdd = $<HTMLInputElement>("#bucket-add");
+
+function syncBucket() {
+  document.querySelectorAll<HTMLButtonElement>("button[data-bucket-mode]").forEach((b) =>
+    b.setAttribute("aria-pressed", String((b.dataset.bucketMode === "region") === bucketRegion)));
+  const p = bucketFound;
+  $<HTMLButtonElement>("#bucket-apply").disabled = !p || !p.tris.length;
+  $<HTMLButtonElement>("#bucket-cancel").disabled = !p;
+  const out = document.querySelector<HTMLElement>('[data-bind="bucketPick"]')!;
+  if (!p) {
+    out.textContent = app.dataset.tool === "bucket" ? t("bucket.empty") : "";
+    return;
+  }
+  const swatch = Object.assign(document.createElement("span"), { className: "swatch" });
+  swatch.style.setProperty("--t", p.added ? p.sampleHex : p.targetHex);
+  const source = p.added || p.slot === null
+    ? t("bucket.sourceNew", { hex: p.sampleHex })
+    : t("bucket.source", { hex: p.targetHex, slot: p.slot + 1 });
+  const text = t("bucket.pick", { source, tris: t("bucket.tris", { count: p.tris.length, n: nf(p.tris.length) }), slot: brushSlot + 1 });
+  // Far from every target: the palette folded this shade into another.
+  const far = !p.added && p.deltaE > 12 ? ` ${t("bucket.far", { de: nf(p.deltaE) })}` : "";
+  out.replaceChildren(swatch, text + far);
+}
+
+/** Asks what the last click would fill, and tints it with the brush's colour. */
+async function probeBucket() {
+  if (!bucketRay || !summary) return;
+  const found = await work(() => api.bucketPick(bucketRay![0], bucketRay![1], bucketRegion, bucketAdd.checked));
+  bucketFound = found ?? null;
+  viewer.setHighlight(bucketFound?.tris ?? null, summary.slots[brushSlot]?.hex);
+  syncBucket();
+}
+
+function clearBucket() {
+  bucketRay = null;
+  bucketFound = null;
+  viewer.setHighlight(null);
+  syncBucket();
+}
+
+document.querySelectorAll<HTMLButtonElement>("button[data-bucket-mode]").forEach((b) => b.addEventListener("click", () => {
+  bucketRegion = b.dataset.bucketMode === "region";
+  syncBucket();
+  void probeBucket();
+}));
+bucketAdd.addEventListener("change", () => void probeBucket());
+$("#bucket-cancel").addEventListener("click", clearBucket);
+$("#bucket-apply").addEventListener("click", () => {
+  const ray = bucketRay;
+  if (!ray || !bucketFound) return;
+  const [region, add, slot] = [bucketRegion, bucketAdd.checked, brushSlot];
+  clearBucket();
+  void apply(() => api.bucket(ray[0], ray[1], slot, region, add), () =>
+    toast(t("bucket.done"), "ok", { label: t("undo.label"), run: () => void undo() }));
+});
+
 const radiusInput = $<HTMLInputElement>("#radius");
 const radiusMm = () => Number(radiusInput.value);
 function syncBrush() {
@@ -316,6 +383,8 @@ radiusInput.addEventListener("input", syncBrush);
 
 async function reloadMesh(frame = false) {
   viewer.load(await api.previewMesh(), frame);
+  // The triangles may have changed: a pending bucket pick no longer fits them.
+  if (bucketRay) clearBucket();
   syncBrush();
   syncMeasure();
 }
@@ -880,8 +949,14 @@ function renderSlots(s: Summary) {
         b.setAttribute("aria-pressed", String(j === i));
         b.querySelector(".slot__brush")!.textContent = j === i ? t("slot.brush") : t("slot.useBrush");
       });
-      setTool("brush");
-      syncBrush();
+      if (app.dataset.tool === "bucket") {
+        syncBrush();
+        if (bucketFound) viewer.setHighlight(bucketFound.tris, s.slots[i].hex);
+        syncBucket();
+      } else {
+        setTool("brush");
+        syncBrush();
+      }
     });
     const merge = (into: number) =>
       void apply(() => api.mergeSlots(i, into), () =>
@@ -1443,6 +1518,11 @@ function setTool(tool: Tool) {
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
+  if (tool !== "bucket") {
+    bucketRay = null;
+    bucketFound = null;
+  }
+  syncBucket();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
@@ -1516,6 +1596,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     void undo();
   } else if (e.key === "b") setTool("brush");
+  else if (e.key === "k") setTool("bucket");
   else if (e.key === "o") setTool("orbit");
   else if (e.key === "m") setTool("measure");
   else if (e.key === "s") setTool("size");

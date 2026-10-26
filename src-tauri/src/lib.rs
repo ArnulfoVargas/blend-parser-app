@@ -58,6 +58,8 @@ pub fn run() {
             commands::preview_mesh,
             commands::pick,
             commands::paint,
+            commands::bucket_pick,
+            commands::bucket,
             commands::end_stroke,
             commands::undo,
             commands::export_3mf,
