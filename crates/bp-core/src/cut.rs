@@ -1,12 +1,46 @@
-//! Cutting a part across a plane square to one axis. Triangles that cross the
+//! Cutting a part across an arbitrary plane. Triangles that cross the
 //! plane are split, their new corners interpolated in every UV and colour
 //! layer, and each side's opening is closed with a flat cap, holes included,
 //! so both pieces stay solid.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::geom::Vec3;
+use crate::geom::{self, Vec3};
 use crate::scene::Part;
+
+/// A plane in the same coordinates as the mesh. Negative distances are the low side.
+#[derive(Clone, Copy, Debug)]
+pub struct Plane {
+    pub point: Vec3,
+    pub normal: Vec3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CutError {
+    InvalidPlane,
+    Misses,
+    InvalidGeometry,
+}
+
+impl Plane {
+    pub fn new(point: Vec3, normal: Vec3) -> Result<Self, CutError> {
+        let length = geom::len(normal);
+        if !point.iter().chain(&normal).all(|v| v.is_finite()) || !length.is_finite() || length < 1e-8 {
+            return Err(CutError::InvalidPlane);
+        }
+        Ok(Self { point, normal: geom::scale(normal, 1.0 / length) })
+    }
+
+    pub fn distance(self, p: Vec3) -> f32 {
+        geom::dot(geom::sub(p, self.point), self.normal)
+    }
+
+    fn basis(self) -> (Vec3, Vec3) {
+        let seed = if self.normal[0].abs() < 0.8 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let u = geom::normalize(geom::cross(seed, self.normal));
+        (u, geom::cross(self.normal, u))
+    }
+}
 
 /// Face corners (loops) with their UVs and colours, grown as the cut adds corners.
 struct Loops {
@@ -51,13 +85,40 @@ pub fn split(part: &Part, axis: usize, value: f32, eps: f32) -> [Part; 2] {
 
 /// As `split`, with each surface triangle's parent index; new caps have no parent.
 pub(crate) fn split_with_origins(part: &Part, axis: usize, value: f32, eps: f32) -> [(Part, Vec<Option<u32>>); 2] {
+    let mut point = [0.0; 3];
+    let mut normal = [0.0; 3];
+    point[axis] = value;
+    normal[axis] = 1.0;
+    split_plane_with_origins(part, Plane { point, normal }, eps)
+}
+
+pub(crate) fn split_plane_with_origins(part: &Part, plane: Plane, eps: f32) -> [(Part, Vec<Option<u32>>); 2] {
+    // Importers may duplicate positions at UV/material seams. Topology shares
+    // positions, while face-corner attributes and source face indices stay separate.
+    let mut welded = part.clone();
+    let mut by_position = HashMap::new();
+    let mut remap = Vec::with_capacity(part.positions.len());
+    welded.positions.clear();
+    for &p in &part.positions {
+        let key = p.map(|v| if v == 0.0 { 0 } else { v.to_bits() });
+        let i = *by_position.entry(key).or_insert_with(|| {
+            let i = welded.positions.len() as u32;
+            welded.positions.push(p);
+            i
+        });
+        remap.push(i);
+    }
+    for t in &mut welded.tris {
+        *t = t.map(|v| remap[v as usize]);
+    }
+    let part = &welded;
     let mut positions = part.positions.clone();
     let mut dist: Vec<f32> = positions
         .iter_mut()
         .map(|p| {
-            let d = p[axis] - value;
+            let d = plane.distance(*p);
             if d.abs() <= eps {
-                p[axis] = value;
+                *p = geom::sub(*p, geom::scale(plane.normal, d));
                 0.0
             } else {
                 d
@@ -101,7 +162,7 @@ pub(crate) fn split_with_origins(part: &Part, axis: usize, value: f32, eps: f32)
                         let g = dist[p] / (dist[p] - dist[q]);
                         let mut x: Vec3 =
                             std::array::from_fn(|i| positions[p][i] + (positions[q][i] - positions[p][i]) * g);
-                        x[axis] = value;
+                        x = geom::sub(x, geom::scale(plane.normal, plane.distance(x)));
                         positions.push(x);
                         dist.push(0.0);
                         let v = positions.len() as u32 - 1;
@@ -129,7 +190,7 @@ pub(crate) fn split_with_origins(part: &Part, axis: usize, value: f32, eps: f32)
     let mut out = sides.map(|tris| (tris, vec![]));
     for (side, (tris, caps)) in out.iter_mut().enumerate() {
         // Below the cut the cap faces up the axis; above, down it.
-        *caps = cap(tris, &positions, &on_plane, axis, side == 0);
+        *caps = cap(tris, &positions, &on_plane, plane, side == 0);
     }
     let [low, high] = out.map(|side| piece(part, &positions, &loops, side));
     let [mut low_origins, mut high_origins] = origins;
@@ -139,7 +200,7 @@ pub(crate) fn split_with_origins(part: &Part, axis: usize, value: f32, eps: f32)
 }
 
 /// The cap that closes one side's opening on the plane.
-fn cap(tris: &[Tri], positions: &[Vec3], on_plane: &[bool], axis: usize, faces_up: bool) -> Vec<Tri> {
+fn cap(tris: &[Tri], positions: &[Vec3], on_plane: &[bool], plane: Plane, faces_up: bool) -> Vec<Tri> {
     // Edges on the plane that only one triangle of this side uses are the opening's rim.
     let mut edges: HashMap<(u32, u32), (u32, u16)> = HashMap::new();
     for (t, l, src) in tris {
@@ -158,9 +219,12 @@ fn cap(tris: &[Tri], positions: &[Vec3], on_plane: &[bool], axis: usize, faces_u
         }
     }
     // Plane coordinates with the cap's normal coming out of the screen.
-    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+    let (u, v) = plane.basis();
     let (u, v) = if faces_up { (u, v) } else { (v, u) };
-    let at = |i: u32| [positions[i as usize][u], positions[i as usize][v]];
+    let at = |i: u32| {
+        let p = geom::sub(positions[i as usize], plane.point);
+        [geom::dot(p, u), geom::dot(p, v)]
+    };
     let mut rings: Vec<(Vec<u32>, u32, u16)> = vec![];
     let mut seen = HashSet::new();
     let mut starts: Vec<u32> = next.keys().copied().collect();
@@ -294,22 +358,93 @@ fn in_triangle(p: [f32; 2], t: [[f32; 2]; 3]) -> bool {
     (a >= 0.0 && b >= 0.0 && c >= 0.0) || (a <= 0.0 && b <= 0.0 && c <= 0.0)
 }
 
-/// Ear clipping of a counter-clockwise polygon (bridged holes allowed). When no
-/// ear is left, as with collinear runs, the next corner is clipped anyway, so it
-/// always ends and every rim edge is covered.
+/// Ear clipping of a counter-clockwise polygon (bridged holes allowed).
+/// A stalled triangulation is rejected by the caller's closure validation.
 fn earclip(poly: &[u32], at: &impl Fn(u32) -> [f32; 2]) -> Vec<[u32; 3]> {
+    if poly.len() < 3 {
+        return vec![];
+    }
+    let pts: Vec<_> = poly.iter().map(|&v| at(v)).collect();
+    let span = (0..2)
+        .map(|axis| {
+            pts.iter().map(|p| p[axis]).fold(f32::NEG_INFINITY, f32::max)
+                - pts.iter().map(|p| p[axis]).fold(f32::INFINITY, f32::min)
+        })
+        .fold(0.0f32, f32::max);
+    let eps = span * 2e-7;
+    // Remove round-off collinearity while triangulating, then put every rim
+    // segment back. Simply deleting these vertices would create T junctions.
+    let mut kept: Vec<usize> = (0..poly.len()).collect();
+    loop {
+        let removable = (0..kept.len()).find(|&i| {
+            let [a, b, c] =
+                [kept[(i + kept.len() - 1) % kept.len()], kept[i], kept[(i + 1) % kept.len()]].map(|i| pts[i]);
+            let length = ((c[0] - a[0]).powi(2) + (c[1] - a[1]).powi(2)).sqrt();
+            length > eps
+                && cross(a, b, c).abs() <= eps * length
+                && (b[0] - a[0]) * (b[0] - c[0]) + (b[1] - a[1]) * (b[1] - c[1]) <= 0.0
+        });
+        if kept.len() <= 3 {
+            break;
+        }
+        if let Some(i) = removable {
+            kept.remove(i);
+        } else {
+            break;
+        }
+    }
+    let simple: Vec<_> = kept.iter().map(|&i| poly[i]).collect();
+    let mut out = earclip_simple(&simple, at);
+    if out.is_empty() {
+        return out;
+    }
+    for i in 0..kept.len() {
+        let (start, end) = (kept[i], kept[(i + 1) % kept.len()]);
+        let mut chain = vec![poly[start]];
+        let mut k = (start + 1) % poly.len();
+        while k != end {
+            chain.push(poly[k]);
+            k = (k + 1) % poly.len();
+        }
+        chain.push(poly[end]);
+        if chain.len() == 2 {
+            continue;
+        }
+        let found = out.iter().enumerate().find_map(|(ti, t)| {
+            (0..3).find(|&j| t[j] == poly[start] && t[(j + 1) % 3] == poly[end]).map(|j| (ti, t[(j + 2) % 3]))
+        });
+        let Some((ti, tip)) = found else { return vec![] };
+        out.swap_remove(ti);
+        out.extend(chain.windows(2).map(|edge| [edge[0], edge[1], tip]));
+    }
+    out
+}
+
+fn earclip_simple(poly: &[u32], at: &impl Fn(u32) -> [f32; 2]) -> Vec<[u32; 3]> {
     let n = poly.len();
     if n < 3 {
         return vec![];
     }
     let pts: Vec<[f32; 2]> = poly.iter().map(|&i| at(i)).collect();
+    let span = (0..2)
+        .map(|axis| {
+            pts.iter().map(|p| p[axis]).fold(f32::NEG_INFINITY, f32::max)
+                - pts.iter().map(|p| p[axis]).fold(f32::INFINITY, f32::min)
+        })
+        .fold(0.0f32, f32::max);
+    let tolerance = span * span * 1e-12;
+    let cross64 = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+        (b[0] as f64 - a[0] as f64) * (c[1] as f64 - a[1] as f64)
+            - (b[1] as f64 - a[1] as f64) * (c[0] as f64 - a[0] as f64)
+    };
+    let mut remaining_area: f64 = (0..n).map(|i| cross64([0.0; 2], pts[i], pts[(i + 1) % n])).sum();
     let mut prev: Vec<usize> = (0..n).map(|i| (i + n - 1) % n).collect();
     let mut next: Vec<usize> = (0..n).map(|i| (i + 1) % n).collect();
     let mut out = Vec::with_capacity(n - 2);
     let (mut left, mut i, mut stall) = (n, 0, 0);
     let ear = |a: usize, b: usize, c: usize, next: &[usize]| {
         let tri = [pts[a], pts[b], pts[c]];
-        if cross(tri[0], tri[1], tri[2]) <= 0.0 {
+        if cross(tri[0], tri[1], tri[2]) <= tolerance {
             return false;
         }
         let mut k = next[c];
@@ -325,8 +460,14 @@ fn earclip(poly: &[u32], at: &impl Fn(u32) -> [f32; 2]) -> Vec<[u32; 3]> {
     };
     while left > 3 {
         let (a, c) = (prev[i], next[i]);
-        if ear(a, i, c, &next) || stall > left {
+        if stall > left {
+            return vec![];
+        }
+        let area = cross64(pts[a], pts[i], pts[c]);
+        // Never remove the last off-line corner, leaving a collinear remainder.
+        if remaining_area - area > tolerance as f64 && ear(a, i, c, &next) {
             out.push([poly[a], poly[i], poly[c]]);
+            remaining_area -= area;
             next[a] = c;
             prev[c] = a;
             left -= 1;
@@ -339,6 +480,30 @@ fn earclip(poly: &[u32], at: &impl Fn(u32) -> [f32; 2]) -> Vec<[u32; 3]> {
     }
     out.push([poly[prev[i]], poly[i], poly[next[i]]]);
     out
+}
+
+/// Reject open, inconsistently wound, non-finite or degenerate results before commit.
+pub(crate) fn valid_solid(part: &Part, eps: f32) -> bool {
+    if part.tris.is_empty() || part.positions.iter().flatten().any(|v| !v.is_finite()) {
+        return false;
+    }
+    let mut edges = HashMap::new();
+    let mut volume = 0.0;
+    let origin = part.positions[0];
+    for (i, t) in part.tris.iter().enumerate() {
+        let c = part.corners(i);
+        if geom::area(&c) <= eps * eps {
+            return false;
+        }
+        volume +=
+            geom::dot(geom::sub(c[0], origin), geom::cross(geom::sub(c[1], origin), geom::sub(c[2], origin))) / 6.0;
+        for k in 0..3 {
+            *edges.entry((t[k], t[(k + 1) % 3])).or_insert(0u32) += 1;
+        }
+    }
+    volume.is_finite()
+        && volume.abs() > eps.powi(3)
+        && edges.iter().all(|(&(a, b), &n)| n == 1 && edges.get(&(b, a)) == Some(&1))
 }
 
 /// One side as a part of its own: only the vertices it uses, the original's materials.
@@ -460,5 +625,44 @@ mod tests {
         let [low, high] = split(&cube([0.0; 3], [1.0; 3]), 2, 5.0, 1e-5);
         assert_eq!(low.tris.len(), 12);
         assert!(high.tris.is_empty());
+    }
+
+    #[test]
+    fn oblique_and_free_planes_preserve_volume_uvs_and_closed_edges() {
+        let original = cube([0.0; 3], [10.0; 3]);
+        for normal in [[1.0, 0.0, 1.0], [0.3, -0.7, 0.64], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0]] {
+            for point in [[5.0; 3], [0.001, 0.001, 0.001], [9.999; 3]] {
+                let plane = Plane::new(point, normal).unwrap();
+                let [(low, _), (high, _)] = split_plane_with_origins(&original, plane, 1e-6);
+                assert!(valid_solid(&low, 1e-6) && valid_solid(&high, 1e-6), "{point:?} {normal:?}");
+                assert!((volume(&low) + volume(&high) - 1000.0).abs() < 0.01);
+                assert!(low.tri_loops.iter().flatten().all(|&i| (i as usize) < low.uv_layers[0].len()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_free_plane_keeps_holes_open_and_rejects_invalid_geometry() {
+        let mut shell = cube([0.0; 3], [10.0; 3]);
+        let cavity = cube([3.0; 3], [7.0; 3]);
+        let base = shell.positions.len() as u32;
+        let loops = shell.tris.len() as u32 * 3;
+        shell.positions.extend(cavity.positions);
+        shell.tris.extend(cavity.tris.iter().map(|t| [t[0] + base, t[2] + base, t[1] + base]));
+        shell.tri_loops.extend(cavity.tri_loops.iter().map(|t| t.map(|v| v + loops)));
+        shell.tri_source.extend(cavity.tri_source);
+        shell.uv_layers[0].extend(&cavity.uv_layers[0]);
+        for normal in [[1.0, 0.0, 1.0], [0.3, -0.7, 0.64]] {
+            let plane = Plane::new([5.0; 3], normal).unwrap();
+            let sides = split_plane_with_origins(&shell, plane, 1e-5);
+            for (side, _) in sides {
+                assert!(valid_solid(&side, 1e-5), "{normal:?}");
+                assert!((volume(&side) - 468.0).abs() < 0.01);
+            }
+        }
+        shell.tris.pop();
+        assert!(!valid_solid(&shell, 1e-5));
+        assert_eq!(Plane::new([0.0; 3], [0.0; 3]).unwrap_err(), CutError::InvalidPlane);
+        assert_eq!(Plane::new([f32::NAN; 3], [1.0; 3]).unwrap_err(), CutError::InvalidPlane);
     }
 }

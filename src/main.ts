@@ -30,7 +30,8 @@ import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { setupPrintability } from "./printability";
-import { Viewer, type Axis, type Section, type Tool, type View } from "./viewer";
+import { Viewer, sectionNormal, type Section, type Tool, type View } from "./viewer";
+import { CutPanel } from "./cut-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -253,23 +254,23 @@ async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
 document.querySelectorAll<HTMLButtonElement>("button[data-turn]").forEach((b) => b.addEventListener("click", () => void turn(() => api.rotate(Number(b.dataset.turn), 90))));
 $("#rotate-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
 
-const cutPos = $<HTMLInputElement>("#cut-pos");
+const cutPanel = new CutPanel({
+  current: () => currentCut(),
+  set: (s) => setSection(s),
+  reset: () => viewer.defaultSection(),
+  range: (s) => viewer.sectionRange(s),
+  snap: (degrees) => viewer.setCutSnap(degrees),
+});
 /** The cut's controls under the view, and the mark on its tool while it is on. */
 function syncSection(s: Section | null) {
   $<HTMLButtonElement>('button[data-tool="section"]').dataset.on = String(s !== null);
-  document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) => b.setAttribute("aria-pressed", String(s !== null && Number(b.dataset.cutAxis) === s.axis)));
-  if (s) cutPos.value = String(Math.round(s.t * 1000) / 10);
-  $<HTMLButtonElement>("#cut-flip").setAttribute("aria-pressed", String(s?.flip ?? false));
+  cutPanel.sync(s);
 }
 function setSection(s: Section | null) {
   viewer.setSection(s);
   syncSection(s);
 }
-const currentCut = (): Section => viewer.getSection() ?? { axis: 2, t: 0.5, flip: false };
-cutPos.addEventListener("input", () => setSection({ ...currentCut(), t: Number(cutPos.value) / 100 }));
-document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) =>
-  b.addEventListener("click", () => setSection({ ...currentCut(), axis: Number(b.dataset.cutAxis) as Axis })));
-$("#cut-flip").addEventListener("click", () => setSection({ ...currentCut(), flip: !currentCut().flip }));
+const currentCut = (): Section => viewer.getSection() ?? viewer.defaultSection();
 $("#cut-off").addEventListener("click", () => {
   setSection(null);
   setTool("orbit");
@@ -281,7 +282,7 @@ $("#cut-apply").addEventListener("click", () => {
   if (!s || !summary) return;
   const both = keepOther.checked;
   measured = [];
-  void apply(() => api.cutModel(s.axis, s.t, !s.flip, both), () => {
+  void apply(() => api.cutModel(s.point, sectionNormal(s), !s.flip, both, $<HTMLInputElement>("#cut-lay").checked, s.selected), () => {
     setSection(null);
     setTool("orbit");
     toast(t(both ? "cut.doneBoth" : "cut.doneKept"), "ok", { label: t("cut.undo"), run: undoCut });
@@ -382,6 +383,8 @@ function renderImportWarnings(s: Summary) {
 
 function render(s: Summary) {
   summary = s;
+  viewer.setCutParts(s.parts);
+  cutPanel.update(s);
   printability.update(s);
   bind("fileName", s.fileName);
   bind("fileMeta", t("file.meta", { mb: nf(s.fileSize / 1048576, 1), count: s.materials.length, n: s.materials.length }));
@@ -1460,7 +1463,10 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
-  else if (e.key === "Escape" && measured.length) {
+  else if (e.key === "Escape" && viewer.getSection()) {
+    setSection(null);
+    setTool("orbit");
+  } else if (e.key === "Escape" && measured.length) {
     measured = [];
     syncMeasure();
   } else if (e.key === "[" || e.key === "]") {

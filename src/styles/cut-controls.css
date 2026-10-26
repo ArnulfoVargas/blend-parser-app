@@ -1,0 +1,76 @@
+/* Hallmark · component: cut controls · genre: modern-minimal · theme: Dose (existing system) · redesign: polish · states: 8 · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H4 E4 S5 R5 V3 · weakest: V, integration deliberately retains the viewport and bottom value rows requested by the user */
+/* Hallmark · answered F14 · errors and success use the existing toast; local edits preview immediately without a request */
+/* Hallmark · answered F4 · selected viewport handles use mint to identify the active manipulation; Apply cut is the only primary action */
+@import url("./tokens.css");
+
+.cut-controls { display: none; width: 100%; min-width: 0; padding-top: var(--space-sm); border-top: 1px solid var(--color-rule); color: var(--color-ink-2); font-size: var(--text-sm); }
+.app[data-tool="section"] .cut-controls { display: flex; flex-direction: column; gap: var(--space-sm); }
+.app[data-tool="section"] .stage__foot { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-xs); }
+.app[data-tool="section"] .stage__hint { flex-basis: auto; text-align: left; white-space: normal; }
+.cut-controls__top { display: flex; align-items: center; gap: var(--space-xs); min-width: 0; }
+.cut-presets { display: flex; align-items: center; gap: var(--space-xs); flex: none; }
+.cut-presets > span { color: var(--color-muted); }
+.cut-presets .seg { background: var(--color-paper-2); }
+.cut-depth { display: flex; align-items: center; gap: var(--space-xs); flex: 1; min-width: 0; padding-inline: var(--space-xs); }
+.cut-depth .range { flex: 1; width: 100%; min-width: 48px; }
+.cut-depth output { flex: none; min-width: 62px; text-align: right; font: 400 var(--text-xs)/1.4 var(--font-outlier); color: var(--color-ink); }
+.cut-action { display: inline-grid; place-items: center; flex: none; width: 32px; height: 32px; border: 0; border-radius: var(--radius-input); background: var(--color-paper-2); color: var(--color-ink-2); cursor: pointer; }
+.cut-controls svg, .cut-guides svg, .cut-kept svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.cut-controls__values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-lg); }
+.cut-values { min-width: 0; padding: 0; margin: 0; border: 0; }
+.cut-values legend { padding: 0; margin-bottom: var(--space-2xs); font: 400 var(--text-xs)/1.4 var(--font-body); color: var(--color-muted); }
+.cut-values > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-xs); }
+.cut-value { display: flex; align-items: center; gap: var(--space-2xs); min-width: 0; }
+.cut-value > span { flex: none; font-weight: 500; font-size: var(--text-xs); }
+.cut-value[data-axis="x"] > span { color: var(--axis-x); }
+.cut-value[data-axis="y"] > span { color: var(--axis-y); }
+.cut-value[data-axis="z"] > span { color: var(--axis-z); }
+.cut-value input { width: 100%; min-width: 0; height: 34px; padding: var(--space-2xs) var(--space-2xs) var(--space-2xs) var(--space-xs); border: 1px solid var(--color-muted); border-radius: var(--radius-input); background: var(--color-paper); color: var(--color-ink); font: 400 var(--text-sm)/1.2 var(--font-outlier); font-variant-numeric: tabular-nums; }
+.cut-value input[aria-invalid="true"] { border-color: var(--color-error); }
+.cut-controls__foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+.cut-controls__options { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2xs) var(--space-sm); min-width: 0; }
+.cut-controls .check { min-height: 32px; gap: var(--space-2xs); white-space: nowrap; font-size: var(--text-xs); }
+.cut-controls .check input { accent-color: var(--color-accent); }
+.cut-controls__actions { display: flex; flex: none; align-items: center; gap: var(--space-xs); }
+.cut-controls__actions .btn { min-height: 34px; white-space: nowrap; }
+.cut-parts { position: relative; font-size: var(--text-xs); }
+.cut-parts summary { display: flex; align-items: center; gap: var(--space-2xs); min-height: 32px; padding-inline: var(--space-2xs); border-radius: var(--radius-input); cursor: pointer; list-style: none; }
+.cut-parts summary::-webkit-details-marker { display: none; }
+.cut-parts summary svg { width: 14px; }
+.cut-parts[open] summary { background: var(--color-paper-3); }
+.cut-parts__menu { position: absolute; bottom: calc(100% + var(--space-xs)); right: 0; z-index: var(--z-dropdown); display: flex; flex-direction: column; gap: var(--space-xs); width: 240px; max-width: 60dvw; padding: var(--space-sm); border: 1px solid var(--color-muted); border-radius: var(--radius-input); background: var(--color-paper); }
+.cut-parts__menu select { width: 100%; min-height: 100px; padding: var(--space-2xs); border: 1px solid var(--color-muted); border-radius: var(--radius-input); background: var(--color-paper); color: var(--color-ink); }
+.cut-parts__menu option { padding: var(--space-2xs); }
+.cut-parts__menu p { color: var(--color-muted); }
+.cut-guides, .cut-kept { position: absolute; z-index: 3; display: none; align-items: center; gap: var(--space-2xs); padding: var(--space-2xs); border-radius: var(--radius-input); background: color-mix(in oklab, var(--color-paper) 96%, transparent); box-shadow: inset 0 0 0 1px var(--color-rule), 0 2px 8px -4px var(--color-muted); font-size: var(--text-xs); }
+.cut-guides { top: var(--space-md); right: var(--space-md); }
+.cut-kept { bottom: var(--space-md); right: var(--space-md); padding-left: var(--space-sm); }
+.app[data-tool="section"] :is(.cut-guides, .cut-kept) { display: flex; }
+.cut-guides button, .cut-kept button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-xs); min-height: 32px; padding: var(--space-2xs) var(--space-xs); border: 0; border-radius: var(--radius-input); background: none; color: var(--color-ink-2); font: inherit; cursor: pointer; }
+.cut-guides button[aria-pressed="true"], .cut-kept button[aria-pressed="true"] { background: var(--color-accent-soft); color: var(--color-ink); }
+.cut-kept > span { color: var(--color-muted); }
+.cut-guide-snap { display: flex; align-items: center; gap: var(--space-2xs); padding-inline: var(--space-xs); color: var(--color-muted); }
+.cut-guide-snap select { height: 30px; border: 1px solid var(--color-muted); border-radius: var(--radius-input); background: var(--color-paper); color: var(--color-ink); font: inherit; }
+.cut-guide-key { display: inline-flex; align-items: center; gap: var(--space-2xs); min-height: 32px; padding-inline: var(--space-xs); color: var(--color-muted); }
+.cut-controls :is(button, input, select, summary):focus-visible, .cut-guides :is(button, select):focus-visible, .cut-kept button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.cut-controls button:active, .cut-guides button:active, .cut-kept button:active { transform: translateY(1px); }
+.cut-controls :is(button, input, select):disabled, .cut-guides :is(button, select):disabled { background: var(--color-paper-2); color: var(--color-muted); cursor: not-allowed; }
+.app.is-working :is(.cut-controls, .cut-guides, .cut-kept) { pointer-events: none; cursor: progress; }
+.app.is-working #cut-apply { background: var(--color-accent-deep); color: var(--color-accent-ink); cursor: progress; }
+.cut-controls .btn--primary { background: var(--color-accent); color: var(--color-accent-ink); }
+@media (hover: hover) {
+  .cut-action:not(:disabled):hover, .cut-guides button:not([aria-pressed="true"]):hover, .cut-kept button:hover, .cut-parts summary:hover { background: var(--color-paper-3); color: var(--color-ink); }
+  .cut-value input:hover { background: var(--color-paper-2); }
+}
+@media (max-width: 75rem) {
+  .cut-controls__values { gap: var(--space-sm); }
+  .cut-values > div { gap: var(--space-2xs); }
+  .cut-controls__options { gap: 0 var(--space-xs); }
+  .cut-presets > span { display: none; }
+  .cut-guides { top: var(--space-sm); right: var(--space-sm); }
+  .cut-kept { bottom: var(--space-sm); right: var(--space-sm); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cut-controls *, .cut-guides *, .cut-kept * { transition: none; animation: none; }
+}

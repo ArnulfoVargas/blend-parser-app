@@ -16,6 +16,9 @@ pub const TOWER_BRIM_MM: f32 = 3.0;
 pub struct PartDto {
     pub name: String,
     pub triangles: usize,
+    pub object: u32,
+    pub preview_start: usize,
+    pub preview_end: usize,
 }
 
 #[derive(Serialize)]
@@ -334,7 +337,19 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         file_name: doc.file_name.clone(),
         file_size: doc.file_size,
         import_warnings: doc.import_warnings.clone(),
-        parts: p.scene().parts.iter().map(|x| PartDto { name: x.name.clone(), triangles: x.tris.len() }).collect(),
+        parts: p
+            .scene()
+            .parts
+            .iter()
+            .zip(p.preview_part_ranges())
+            .map(|(x, (start, end))| PartDto {
+                name: x.name.clone(),
+                triangles: x.tris.len(),
+                object: x.object,
+                preview_start: start,
+                preview_end: end,
+            })
+            .collect(),
         materials: p
             .scene()
             .materials

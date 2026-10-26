@@ -272,6 +272,12 @@
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn toolbar__expand" type="button" id="toolbar-expand" aria-expanded="false"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg><span class="toolbar__label" data-bind="toolbarExpand"></span></button>
         </div>
+        <div class="cut-guides" role="group" data-i18n-attr="aria-label:cut.handles">
+          <span class="cut-guide-key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18m-12-6 3-3 3 3m-6 12 3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3"/></svg><span data-i18n="cut.move">Move plane</span></span>
+          <span class="cut-guide-key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7M20 3v5h-5"/></svg><span data-i18n="cut.rotate">Rotate plane</span></span>
+          <label class="cut-guide-snap"><span data-i18n="cut.snap">Snap</span><select id="cut-snap" data-i18n-attr="aria-label:cut.snap"><option value="1">1&deg;</option><option value="5">5&deg;</option><option value="15" selected>15&deg;</option><option value="45">45&deg;</option></select></label>
+        </div>
+        <div class="cut-kept"><span id="cut-side"></span><button type="button" id="cut-flip" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16m-4-4 4 4-4 4M20 16H4m4-4-4 4 4 4"/></svg><span data-i18n="cut.flip">Flip</span></button></div>
         <div class="banner" id="fit-banner" hidden>
           <p data-bind="fitBanner"></p>
           <button class="btn btn--quiet btn--sm" type="button" id="fit" data-i18n="size.fit">Ajustar a la placa</button>
@@ -303,23 +309,21 @@
           <button class="btn btn--quiet btn--sm" type="button" data-turn="2">Z</button>
           <button class="btn btn--quiet btn--sm" type="button" id="rotate-reset" data-i18n="place.resetRotation">Orientación original</button>
         </div>
-        <div class="place" data-for="section">
-          <div class="place__group">
-            <div class="seg seg--sm" role="group" aria-label="Eje del corte" data-i18n-attr="aria-label:cut.axis">
-              <button type="button" data-cut-axis="0" aria-pressed="false">X</button>
-              <button type="button" data-cut-axis="1" aria-pressed="false">Y</button>
-              <button type="button" data-cut-axis="2" aria-pressed="true">Z</button>
+        <div class="cut-controls" id="cut-controls" aria-label="Cut plane" data-i18n-attr="aria-label:cut.title">
+          <div class="cut-controls__top">
+            <div class="cut-presets"><span data-i18n="cut.axis">Plane</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:cut.axis"><button type="button" data-cut-axis="0" aria-pressed="false">X</button><button type="button" data-cut-axis="1" aria-pressed="false">Y</button><button type="button" data-cut-axis="2" aria-pressed="true">Z</button><button type="button" data-cut-axis="3" aria-pressed="false">45&deg;</button></div></div>
+            <div class="cut-depth"><label class="visually-hidden" for="cut-pos" data-i18n="cut.position">Position</label><input class="range" id="cut-pos" type="range" min="0" max="100" step="0.1" value="50"><output id="cut-depth-value" for="cut-pos">0 mm</output></div>
+            <button class="cut-action" type="button" id="cut-reset" data-i18n-attr="title:cut.reset;aria-label:cut.reset"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 8M4 4v6h6"/></svg></button>
+            <button class="cut-action" type="button" id="cut-undo" disabled data-i18n-attr="title:cut.undo;aria-label:cut.undo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h10a6 6 0 0 1 0 12M4 9l5-5m-5 5 5 5"/></svg></button>
+          </div>
+          <div class="cut-controls__values"><fieldset class="cut-values"><legend data-i18n="cut.point">point</legend><div><label class="cut-value" data-axis="x"><span>X</span><input id="cut-x" type="number" step="0.1" value="0" aria-label="X (mm)"></label><label class="cut-value" data-axis="y"><span>Y</span><input id="cut-y" type="number" step="0.1" value="0" aria-label="Y (mm)"></label><label class="cut-value" data-axis="z"><span>Z</span><input id="cut-z" type="number" step="0.1" value="0" aria-label="Z (mm)"></label></div></fieldset><fieldset class="cut-values"><legend data-i18n="cut.rotation">rotation</legend><div><label class="cut-value" data-axis="x"><span>X</span><input id="cut-rx" type="number" step="0.1" value="0" aria-label="X (&deg;)"></label><label class="cut-value" data-axis="y"><span>Y</span><input id="cut-ry" type="number" step="0.1" value="0" aria-label="Y (&deg;)"></label><label class="cut-value" data-axis="z"><span>Z</span><input id="cut-rz" type="number" step="0.1" value="0" aria-label="Z (&deg;)"></label></div></fieldset></div>
+          <div class="cut-controls__foot">
+            <div class="cut-controls__options">
+              <label class="check" data-i18n-attr="title:cut.keepOtherHelp"><input type="checkbox" id="cut-keep-other"><span data-i18n="cut.keepOther">Both halves</span></label>
+              <label class="check" data-i18n-attr="title:cut.layHelp"><input type="checkbox" id="cut-lay"><span data-i18n="cut.lay">Lay on cut</span></label>
+              <details class="cut-parts" id="cut-parts"><summary data-i18n-attr="title:cut.selectHelp"><span data-i18n="cut.target">Parts</span><span id="cut-target-count"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></summary><div class="cut-parts__menu"><label for="cut-target" data-i18n="cut.target">Parts</label><select id="cut-target" multiple size="4" data-i18n-attr="aria-label:cut.target"></select><p data-i18n="cut.selectHelp">Hold Ctrl to select several parts.</p></div></details>
             </div>
-            <input class="range" id="cut-pos" type="range" min="0" max="100" step="0.5" value="50" aria-label="Posición del corte" data-i18n-attr="aria-label:cut.position">
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-flip" aria-pressed="false" data-i18n="cut.flip">Invertir</button>
-          </div>
-          <div class="place__group">
-            <label class="check" data-i18n-attr="title:cut.keepOtherHelp"><input type="checkbox" id="cut-keep-other"> <span data-i18n="cut.keepOther">Conservar la otra parte</span></label>
-            <button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Cortar aquí</button>
-          </div>
-          <div class="place__group">
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-undo" disabled data-i18n="cut.undo">Deshacer corte</button>
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.off">Quitar corte</button>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Apply cut</button></div>
           </div>
         </div>
         <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
