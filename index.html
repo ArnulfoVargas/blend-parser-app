@@ -18,7 +18,11 @@
         <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.file"></button>
         <ul class="menu" role="menu" hidden>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="open"><span data-i18n="menu.open"></span> <kbd>Ctrl+O</kbd></button></li>
-          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+S</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="save"><span data-i18n="menu.save"></span> <kbd>Ctrl+S</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="saveAs"><span data-i18n="menu.saveAs"></span> <kbd>Ctrl+⇧+S</kbd></button></li>
+          <li role="separator" class="menu__sep"></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+E</kbd></button></li>
+          <li role="separator" class="menu__sep" id="recent-sep" hidden></li>
         </ul>
       </li>
       <li>

@@ -96,10 +96,10 @@ pub async fn inspect_model(
     .map_err(AppError::internal)?
 }
 
-/// A supported model passed on the command line ("Open with…"), if any.
+/// A supported model or project passed on the command line ("Open with…"), if any.
 #[tauri::command]
 pub fn initial_file() -> Option<String> {
-    std::env::args().skip(1).find(|a| bp_blend::supports(Path::new(a)))
+    std::env::args().skip(1).find(|a| bp_blend::supports(Path::new(a)) || crate::saved::is_project(Path::new(a)))
 }
 
 #[tauri::command]
@@ -154,6 +154,39 @@ pub async fn open_blend(
             flush: Default::default(),
             offset_mm: [0.0; 2],
         };
+        let summary = dto::summary(&doc, &prefs);
+        *state.doc.lock()? = Some(doc);
+        Ok(summary)
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Saves the open document as a `.bpproj` at `path`.
+#[tauri::command]
+pub async fn save_project(app: AppHandle, path: String) -> CmdResult<()> {
+    with_doc(app, move |d, _| crate::saved::save(d, &path)).await
+}
+
+/// Opens a `.bpproj`, without Blender, in place of the open document. The
+/// printer it was prepared for is picked again when it is still known.
+#[tauri::command]
+pub async fn open_project(app: AppHandle, path: String) -> CmdResult<Summary> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        let mut doc = {
+            let mut store = state.printers.lock()?;
+            let doc = crate::saved::open(&path, &store)?;
+            let id = doc.printer.profile.id.clone();
+            if store.profiles().iter().any(|p| p.id == id) {
+                store.select(&id, doc.printer.nozzle_mm)?;
+                store.save()?;
+            }
+            doc
+        };
+        let prefs = state.prefs.lock()?;
+        doc.project.set_print_ops(print_ops(&doc.printer, &prefs));
         let summary = dto::summary(&doc, &prefs);
         *state.doc.lock()? = Some(doc);
         Ok(summary)

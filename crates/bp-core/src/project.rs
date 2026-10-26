@@ -1295,6 +1295,136 @@ impl Project {
         pieces
     }
 
+    // ---- saving -------------------------------------------------------------
+
+    /// The document as bytes (see [`crate::snapshot`]): the scene and every
+    /// setting, hand painting and bucket region; not the undo history.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use crate::snapshot::{self as s, Writer};
+        let mut w = Writer::new();
+        s::write_scene(&mut w, &self.scene);
+        let points = |w: &mut Writer, parts: &Vec<Vec<Vec3>>| w.vec(parts, |w, ps| w.vec(ps, |w, v| w.f32s(*v)));
+        points(&mut w, &self.source_positions);
+        points(&mut w, &self.unrotated);
+        w.f32s(self.source_size);
+        w.f32(self.source_height);
+        w.f32(self.scale);
+        w.f32s(self.stretch);
+        w.f32s(self.size_mm);
+        self.rotation.iter().for_each(|row| w.f32s(*row));
+        w.f32s(self.placement);
+        s::write_mesh_ops(&mut w, &self.mesh_ops);
+        s::write_ops(&mut w, &self.color_ops, &self.print_ops);
+        w.vec(&self.palette, s::write_rgb);
+        w.vec(&self.targets, |w, t| {
+            s::write_rgb(w, &t.0);
+            w.u8(t.1);
+        });
+        w.vec(&self.painted, |w, p| w.bytes(p));
+        w.vec(&self.regions, |w, r| {
+            w.u32(r.target.map_or(u32::MAX, |t| t as u32));
+            w.bool(r.extra.is_some());
+            s::write_rgb(w, &r.extra.unwrap_or_default());
+            w.u8(r.slot);
+            w.vec(&r.tris, |w, &(p, t)| {
+                w.u32(p);
+                w.u32(t);
+            });
+        });
+        w.0
+    }
+
+    /// A document saved with [`Self::to_bytes`], worked out again as it was.
+    /// Hand painting and bucket regions that no longer fit the triangles are
+    /// dropped rather than put on the wrong ones.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::SnapshotError> {
+        use crate::snapshot::{self as s, Reader, SnapshotError};
+        let mut r = Reader::new(bytes)?;
+        let scene = s::read_scene(&mut r)?;
+        let points = |r: &mut Reader| r.vec(|r| r.vec(|r| r.f32s()));
+        let source_positions = points(&mut r)?;
+        let unrotated = points(&mut r)?;
+        let (source_size, source_height, scale, stretch, size_mm) =
+            (r.f32s()?, r.f32()?, r.f32()?, r.f32s()?, r.f32s()?);
+        let rotation = [r.f32s()?, r.f32s()?, r.f32s()?];
+        let placement = r.f32s()?;
+        let mesh_ops = s::read_mesh_ops(&mut r)?;
+        let (color_ops, print_ops) = s::read_ops(&mut r)?;
+        let palette: Vec<Rgb> = r.vec(|r| r.f32s())?;
+        let targets: Vec<(Rgb, u8)> = r.vec(|r| Ok((r.f32s()?, r.u8()?)))?;
+        let painted = r.vec(|r| r.bytes())?;
+        let regions = r.vec(|r| {
+            let target = r.u32()?;
+            let has_extra = r.bool()?;
+            let extra: Rgb = r.f32s()?;
+            Ok(RegionRule {
+                target: (target != u32::MAX).then_some(target as usize),
+                extra: has_extra.then_some(extra),
+                slot: r.u8()?,
+                tris: r.vec(|r| Ok((r.u32()?, r.u32()?)))?,
+            })
+        })?;
+        let n = palette.len();
+        let fits = |parts: &Vec<Vec<Vec3>>| {
+            parts.len() == scene.parts.len()
+                && parts.iter().zip(&scene.parts).all(|(a, b)| a.len() == b.positions.len())
+        };
+        let finite = [scale, source_height].iter().chain(&stretch).chain(&size_mm).all(|v| v.is_finite() && *v > 0.0);
+        if !r.done()
+            || !fits(&source_positions)
+            || !fits(&unrotated)
+            || !finite
+            || !(1..=16).contains(&n)
+            || targets.iter().any(|t| t.1 as usize >= n)
+            || regions.iter().any(|g| g.slot as usize >= n || g.target.is_some_and(|t| t >= targets.len()))
+        {
+            return Err(SnapshotError::Corrupt);
+        }
+        let mut p = Self {
+            scene,
+            source_positions,
+            source_size,
+            source_height,
+            scale,
+            stretch,
+            size_mm,
+            size_history: vec![],
+            unrotated,
+            rotation,
+            placement,
+            cut_history: vec![],
+            mesh_ops,
+            color_ops,
+            print_ops,
+            palette,
+            targets,
+            shape: Mesh::default(),
+            work: Mesh::default(),
+            trees: vec![],
+            adjacency: vec![],
+            painted: vec![],
+            regions: vec![],
+            picker: (Bvh::default(), TriSoup::default()),
+            tri_offsets: vec![],
+            stroke: vec![],
+            undo: vec![],
+        };
+        p.rebuild_geometry();
+        let counts: Vec<usize> = p.work.parts.iter().map(|w| w.tris.len()).collect();
+        let fit = painted.len() == counts.len() && painted.iter().zip(&counts).all(|(l, &c)| l.len() == c);
+        if fit && painted.iter().flatten().all(|&l| l == NO_LABEL || (l as usize) < n) {
+            p.painted = painted;
+        }
+        let inside = |g: &RegionRule| {
+            g.tris.iter().all(|&(part, t)| counts.get(part as usize).is_some_and(|&c| (t as usize) < c))
+        };
+        if fit {
+            p.regions = regions.into_iter().filter(inside).collect();
+        }
+        p.rebuild_paint();
+        Ok(p)
+    }
+
     pub fn export_parts(&self) -> Vec<ExportPart> {
         self.work
             .parts
@@ -1470,6 +1600,45 @@ mod tests {
         p.bucket(o, d, slot, false, true).unwrap();
         assert_eq!(p.targets.len(), targets + 1);
         assert!(labels(&p)[6..].iter().all(|&l| l == slot));
+    }
+
+    #[test]
+    fn a_saved_project_opens_as_it_was() {
+        let mut p = Project::new(bands(), 3);
+        let (red, beige) = (slot_of(&p, [0.85, 0.1, 0.1]), slot_of(&p, [0.9, 0.8, 0.6]));
+        p.merge_slots(red as usize, beige as usize);
+        let green = slot_of(&p, [0.1, 0.6, 0.2]);
+        let (o, d) = at_band(0);
+        p.bucket(o, d, green, true, false).unwrap();
+        p.set_size_mm([20.0, 1.0, 80.0]);
+        p.rotate(2, 90.0);
+        p.set_color_ops(ColorOps { border_detail: 3, min_island_mm2: 0.0 });
+        // Turned a quarter about Z, the bands face X now.
+        p.paint([-50.0, 0.0, 30.0], [1.0, 0.0, 0.0], 0.1, green).expect("the ray hits the model");
+        p.end_stroke();
+        assert!(p.painted_count() > 0);
+
+        let bytes = p.to_bytes();
+        let q = Project::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            q.export_parts().iter().map(|x| &x.paint).collect::<Vec<_>>(),
+            p.export_parts().iter().map(|x| &x.paint).collect::<Vec<_>>()
+        );
+        assert_eq!(q.export_parts()[0].positions, p.export_parts()[0].positions);
+        assert_eq!(q.palette(), p.palette());
+        assert_eq!(q.size_mm(), p.size_mm());
+        assert_eq!(q.rotation(), p.rotation());
+        assert_eq!(q.painted_count(), p.painted_count());
+        assert_eq!(q.regions.len(), 1);
+        assert_eq!(q.to_bytes(), bytes, "saving again gives the same bytes");
+        assert!(!q.can_undo());
+
+        // Cut short, wrong or from a newer version: refused, never read wrong.
+        assert_eq!(Project::from_bytes(&bytes[..bytes.len() / 2]).err(), Some(crate::SnapshotError::Corrupt));
+        assert_eq!(Project::from_bytes(b"nope").err(), Some(crate::SnapshotError::Corrupt));
+        let mut newer = bytes.clone();
+        newer[4..8].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(Project::from_bytes(&newer).err(), Some(crate::SnapshotError::Version(99)));
     }
 
     #[test]
