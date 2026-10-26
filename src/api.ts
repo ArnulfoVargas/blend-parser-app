@@ -133,7 +133,8 @@ export interface Summary {
 
 /** How the kit is cut: joint detail, colour depth over a one-colour core, and the least piece kept apart. */
 export interface KitOptions { voxelMm: number; depthMm: number; coreSlot: number | null; minPieceMm3: number }
-export interface KitResult { pieces: number; plates: number; oversize: number }
+/** What the kit came out with: pieces, plates, and what to look at (too big, to review, left out). */
+export interface KitResult { pieces: number; plates: number; oversize: number; review: number; dropped: number }
 export interface Hit { point: Vec3; normal: Vec3 }
 /** What the bucket would fill: the colour found (or added), its slot now, and the triangles it reaches. */
 export interface BucketPick { targetHex: string; added: boolean; slot: number | null; sampleHex: string; deltaE: number; tris: number[] }

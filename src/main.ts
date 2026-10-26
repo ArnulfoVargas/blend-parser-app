@@ -1487,7 +1487,13 @@ $("#export-zip").addEventListener("click", async () => {
   await work(async () => {
     const r = await api.exportColorZip(path, options);
     const done = t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path });
-    toast(r.oversize ? `${done} ${t("zip.oversize", { count: r.oversize, n: r.oversize })}` : done, r.oversize ? "error" : "ok");
+    // Anything to look at is said, never left for the user to find.
+    const notes = [
+      r.oversize ? t("zip.oversize", { count: r.oversize, n: r.oversize }) : "",
+      r.review > r.oversize ? t("zip.review", { count: r.review, n: r.review }) : "",
+      r.dropped ? t("zip.dropped", { count: r.dropped, n: r.dropped }) : "",
+    ].filter(Boolean);
+    toast([done, ...notes].join(" "), notes.length ? "error" : "ok");
   });
 });
 

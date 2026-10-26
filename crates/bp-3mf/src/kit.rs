@@ -1,15 +1,27 @@
-//! The colour kit as a ZIP: a 3MF with every piece laid out on plates of a
-//! single colour, one STL per piece, and an assembly guide (an HTML page with
-//! pictures of every step, and the same steps as plain text).
+//! The colour kit as a ZIP:
+//!
+//! ```text
+//! LEEME.txt               what is in the kit, what to check, how to start
+//! resumen.html            the same, with colours, filaments and links
+//! guia-de-armado.html     pictures of every piece, plate and step
+//! guia-de-armado.txt      the same steps as plain text
+//! 3mf/<modelo>_placas.3mf every piece on a plate of its colour
+//! stl/<n>-<color>/P07.stl one STL per piece, by filament
+//! img/…                   the guide's pictures (it works offline)
+//! ```
+//!
+//! A piece is called by its label (`P07`) everywhere: its STL file and header,
+//! its 3MF object, and the guide.
 
 use std::fmt::Write as _;
 use std::io::{Seek, Write};
 
-use bp_core::kit::Kit;
+use bp_core::kit::{Issue, Kit};
 use bp_core::render::{self, Camera, Frame, Item, Style};
 use rayon::prelude::*;
 use zip::write::SimpleFileOptions;
 
+use crate::project_file::KitSettings;
 use crate::{escape, write_plates, write_stl, PlateObject, PlateProject, Printer};
 
 pub struct KitInfo<'a> {
@@ -19,7 +31,13 @@ pub struct KitInfo<'a> {
     pub palette: &'a [String],
     /// The filament on each slot, where the user picked one.
     pub slots: &'a [Option<crate::filament::SlotFilament>],
+    /// How the user's filament on each slot is called ("Bambu Lab PLA Basic Naranja").
+    pub filament_names: &'a [Option<String>],
     pub printer: &'a Printer,
+    /// How the kit was cut, for the summary.
+    pub params: KitSettings,
+    /// Filament density, to weigh each colour.
+    pub density_g_cm3: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +46,11 @@ pub struct KitSummary {
     pub plates: usize,
     /// Pieces larger than the plate.
     pub oversize: usize,
+    /// Pieces with anything to look at before printing (see [`bp_core::kit::check`]).
+    pub review: usize,
+    /// Crumbs that went to a neighbour, and regions too thin to make a piece.
+    pub merged: usize,
+    pub dropped: usize,
 }
 
 /// Spanish name for a filament colour, close enough to tell spools apart.
@@ -117,22 +140,6 @@ fn slug(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-fn base64(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for k in 0..4 {
-            if k <= c.len() {
-                out.push(T[(n >> (18 - 6 * k) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
 fn png(frame: &Frame) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     {
@@ -177,13 +184,14 @@ impl Shot {
         self
     }
 
-    fn html(&self, alt: &str, label: &dyn Fn(usize) -> String) -> String {
+    /// The picture, saved at `src` next to the page, with its labels and ring.
+    fn html(&self, src: &str, alt: &str, label: &dyn Fn(usize) -> String) -> String {
         let mut s = format!(
-            "<figure class=\"shot\"><img width=\"{}\" height=\"{}\" alt=\"{}\" src=\"data:image/png;base64,{}\">",
+            "<figure class=\"shot\"><img width=\"{}\" height=\"{}\" alt=\"{}\" src=\"{}\" loading=\"lazy\">",
             self.width,
             self.height,
             escape(alt),
-            base64(&self.png)
+            escape(src)
         );
         if let Some(r) = self.ring {
             let _ = write!(
@@ -411,6 +419,13 @@ ol.prep{padding-left:22px;max-width:72ch}ol.prep li{margin-bottom:8px}
 .card div{padding:8px 10px 10px;font-size:.9rem}
 .card b{font-family:"DM Mono",ui-monospace,monospace}
 .warn{color:#9a3412}
+.alert{background:#fdf0e6;border:1px solid #f0c9a8;border-radius:14px;padding:12px 16px;margin:20px 0}
+.card--warn{border-color:#e6a774;box-shadow:inset 0 3px 0 #e6a774}
+table{border-collapse:collapse;width:100%;margin:8px 0 12px;font-size:.95rem}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+thead th{font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+ul.files{padding-left:20px;max-width:72ch}ul.files li{margin-bottom:6px}
+a{color:var(--accent)}
 .step{display:grid;grid-template-columns:minmax(0,3fr) minmax(220px,2fr);gap:20px;align-items:center;padding:20px 0;border-top:1px solid var(--rule)}
 .step .n{font:600 .8rem "DM Mono",ui-monospace,monospace;color:var(--accent);text-transform:uppercase;letter-spacing:.06em}
 .step h3{font-size:1.25rem;margin:4px 0 8px}
@@ -418,70 +433,226 @@ ol.prep{padding-left:22px;max-width:72ch}ol.prep li{margin-bottom:8px}
 @media print{body{background:#fff}main{padding:0}.step{break-inside:avoid}h2{break-after:avoid}}
 "#;
 
-fn guide_html(
-    kit: &Kit,
-    info: &KitInfo,
-    pics: &Pictures,
-    labels: &[String],
-    files: &[String],
-    three_mf: &str,
-) -> String {
-    let slot_hex = |s: u8| info.palette.get(s as usize).cloned().unwrap_or_else(|| "#808080".into());
-    let colour_of = |i: usize| {
-        let hex = slot_hex(kit.pieces[i].slot);
-        (color_name(rgb(&hex)), hex)
-    };
+/// Where each picture of the guide is saved, next to the page.
+struct Paths {
+    overview: Vec<String>,
+    thumbs: Vec<String>,
+    plates: Vec<String>,
+    steps: Vec<String>,
+    details: Vec<Option<String>>,
+}
+
+impl Paths {
+    fn new(kit: &Kit, pics: &Pictures, labels: &[String]) -> Self {
+        Self {
+            overview: (1..=pics.overview.len()).map(|k| format!("img/modelo-{k}.png")).collect(),
+            thumbs: labels.iter().map(|l| format!("img/pieza-{l}.png")).collect(),
+            plates: (1..=kit.plates.len()).map(|k| format!("img/placa-{k:02}.png")).collect(),
+            steps: (1..=kit.steps.len()).map(|k| format!("img/paso-{k:03}.png")).collect(),
+            details: pics
+                .details
+                .iter()
+                .enumerate()
+                .map(|(k, d)| d.as_ref().map(|_| format!("img/paso-{:03}-detalle.png", k + 1)))
+                .collect(),
+        }
+    }
+
+    /// Every picture with its path, to put in the ZIP.
+    fn files<'a>(&'a self, pics: &'a Pictures) -> impl Iterator<Item = (&'a str, &'a [u8])> {
+        let pairs = |paths: &'a [String], shots: &'a [Shot]| {
+            paths.iter().zip(shots).map(|(p, s)| (p.as_str(), s.png.as_slice()))
+        };
+        pairs(&self.overview, &pics.overview)
+            .chain(pairs(&self.thumbs, &pics.thumbs))
+            .chain(pairs(&self.plates, &pics.plates))
+            .chain(pairs(&self.steps, &pics.steps))
+            .chain(
+                self.details
+                    .iter()
+                    .zip(&pics.details)
+                    .filter_map(|(p, s)| Some((p.as_deref()?, s.as_ref()?.png.as_slice()))),
+            )
+    }
+}
+
+/// `n` and the word for it, singular or plural ("1 pieza", "3 piezas").
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// What a piece needs looked at, as the user reads it.
+fn issue_text(issue: &Issue) -> String {
+    match issue {
+        Issue::Open => "su superficie no cierra: el laminador puede rellenarla mal".into(),
+        Issue::Degenerate(n) => format!("{n} triángulos sin área"),
+        Issue::Oversize => "es más grande que la placa: escálala o córtala en Bambu Studio".into(),
+        Issue::Thin(mm) => format!("su lado más fino mide {mm:.1} mm, menos de dos líneas de la boquilla"),
+        Issue::Tiny(mm) => format!("mide {mm:.1} mm como mucho: difícil de imprimir y de manipular"),
+    }
+}
+
+/// Everything the guide, the summary and the file names share.
+struct Names<'a> {
+    kit: &'a Kit,
+    info: &'a KitInfo<'a>,
+    labels: Vec<String>,
+    files: Vec<String>,
+    three_mf: String,
+    issues: Vec<Vec<Issue>>,
+}
+
+impl<'a> Names<'a> {
+    fn new(kit: &'a Kit, info: &'a KitInfo<'a>) -> Self {
+        let digits = kit.pieces.len().to_string().len().max(2);
+        let labels: Vec<String> = (0..kit.pieces.len()).map(|i| format!("P{:0digits$}", i + 1)).collect();
+        let base = slug(info.name);
+        let base = if base.is_empty() { "modelo".to_string() } else { base };
+        let mut names =
+            Self { kit, info, labels, files: vec![], three_mf: format!("3mf/{base}_placas.3mf"), issues: vec![] };
+        names.files = (0..kit.pieces.len())
+            .map(|i| {
+                let s = kit.pieces[i].slot;
+                format!("stl/{}-{}/{}.stl", s + 1, slug(color_name(rgb(&names.hex(s)))), names.labels[i])
+            })
+            .collect();
+        names.issues = bp_core::kit::check(kit, info.printer.nozzle_mm);
+        names
+    }
+
+    fn hex(&self, slot: u8) -> String {
+        self.info.palette.get(slot as usize).cloned().unwrap_or_else(|| "#808080".into())
+    }
+
+    /// The colour's everyday name ("Naranja").
+    fn colour(&self, slot: u8) -> &'static str {
+        color_name(rgb(&self.hex(slot)))
+    }
+
+    /// The spool to load: the user's filament when they picked one, else the colour's name.
+    fn filament(&self, slot: u8) -> String {
+        self.info.filament_names.get(slot as usize).cloned().flatten().unwrap_or_else(|| self.colour(slot).to_string())
+    }
+
+    fn piece_colour(&self, i: usize) -> &'static str {
+        self.colour(self.kit.pieces[i].slot)
+    }
+
+    fn slots(&self) -> Vec<u8> {
+        let mut slots: Vec<u8> = self.kit.pieces.iter().map(|p| p.slot).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }
+
+    fn plate_name(&self, k: usize) -> String {
+        let s = self.kit.plates[k].slot;
+        format!("Placa {} · {} {}", k + 1, self.filament(s), self.hex(s))
+    }
+
+    fn grams(&self, mm3: f32) -> f32 {
+        mm3 * self.info.density_g_cm3 / 1000.0
+    }
+
+    /// The pieces to look at, with why.
+    fn review(&self) -> Vec<(usize, &[Issue])> {
+        self.issues.iter().enumerate().filter(|(_, v)| !v.is_empty()).map(|(i, v)| (i, v.as_slice())).collect()
+    }
+
+    /// What the export changed or left out on its own, for the user to know.
+    fn notes(&self) -> Vec<String> {
+        let mut notes = vec![];
+        let p = &self.info.params;
+        if self.kit.voxel_mm > p.voxel_mm * 1.01 {
+            notes.push(format!(
+                "El modelo es grande para el detalle pedido: las uniones se calcularon con {:.2} mm en lugar de {:.2} mm.",
+                self.kit.voxel_mm, p.voxel_mm
+            ));
+        }
+        if self.kit.merged > 0 {
+            notes.push(format!(
+                "{} de menos de {:.0} mm³ {} a la pieza vecina con la que más contacto {}.",
+                count(self.kit.merged, "miga", "migas"),
+                p.min_piece_mm3,
+                if self.kit.merged == 1 { "se unió" } else { "se unieron" },
+                if self.kit.merged == 1 { "tenía" } else { "tenían" }
+            ));
+        }
+        if self.kit.dropped > 0 {
+            notes.push(format!(
+                "{} para formar una pieza {} fuera; revisa el modelo armado por si falta algo.",
+                count(self.kit.dropped, "zona demasiado fina", "zonas demasiado finas"),
+                if self.kit.dropped == 1 { "se dejó" } else { "se dejaron" }
+            ));
+        }
+        notes
+    }
+}
+
+fn guide_html(n: &Names, pics: &Pictures, paths: &Paths) -> String {
+    let (kit, info, labels) = (n.kit, n.info, &n.labels);
     let label = |i: usize| labels[i].clone();
     let swatch = |hex: &str| format!("<span class=\"sw sw--s\" style=\"background:{hex}\"></span>");
     let (lo, hi) = bounds(kit.pieces.iter().flat_map(|p| p.positions.iter()));
-    let mut slots: Vec<u8> = kit.pieces.iter().map(|p| p.slot).collect();
-    slots.sort_unstable();
-    slots.dedup();
+    let slots = n.slots();
 
-    let mut h = String::with_capacity(1 << 20);
+    let mut h = String::with_capacity(1 << 18);
     let _ = write!(
         h,
         "<!doctype html>\n<html lang=\"es\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
 <title>Guía de armado · {name}</title><style>{CSS}</style></head><body><main>\
 <h1>Guía de armado · {name}</h1>\
-<p class=\"lead\">El modelo dividido en piezas sólidas, una o varias por color. Imprime cada placa con su filamento y pega las piezas en el orden de los pasos.</p>\
-<div class=\"meta\"><span>{n} piezas</span><span>{c} colores</span><span>{p} placas</span><span>{x:.0} × {y:.0} × {z:.0} mm armado</span><span>Voxel {v:.2} mm</span></div>\
+<p class=\"lead\">El modelo dividido en piezas sólidas, una o varias por color. Imprime cada placa con su filamento y pega las piezas en el orden de los pasos. El <a href=\"resumen.html\">resumen</a> dice qué trae el kit y qué revisar.</p>\
+<div class=\"meta\"><span>{np}</span><span>{c}</span><span>{p}</span><span>{x:.0} × {y:.0} × {z:.0} mm armado</span><span>Uniones de {v:.2} mm</span></div>\
 <div class=\"pair\">{o1}{o2}</div>",
         name = escape(info.name),
-        n = kit.pieces.len(),
-        c = slots.len(),
-        p = kit.plates.len(),
+        np = count(kit.pieces.len(), "pieza", "piezas"),
+        c = count(slots.len(), "color", "colores"),
+        p = count(kit.plates.len(), "placa", "placas"),
         x = hi[0] - lo[0],
         y = hi[1] - lo[1],
         z = hi[2] - lo[2],
         v = kit.voxel_mm,
-        o1 = pics.overview[0].html("Modelo armado, vista frontal", &label),
-        o2 = pics.overview[1].html("Modelo armado, vista trasera", &label),
+        o1 = pics.overview[0].html(&paths.overview[0], "Modelo armado, vista frontal", &label),
+        o2 = pics.overview[1].html(&paths.overview[1], "Modelo armado, vista trasera", &label),
     );
+
+    let review = n.review();
+    if !review.is_empty() {
+        let _ = write!(
+            h,
+            "<div class=\"alert\"><b>{} que revisar antes de imprimir:</b> ",
+            count(review.len(), "pieza", "piezas")
+        );
+        let links: Vec<String> = review.iter().map(|(i, _)| format!("<a href=\"#{0}\">{0}</a>", labels[*i])).collect();
+        let _ = write!(h, "{}. Su ficha dice por qué.</div>", links.join(", "));
+    }
 
     let _ = write!(
         h,
         "<h2>Antes de empezar</h2><ol class=\"prep\">\
 <li>Abre <span class=\"mono\">{three_mf}</span> en Bambu Studio. Cada placa lleva un solo color: imprímela con el filamento que indica su nombre.</li>\
 <li>Las piezas ya están giradas sobre su cara más plana. Si Bambu avisa de voladizos, activa soportes en árbol solo sobre la placa.</li>\
-<li>Al despegar cada placa, separa las piezas por número usando la sección <b>Piezas</b>: cada una aparece con su forma y su color. Los STL de la carpeta <span class=\"mono\">stl/</span> llevan el mismo número.</li>\
+<li>Al despegar cada placa, separa las piezas por número usando la sección <b>Piezas</b>: cada una aparece con su forma y su color. Su STL, en <span class=\"mono\">stl/</span>, lleva el mismo número.</li>\
 <li>Prueba cada unión en seco antes de pegar. Lija un poco las caras de contacto para que el pegamento agarre.</li>\
 <li>Para PLA usa cianoacrilato en gel; para uniones grandes, epoxi de 5 minutos. Sujeta unos segundos y sigue con el siguiente paso.</li>\
-</ol>"
+</ol>",
+        three_mf = escape(&n.three_mf)
     );
 
     h.push_str("<h2>Filamentos</h2><div class=\"legend\">");
     for &s in &slots {
-        let hex = slot_hex(s);
-        let count = kit.pieces.iter().filter(|p| p.slot == s).count();
+        let hex = n.hex(s);
+        let count_of = kit.pieces.iter().filter(|p| p.slot == s).count();
         let plates: Vec<String> =
             kit.plates.iter().enumerate().filter(|(_, p)| p.slot == s).map(|(k, _)| (k + 1).to_string()).collect();
         let _ = write!(
             h,
             "<div class=\"chip\"><span class=\"sw\" style=\"background:{hex}\"></span><div><b>{name}</b> <span class=\"mono\">{hex}</span>\
-<small>Filamento {f} · {count} piezas · placa{pl} {list}</small></div></div>",
-            name = color_name(rgb(&hex)),
+<small>Ranura {f} · {pieces} · placa{pl} {list}</small></div></div>",
+            name = escape(&n.filament(s)),
             f = s + 1,
+            pieces = count(count_of, "pieza", "piezas"),
             pl = if plates.len() > 1 { "s" } else { "" },
             list = plates.join(", ")
         );
@@ -490,54 +661,58 @@ fn guide_html(
 
     h.push_str("<h2>Placas</h2><div class=\"plates\">");
     for (k, plate) in kit.plates.iter().enumerate() {
-        let hex = slot_hex(plate.slot);
+        let hex = n.hex(plate.slot);
         let _ = write!(
             h,
-            "<div class=\"plate\">{shot}<h3>Placa {n} · {sw}{name}</h3><small>{count} piezas: {list}</small></div>",
-            shot = pics.plates[k].html(&format!("Placa {}", k + 1), &label),
-            n = k + 1,
+            "<div class=\"plate\" id=\"placa-{n1}\">{shot}<h3>Placa {n1} · {sw}{name}</h3><small>{pieces}: {list}</small></div>",
+            shot = pics.plates[k].html(&paths.plates[k], &format!("Placa {}", k + 1), &label),
+            n1 = k + 1,
             sw = swatch(&hex),
-            name = color_name(rgb(&hex)),
-            count = plate.pieces.len(),
-            list = plate.pieces.iter().map(|&i| labels[i].as_str()).collect::<Vec<_>>().join(", ")
+            name = escape(&n.filament(plate.slot)),
+            pieces = count(plate.pieces.len(), "pieza", "piezas"),
+            list = plate.pieces.iter().map(|&i| format!("<a href=\"#{0}\">{0}</a>", labels[i])).collect::<Vec<_>>().join(", ")
         );
     }
     h.push_str("</div>");
 
     h.push_str("<h2>Piezas</h2><div class=\"grid\">");
     for (i, p) in kit.pieces.iter().enumerate() {
-        let (name, hex) = colour_of(i);
+        let hex = n.hex(p.slot);
         let s = kit.placed[i].size;
+        let warn: String =
+            n.issues[i].iter().map(|x| format!("<small class=\"warn\">{}</small>", escape(&issue_text(x)))).collect();
         let _ = write!(
             h,
-            "<div class=\"card\">{shot}<div><b>{label}</b> · {sw}{name}<small>{x:.0} × {y:.0} × {z:.0} mm · {vol:.1} cm³</small>\
-<small>Placa {plate} · <span class=\"mono\">{file}</span></small>{warn}</div></div>",
-            shot = pics.thumbs[i].html(&labels[i], &label),
+            "<div class=\"card{flag}\" id=\"{label}\">{shot}<div><b>{label}</b> · {sw}{name}<small>{x:.0} × {y:.0} × {z:.0} mm · {vol:.1} cm³</small>\
+<small><a href=\"#placa-{plate}\">Placa {plate}</a> · <a class=\"mono\" href=\"{file}\">{file}</a></small>{warn}</div></div>",
+            flag = if n.issues[i].is_empty() { "" } else { " card--warn" },
+            shot = pics.thumbs[i].html(&paths.thumbs[i], &labels[i], &label),
             label = labels[i],
             sw = swatch(&hex),
+            name = n.piece_colour(i),
             x = s[0],
             y = s[1],
             z = s[2],
             vol = p.volume_mm3 / 1000.0,
             plate = kit.placed[i].plate + 1,
-            file = escape(&files[i]),
-            warn = if kit.placed[i].fits { "" } else { "<small class=\"warn\">Más grande que la placa: escálala o córtala en Bambu Studio.</small>" }
+            file = escape(&n.files[i]),
         );
     }
     h.push_str("</div>");
 
     let _ = write!(h, "<h2>Armado</h2><p class=\"lead\">{} pasos. En cada imagen la pieza nueva aparece en su color con un contorno grueso; lo ya armado, en tonos suaves.</p>", kit.steps.len());
     for k in 0..kit.steps.len() {
-        let (title, body) = step_text(kit, k, labels, &|i| colour_of(i).0);
+        let (title, body) = step_text(n, k);
         let _ = write!(
             h,
-            "<section class=\"step\">{shot}<div><div class=\"n\">Paso {n} de {total}</div><h3>{title}</h3><p>{body}</p>{detail}</div></section>",
-            shot = pics.steps[k].html(&format!("Paso {}", k + 1), &label),
-            detail = pics.details[k]
-                .as_ref()
-                .map(|d| format!("<div class=\"detail\">{}<small>Detalle</small></div>", d.html(&format!("Detalle del paso {}", k + 1), &label)))
-                .unwrap_or_default(),
-            n = k + 1,
+            "<section class=\"step\">{shot}<div><div class=\"n\">Paso {n1} de {total}</div><h3>{title}</h3><p>{body}</p>{detail}</div></section>",
+            shot = pics.steps[k].html(&paths.steps[k], &format!("Paso {}", k + 1), &label),
+            detail = match (&pics.details[k], &paths.details[k]) {
+                (Some(d), Some(src)) =>
+                    format!("<div class=\"detail\">{}<small>Detalle</small></div>", d.html(src, &format!("Detalle del paso {}", k + 1), &label)),
+                _ => String::new(),
+            },
+            n1 = k + 1,
             total = kit.steps.len(),
         );
     }
@@ -546,10 +721,11 @@ fn guide_html(
 }
 
 /// Title and explanation of step `k`, shared by the HTML and the text guide.
-fn step_text(kit: &Kit, k: usize, labels: &[String], colour: &dyn Fn(usize) -> &'static str) -> (String, String) {
+fn step_text(n: &Names, k: usize) -> (String, String) {
+    let (kit, labels) = (n.kit, &n.labels);
     let step = &kit.steps[k];
     let p = step.piece;
-    let title = format!("{} · {}", labels[p], colour(p));
+    let title = format!("{} · {}", labels[p], n.piece_colour(p));
     let area = |j: usize| kit.pieces[p].contacts.iter().find(|c| c.0 == j).map_or(0.0, |c| c.1);
     let body = if k == 0 {
         format!("Empieza con {}: es la pieza más grande y sirve de base. Las demás se pegan sobre ella.", labels[p])
@@ -566,27 +742,21 @@ fn step_text(kit: &Kit, k: usize, labels: &[String], colour: &dyn Fn(usize) -> &
     (title, body)
 }
 
-fn guide_text(kit: &Kit, info: &KitInfo, labels: &[String], files: &[String], three_mf: &str) -> String {
-    let colour = |i: usize| {
-        let hex = info.palette.get(kit.pieces[i].slot as usize).cloned().unwrap_or_default();
-        color_name(rgb(&hex))
-    };
+fn guide_text(n: &Names) -> String {
+    let (kit, info, labels) = (n.kit, n.info, &n.labels);
     let mut t = format!(
-        "Guía de armado · {}\n\n{} piezas en {} placas. Abre {three_mf} en Bambu Studio e imprime cada placa con su filamento.\n\
-La guía con imágenes está en guia-de-armado.html.\n\nPLACAS\n",
+        "Guía de armado · {}\n\n{} piezas en {} placas. Abre {} en Bambu Studio e imprime cada placa con su filamento.\n\
+La guía con imágenes está en guia-de-armado.html y el resumen del kit en resumen.html.\n\nPLACAS\n",
         info.name,
         kit.pieces.len(),
-        kit.plates.len()
+        kit.plates.len(),
+        n.three_mf
     );
     for (k, plate) in kit.plates.iter().enumerate() {
-        let hex = info.palette.get(plate.slot as usize).cloned().unwrap_or_default();
         let _ = writeln!(
             t,
-            "  Placa {:>2}  filamento {} {} {:<14} {}",
-            k + 1,
-            plate.slot + 1,
-            hex,
-            color_name(rgb(&hex)),
+            "  {:<40} {}",
+            n.plate_name(k),
             plate.pieces.iter().map(|&i| labels[i].as_str()).collect::<Vec<_>>().join(" ")
         );
     }
@@ -595,56 +765,226 @@ La guía con imágenes está en guia-de-armado.html.\n\nPLACAS\n",
         let s = kit.placed[i].size;
         let _ = writeln!(
             t,
-            "  {}  {:<14} {:>5.0} × {:>4.0} × {:>4.0} mm  {:>7.1} cm³  placa {:>2}  {}{}",
+            "  {}  {:<14} {:>5.0} × {:>4.0} × {:>4.0} mm  {:>7.1} cm³  placa {:>2}  {}",
             labels[i],
-            colour(i),
+            n.piece_colour(i),
             s[0],
             s[1],
             s[2],
             p.volume_mm3 / 1000.0,
             kit.placed[i].plate + 1,
-            files[i],
-            if kit.placed[i].fits { "" } else { "  (más grande que la placa)" }
+            n.files[i],
         );
+        for issue in &n.issues[i] {
+            let _ = writeln!(t, "        ! {}", issue_text(issue));
+        }
     }
     t.push_str("\nARMADO\n");
     for k in 0..kit.steps.len() {
-        let (title, body) = step_text(kit, k, labels, &colour);
+        let (title, body) = step_text(n, k);
         let _ = writeln!(t, "  {:>3}. {title}\n       {body}", k + 1);
     }
     t
 }
 
-pub fn write_kit_zip<W: Write + Seek>(out: W, kit: &Kit, info: &KitInfo) -> zip::result::ZipResult<KitSummary> {
-    let digits = kit.pieces.len().to_string().len().max(2);
-    let labels: Vec<String> = (0..kit.pieces.len()).map(|i| format!("P{:0digits$}", i + 1)).collect();
-    let hex_of = |i: usize| info.palette.get(kit.pieces[i].slot as usize).cloned().unwrap_or_else(|| "#808080".into());
-    let colours: Vec<[u8; 3]> = (0..kit.pieces.len()).map(|i| rgb(&hex_of(i))).collect();
-    let files: Vec<String> = (0..kit.pieces.len())
-        .map(|i| {
-            let hex = hex_of(i);
-            format!("stl/{}_{}_{}.stl", labels[i], slug(color_name(rgb(&hex))), hex.trim_start_matches('#'))
+/// Per colour: pieces, plates, volume and weight.
+fn colour_rows(n: &Names) -> Vec<(u8, usize, usize, f32)> {
+    n.slots()
+        .into_iter()
+        .map(|s| {
+            let pieces: Vec<&bp_core::Piece> = n.kit.pieces.iter().filter(|p| p.slot == s).collect();
+            let plates = n.kit.plates.iter().filter(|p| p.slot == s).count();
+            (s, pieces.len(), plates, pieces.iter().map(|p| p.volume_mm3).sum())
         })
-        .collect();
-    let base = slug(info.name);
-    let base = if base.is_empty() { "modelo".to_string() } else { base };
-    let three_mf = format!("{base}_piezas.3mf");
+        .collect()
+}
+
+fn params_text(n: &Names) -> Vec<(String, String)> {
+    let p = &n.info.params;
+    let printer = &n.info.printer;
+    vec![
+        ("Impresora".into(), format!("{} · boquilla de {} mm", printer.profile.name, printer.nozzle_mm)),
+        ("Detalle de las uniones".into(), format!("{:.2} mm (pedido {:.2} mm)", n.kit.voxel_mm, p.voxel_mm)),
+        (
+            "Profundidad de cada color".into(),
+            if p.depth_mm > 0.0 {
+                let core = p.core_slot.map_or_else(|| "el más usado".to_string(), |s| format!("ranura {}", s + 1));
+                format!("{:.1} mm sobre un núcleo de {core}", p.depth_mm)
+            } else {
+                "hasta el centro: piezas macizas".into()
+            },
+        ),
+        ("Piezas mínimas".into(), format!("{:.0} mm³; las menores se unen a su vecina", p.min_piece_mm3)),
+        ("Densidad del filamento".into(), format!("{:.2} g/cm³", n.info.density_g_cm3)),
+    ]
+}
+
+fn summary_html(n: &Names) -> String {
+    let (kit, info, labels) = (n.kit, n.info, &n.labels);
+    let mut h = String::with_capacity(1 << 15);
+    let total: f32 = kit.pieces.iter().map(|p| p.volume_mm3).sum();
+    let _ = write!(
+        h,
+        "<!doctype html>\n<html lang=\"es\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>Resumen del kit · {name}</title><style>{CSS}</style></head><body><main>\
+<h1>Resumen del kit · {name}</h1>\
+<div class=\"meta\"><span>{np}</span><span>{nc}</span><span>{pl}</span><span>{g:.0} g de filamento</span></div>\
+<p class=\"lead\">Abre <a class=\"mono\" href=\"{three_mf}\">{three_mf}</a> en Bambu Studio e imprime cada placa con su filamento; luego sigue la <a href=\"guia-de-armado.html\">guía de armado</a>.</p>",
+        name = escape(info.name),
+        np = count(kit.pieces.len(), "pieza", "piezas"),
+        nc = count(n.slots().len(), "color", "colores"),
+        pl = count(kit.plates.len(), "placa", "placas"),
+        g = n.grams(total),
+        three_mf = escape(&n.three_mf),
+    );
+
+    let review = n.review();
+    let notes = n.notes();
+    h.push_str("<h2>Qué revisar</h2>");
+    if review.is_empty() && notes.is_empty() {
+        h.push_str("<p>Nada: todas las piezas están cerradas, caben en la placa y no son demasiado finas para la boquilla.</p>");
+    }
+    if !review.is_empty() {
+        h.push_str("<table><thead><tr><th>Pieza</th><th>Color</th><th>Motivo</th></tr></thead><tbody>");
+        for (i, issues) in &review {
+            let why: Vec<String> = issues.iter().map(|x| escape(&issue_text(x))).collect();
+            let _ = write!(
+                h,
+                "<tr><td><a class=\"mono\" href=\"guia-de-armado.html#{l}\">{l}</a></td><td>{c}</td><td>{w}</td></tr>",
+                l = labels[*i],
+                c = n.piece_colour(*i),
+                w = why.join("; ")
+            );
+        }
+        h.push_str("</tbody></table>");
+    }
+    for note in &notes {
+        let _ = write!(h, "<p class=\"warn\">{}</p>", escape(note));
+    }
+
+    h.push_str("<h2>Colores</h2><table><thead><tr><th>Ranura</th><th>Filamento</th><th>Piezas</th><th>Placas</th><th>Volumen</th><th>Peso</th></tr></thead><tbody>");
+    for (s, pieces, plates, mm3) in colour_rows(n) {
+        let hex = n.hex(s);
+        let _ = write!(
+            h,
+            "<tr><td>{f}</td><td><span class=\"sw sw--s\" style=\"background:{hex}\"></span>{name} <span class=\"mono\">{hex}</span></td><td>{pieces}</td><td>{plates}</td><td>{cm3:.1} cm³</td><td>{g:.0} g</td></tr>",
+            f = s + 1,
+            name = escape(&n.filament(s)),
+            cm3 = mm3 / 1000.0,
+            g = n.grams(mm3),
+        );
+    }
+    h.push_str("</tbody></table><p><small>Volumen y peso de las piezas, sin soportes, relleno ni purga.</small></p>");
+
+    h.push_str("<h2>Placas</h2><table><thead><tr><th>Placa</th><th>Piezas</th></tr></thead><tbody>");
+    for (k, plate) in kit.plates.iter().enumerate() {
+        let list: Vec<&str> = plate.pieces.iter().map(|&i| labels[i].as_str()).collect();
+        let _ = write!(
+            h,
+            "<tr><td><a href=\"guia-de-armado.html#placa-{}\">{}</a></td><td class=\"mono\">{}</td></tr>",
+            k + 1,
+            escape(&n.plate_name(k)),
+            list.join(" ")
+        );
+    }
+    h.push_str("</tbody></table>");
+
+    h.push_str("<h2>Cómo se cortó</h2><table><tbody>");
+    for (k, v) in params_text(n) {
+        let _ = write!(h, "<tr><th>{}</th><td>{}</td></tr>", escape(&k), escape(&v));
+    }
+    h.push_str("</tbody></table>");
+
+    let _ = write!(
+        h,
+        "<h2>Contenido</h2><ul class=\"files\">\
+<li><a href=\"guia-de-armado.html\">guia-de-armado.html</a>: imágenes de cada pieza, placa y paso.</li>\
+<li><a href=\"guia-de-armado.txt\">guia-de-armado.txt</a>: los mismos pasos en texto.</li>\
+<li><a class=\"mono\" href=\"{t}\">{t}</a>: todas las piezas en sus placas, con su filamento.</li>\
+<li><span class=\"mono\">stl/</span>: un STL por pieza, en una carpeta por color, con el nombre de la pieza.</li>\
+<li><span class=\"mono\">img/</span>: las imágenes de la guía.</li></ul></main></body></html>",
+        t = escape(&n.three_mf)
+    );
+    h.push('\n');
+    h
+}
+
+fn readme_text(n: &Names) -> String {
+    let (kit, info, labels) = (n.kit, n.info, &n.labels);
+    let total: f32 = kit.pieces.iter().map(|p| p.volume_mm3).sum();
+    let mut t = format!(
+        "Kit por colores · {}\n\n{}, {}, {}, {:.0} g de filamento.\n\n\
+1. Abre {} en Bambu Studio e imprime cada placa con su filamento.\n\
+2. Separa las piezas por número y arma el modelo con guia-de-armado.html (o guia-de-armado.txt).\n\
+   resumen.html tiene todo esto con enlaces.\n\n",
+        info.name,
+        count(kit.pieces.len(), "pieza", "piezas"),
+        count(n.slots().len(), "color", "colores"),
+        count(kit.plates.len(), "placa", "placas"),
+        n.grams(total),
+        n.three_mf
+    );
+    let review = n.review();
+    let notes = n.notes();
+    t.push_str("QUÉ REVISAR\n");
+    if review.is_empty() && notes.is_empty() {
+        t.push_str("  Nada: todas las piezas están cerradas, caben en la placa y no son demasiado finas.\n");
+    }
+    for (i, issues) in &review {
+        let why: Vec<String> = issues.iter().map(issue_text).collect();
+        let _ = writeln!(t, "  {} ({}): {}", labels[*i], n.piece_colour(*i), why.join("; "));
+    }
+    for note in &notes {
+        let _ = writeln!(t, "  {note}");
+    }
+    t.push_str("\nCOLORES\n");
+    for (s, pieces, plates, mm3) in colour_rows(n) {
+        let _ = writeln!(
+            t,
+            "  Ranura {:>2}  {} {:<30} {:>10}  {:>8}  {:>7.1} cm³  {:>5.0} g",
+            s + 1,
+            n.hex(s),
+            n.filament(s),
+            count(pieces, "pieza", "piezas"),
+            count(plates, "placa", "placas"),
+            mm3 / 1000.0,
+            n.grams(mm3)
+        );
+    }
+    t.push_str("\nCÓMO SE CORTÓ\n");
+    for (k, v) in params_text(n) {
+        let _ = writeln!(t, "  {k}: {v}");
+    }
+    t.push_str(
+        "\nCONTENIDO\n  resumen.html          este resumen, con enlaces\n  guia-de-armado.html   imágenes de cada pieza, placa y paso\n  guia-de-armado.txt    los mismos pasos en texto\n",
+    );
+    let _ = writeln!(t, "  {:<21} todas las piezas en sus placas", n.three_mf);
+    t.push_str("  stl/                  un STL por pieza, en una carpeta por color\n  img/                  las imágenes de la guía\n");
+    t
+}
+
+pub fn write_kit_zip<W: Write + Seek>(out: W, kit: &Kit, info: &KitInfo) -> zip::result::ZipResult<KitSummary> {
+    let n = Names::new(kit, info);
+    let colours: Vec<[u8; 3]> = kit.pieces.iter().map(|p| rgb(&n.hex(p.slot))).collect();
+    let pics = pictures(kit, &colours)?;
+    let paths = Paths::new(kit, &pics, &n.labels);
 
     let mut z = zip::ZipWriter::new(out);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-    let plate_names: Vec<String> = kit
-        .plates
-        .iter()
-        .enumerate()
-        .map(|(k, p)| {
-            let hex = info.palette.get(p.slot as usize).cloned().unwrap_or_default();
-            format!("{} · {} {}", k + 1, color_name(rgb(&hex)), hex)
-        })
-        .collect();
+    z.start_file("LEEME.txt", opts)?;
+    z.write_all(readme_text(&n).as_bytes())?;
+    z.start_file("resumen.html", opts)?;
+    z.write_all(summary_html(&n).as_bytes())?;
+    z.start_file("guia-de-armado.html", opts)?;
+    z.write_all(guide_html(&n, &pics, &paths).as_bytes())?;
+    z.start_file("guia-de-armado.txt", opts)?;
+    z.write_all(guide_text(&n).as_bytes())?;
+
     let objects: Vec<PlateObject> = (0..kit.pieces.len())
         .map(|i| PlateObject {
-            name: &labels[i],
+            name: &n.labels[i],
             positions: &kit.placed[i].positions,
             tris: &kit.pieces[i].tris,
             filament: kit.pieces[i].slot as usize + 1,
@@ -652,11 +992,10 @@ pub fn write_kit_zip<W: Write + Seek>(out: W, kit: &Kit, info: &KitInfo) -> zip:
             at: kit.placed[i].at,
         })
         .collect();
-    let pics = pictures(kit, &colours)?;
     let project = PlateProject {
         name: info.name,
         objects,
-        plates: plate_names,
+        plates: (0..kit.plates.len()).map(|k| n.plate_name(k)).collect(),
         filaments: info.palette.to_vec(),
         slots: info.slots.to_vec(),
         printer: info.printer.clone(),
@@ -664,25 +1003,28 @@ pub fn write_kit_zip<W: Write + Seek>(out: W, kit: &Kit, info: &KitInfo) -> zip:
     };
     let mut buf = std::io::Cursor::new(Vec::new());
     write_plates(&mut buf, &project)?;
-    z.start_file(&three_mf, SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored))?;
+    z.start_file(&n.three_mf, stored)?;
     z.write_all(&buf.into_inner())?;
 
-    for (i, file) in files.iter().enumerate() {
+    for (i, file) in n.files.iter().enumerate() {
         let mut stl = Vec::new();
-        write_stl(&mut stl, &labels[i], &kit.placed[i].positions, &kit.pieces[i].tris)?;
+        write_stl(&mut stl, &n.labels[i], &kit.placed[i].positions, &kit.pieces[i].tris)?;
         z.start_file(file, opts)?;
         z.write_all(&stl)?;
     }
-
-    z.start_file("guia-de-armado.html", opts)?;
-    z.write_all(guide_html(kit, info, &pics, &labels, &files, &three_mf).as_bytes())?;
-    z.start_file("instrucciones.txt", opts)?;
-    z.write_all(guide_text(kit, info, &labels, &files, &three_mf).as_bytes())?;
+    // PNG is compressed already.
+    for (path, png) in paths.files(&pics) {
+        z.start_file(path, stored)?;
+        z.write_all(png)?;
+    }
     z.finish()?;
     Ok(KitSummary {
         pieces: kit.pieces.len(),
         plates: kit.plates.len(),
         oversize: kit.placed.iter().filter(|p| !p.fits).count(),
+        review: n.review().len(),
+        merged: kit.merged,
+        dropped: kit.dropped,
     })
 }
 
@@ -720,35 +1062,102 @@ mod tests {
         assert_eq!(color_name([0xD0, 0x20, 0x20]), "Rojo");
         assert_eq!(color_name([0x20, 0x50, 0xD0]), "Azul");
         assert_eq!(slug("Marrón oscuro"), "marron-oscuro");
-        assert_eq!(base64(b"Man"), "TWFu");
-        assert_eq!(base64(b"Ma"), "TWE=");
+    }
+
+    /// Every `href` and `src` of a page that points inside the ZIP.
+    fn links(html: &str) -> Vec<String> {
+        let mut out = vec![];
+        for key in ["href=\"", "src=\""] {
+            let mut rest = html;
+            while let Some(i) = rest.find(key) {
+                rest = &rest[i + key.len()..];
+                let end = rest.find('"').unwrap();
+                let link = rest[..end].split('#').next().unwrap();
+                if !link.is_empty() && !link.contains(':') {
+                    out.push(link.to_string());
+                }
+                rest = &rest[end..];
+            }
+        }
+        out
+    }
+
+    fn read(zip: &mut zip::ZipArchive<Cursor<Vec<u8>>>, name: &str) -> Vec<u8> {
+        let mut out = vec![];
+        zip.by_name(name).unwrap_or_else(|_| panic!("{name} is missing")).read_to_end(&mut out).unwrap();
+        out
     }
 
     #[test]
     fn zip_holds_plates_stls_and_guide() {
         let (pa, ta) = cuboid([0.0; 3], [20.0, 20.0, 10.0]);
         let (pb, tb) = cuboid([0.0, 0.0, 10.0], [20.0, 20.0, 14.0]);
+        // A sliver: thinner than two lines of a 0.4 mm nozzle.
+        let (pc, tc) = cuboid([20.0, 0.0, 0.0], [20.5, 20.0, 14.0]);
         let pieces = vec![
-            Piece { slot: 0, positions: pa, tris: ta, volume_mm3: 4000.0, contacts: vec![(1, 400.0)] },
+            Piece { slot: 0, positions: pa, tris: ta, volume_mm3: 4000.0, contacts: vec![(1, 400.0), (2, 280.0)] },
             Piece { slot: 1, positions: pb, tris: tb, volume_mm3: 1600.0, contacts: vec![(0, 400.0)] },
+            Piece { slot: 1, positions: pc, tris: tc, volume_mm3: 140.0, contacts: vec![(0, 280.0)] },
         ];
-        let kit = bp_core::kit::kit(Split { pieces, voxel_mm: 0.5 }, (256.0, 256.0));
+        let kit = bp_core::kit::kit(Split { pieces, voxel_mm: 0.5, merged: 3, dropped: 1 }, (256.0, 256.0));
         let palette = vec!["#202020".to_string(), "#F5F4F0".to_string()];
-        let info = KitInfo { name: "Araña", palette: &palette, slots: &[], printer: &Printer::default() };
+        let names = vec![None, Some("Bambu Lab PLA Basic Blanco".to_string())];
+        let info = KitInfo {
+            name: "Araña",
+            palette: &palette,
+            slots: &[],
+            filament_names: &names,
+            printer: &Printer::default(),
+            params: KitSettings { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 30.0 },
+            density_g_cm3: 1.24,
+        };
         let mut buf = Cursor::new(Vec::new());
         let summary = write_kit_zip(&mut buf, &kit, &info).unwrap();
-        assert_eq!(summary, KitSummary { pieces: 2, plates: 2, oversize: 0 });
+        assert_eq!(summary, KitSummary { pieces: 3, plates: 2, oversize: 0, review: 1, merged: 3, dropped: 1 });
         let mut zip = zip::ZipArchive::new(Cursor::new(buf.into_inner())).unwrap();
         let names: Vec<String> = zip.file_names().map(String::from).collect();
-        assert!(names.contains(&"arana_piezas.3mf".to_string()), "{names:?}");
-        assert!(names.contains(&"stl/P01_negro_202020.stl".to_string()), "{names:?}");
-        assert!(names.contains(&"stl/P02_blanco_F5F4F0.stl".to_string()));
-        let mut html = String::new();
-        zip.by_name("guia-de-armado.html").unwrap().read_to_string(&mut html).unwrap();
-        assert!(html.contains("Paso 2 de 2") && html.contains("Pega P02 a P01"));
-        assert!(html.matches("data:image/png;base64,").count() >= 2 + 2 + 2 + 2);
-        let mut txt = String::new();
-        zip.by_name("instrucciones.txt").unwrap().read_to_string(&mut txt).unwrap();
-        assert!(txt.contains("Placa  2"));
+        for f in ["LEEME.txt", "resumen.html", "guia-de-armado.html", "guia-de-armado.txt", "3mf/arana_placas.3mf"] {
+            assert!(names.contains(&f.to_string()), "{f} missing: {names:?}");
+        }
+        assert!(names.contains(&"stl/1-negro/P01.stl".to_string()), "{names:?}");
+        assert!(names.contains(&"stl/2-blanco/P02.stl".to_string()), "{names:?}");
+
+        // Every page finds everything it points at, offline.
+        for page in ["guia-de-armado.html", "resumen.html"] {
+            let html = String::from_utf8(read(&mut zip, page)).unwrap();
+            for link in links(&html) {
+                assert!(names.contains(&link), "{page} points at {link}, which is not in the ZIP");
+            }
+        }
+
+        // A piece has the same name in its STL, the 3MF and the guide.
+        let mut three_mf = zip::ZipArchive::new(Cursor::new(read(&mut zip, "3mf/arana_placas.3mf"))).unwrap();
+        let mut cfg = String::new();
+        three_mf.by_name("Metadata/model_settings.config").unwrap().read_to_string(&mut cfg).unwrap();
+        let guide = String::from_utf8(read(&mut zip, "guia-de-armado.html")).unwrap();
+        for (i, label) in ["P01", "P02", "P03"].iter().enumerate() {
+            let stl_name = names.iter().find(|n| n.ends_with(&format!("/{label}.stl"))).unwrap().clone();
+            let stl = read(&mut zip, &stl_name);
+            assert!(stl.starts_with(label.as_bytes()), "STL header of {label}");
+            assert!(cfg.contains(&format!("<metadata key=\"name\" value=\"{label}\"/>")), "3MF object {label}");
+            assert!(guide.contains(&format!("id=\"{label}\"")), "guide card {label}");
+            assert!(guide.contains(&stl_name), "guide links {stl_name} ({i})");
+        }
+        assert!(cfg.contains("Placa 2 · Bambu Lab PLA Basic Blanco #F5F4F0"), "{cfg}");
+
+        // The sliver is reported, with why, and so is what the split merged and dropped.
+        let summary_html = String::from_utf8(read(&mut zip, "resumen.html")).unwrap();
+        assert!(summary_html.contains("guia-de-armado.html#P03") && summary_html.contains("menos de dos líneas"));
+        assert!(
+            summary_html.contains("3 migas")
+                && summary_html.contains("1 zona demasiado fina para formar una pieza se dejó")
+        );
+        let readme = String::from_utf8(read(&mut zip, "LEEME.txt")).unwrap();
+        assert!(readme.contains("P03 (Blanco)") && readme.contains("3 piezas, 2 colores, 2 placas"), "{readme}");
+        // 5,74 cm³ of PLA weigh about 7 g.
+        assert!(readme.contains(" 7 g de filamento"), "{readme}");
+        assert!(guide.contains("Paso 2 de 3") && guide.contains("Pega P02 a P01"));
+        let txt = String::from_utf8(read(&mut zip, "guia-de-armado.txt")).unwrap();
+        assert!(txt.contains("Placa 2") && txt.contains("! su lado más fino mide 0.5 mm"), "{txt}");
     }
 }

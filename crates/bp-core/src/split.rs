@@ -50,6 +50,10 @@ pub struct Split {
     pub pieces: Vec<Piece>,
     /// The voxel size actually used.
     pub voxel_mm: f32,
+    /// Crumbs smaller than the least piece that went to a neighbour.
+    pub merged: usize,
+    /// Regions too thin to give a surface, left out.
+    pub dropped: usize,
 }
 
 /// Positions and triangles of one mesh.
@@ -229,8 +233,10 @@ fn components(grid: &Grid, lab: &[u8]) -> (Vec<u32>, Vec<u32>, Vec<u8>) {
 
 /// Gives every region smaller than `min_voxels` the label it touches most.
 /// Regions that touch nothing (loose bits of the model) keep theirs.
-fn merge_crumbs(grid: &Grid, lab: &mut [u8], min_voxels: u32) {
+/// Returns how many regions it gave away.
+fn merge_crumbs(grid: &Grid, lab: &mut [u8], min_voxels: u32) -> usize {
     let off = grid.offsets(&N6);
+    let mut merged = 0;
     for _ in 0..6 {
         let (comp, sizes, _) = components(grid, lab);
         let small: Vec<bool> = sizes.iter().map(|&s| s < min_voxels).collect();
@@ -255,8 +261,9 @@ fn merge_crumbs(grid: &Grid, lab: &mut [u8], min_voxels: u32) {
             }
         }
         if best.is_empty() {
-            return;
+            return merged;
         }
+        merged += best.len();
         for v in 0..lab.len() {
             if comp[v] != NONE {
                 if let Some(&(l, _)) = best.get(&comp[v]) {
@@ -265,6 +272,7 @@ fn merge_crumbs(grid: &Grid, lab: &mut [u8], min_voxels: u32) {
             }
         }
     }
+    merged
 }
 
 /// What decided each voxel's colour, to place the surface between two
@@ -486,7 +494,7 @@ fn simplify_once(positions: &[Vec3], tris: &[[u32; 3]], error: f32) -> Option<(V
 /// colour at a point of it.
 pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: SplitParams) -> Split {
     if soup.is_empty() {
-        return Split { pieces: vec![], voxel_mm: params.voxel_mm };
+        return Split { pieces: vec![], voxel_mm: params.voxel_mm, merged: 0, dropped: 0 };
     }
     let bvh = Bvh::build(soup);
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -570,7 +578,7 @@ pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: Spl
     drop(inside);
 
     let min_voxels = (params.min_piece_mm3 / (h * h * h)).ceil().max(1.0) as u32;
-    merge_crumbs(&grid, &mut lab, min_voxels);
+    let merged = merge_crumbs(&grid, &mut lab, min_voxels);
     let (comp, sizes, labels) = components(&grid, &lab);
 
     // Contact area between regions, and each region's boundary voxels.
@@ -605,6 +613,7 @@ pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: Spl
 
     // Order by colour, then largest first, and renumber the contacts.
     let mut order: Vec<usize> = (0..sizes.len()).filter(|&c| !meshes[c].1.is_empty()).collect();
+    let dropped = sizes.len() - order.len();
     order.sort_by_key(|&c| (labels[c], std::cmp::Reverse(sizes[c])));
     let mut new_id = vec![usize::MAX; sizes.len()];
     for (k, &c) in order.iter().enumerate() {
@@ -633,7 +642,7 @@ pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: Spl
     for p in &mut pieces {
         p.contacts.sort_by(|x, y| y.1.total_cmp(&x.1));
     }
-    Split { pieces, voxel_mm: h }
+    Split { pieces, voxel_mm: h, merged, dropped }
 }
 
 #[cfg(test)]

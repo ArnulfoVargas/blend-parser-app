@@ -40,6 +40,60 @@ pub struct Kit {
     pub steps: Vec<Step>,
     pub bed: (f32, f32),
     pub voxel_mm: f32,
+    /// Crumbs that went to a neighbour, and regions too thin to make a piece.
+    pub merged: usize,
+    pub dropped: usize,
+}
+
+/// Why a piece needs a look before printing it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Issue {
+    /// Its surface does not close: the slicer may fill it wrongly.
+    Open,
+    /// Triangles with no area, by count.
+    Degenerate(usize),
+    /// Larger than the plate in any orientation tried.
+    Oversize,
+    /// Its thinnest side, in millimetres, under two lines of the nozzle.
+    Thin(f32),
+    /// Its largest side, in millimetres, under ten nozzle widths: hard to print and to handle.
+    Tiny(f32),
+}
+
+/// What every piece of `kit` needs looked at, printed with a `nozzle_mm` nozzle.
+pub fn check(kit: &Kit, nozzle_mm: f32) -> Vec<Vec<Issue>> {
+    let line = nozzle_mm * 1.125;
+    kit.pieces
+        .iter()
+        .zip(&kit.placed)
+        .map(|(p, pl)| {
+            let mut issues = vec![];
+            if !crate::split::watertight(&p.tris) {
+                issues.push(Issue::Open);
+            }
+            let flat = p
+                .tris
+                .iter()
+                .filter(|t| {
+                    geom::area(&[p.positions[t[0] as usize], p.positions[t[1] as usize], p.positions[t[2] as usize]])
+                        < 1e-6
+                })
+                .count();
+            if flat > 0 {
+                issues.push(Issue::Degenerate(flat));
+            }
+            if !pl.fits {
+                issues.push(Issue::Oversize);
+            }
+            let (least, most) = pl.size.iter().fold((f32::MAX, 0.0f32), |(a, b), &s| (a.min(s), b.max(s)));
+            if most < 10.0 * nozzle_mm {
+                issues.push(Issue::Tiny(most));
+            } else if least < 2.0 * line {
+                issues.push(Issue::Thin(least));
+            }
+            issues
+        })
+        .collect()
 }
 
 const MARGIN: f32 = 8.0;
@@ -51,7 +105,16 @@ pub fn kit(split: Split, bed: (f32, f32)) -> Kit {
     let mut placed: Vec<Placed> = split.pieces.iter().map(orient).collect();
     let plates = pack(&split.pieces, &mut placed, bed);
     let steps = assembly(&split.pieces);
-    Kit { pieces: split.pieces, placed, plates, steps, bed, voxel_mm: split.voxel_mm }
+    Kit {
+        pieces: split.pieces,
+        placed,
+        plates,
+        steps,
+        bed,
+        voxel_mm: split.voxel_mm,
+        merged: split.merged,
+        dropped: split.dropped,
+    }
 }
 
 pub fn apply(m: &Mat3, p: Vec3) -> Vec3 {
@@ -254,6 +317,35 @@ fn assembly(pieces: &[Piece]) -> Vec<Step> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_names_what_to_look_at() {
+        use crate::split::tests::cuboid;
+        let piece = |lo, hi| {
+            let (positions, tris) = cuboid(lo, hi);
+            Piece { slot: 0, positions, tris, volume_mm3: 1.0, contacts: vec![] }
+        };
+        let mut open = piece([0.0; 3], [20.0; 3]);
+        open.tris.pop();
+        let mut flat = piece([0.0; 3], [20.0; 3]);
+        flat.tris.push([0, 0, 1]);
+        let pieces = vec![
+            piece([0.0; 3], [20.0; 3]),
+            piece([0.0; 3], [0.6, 20.0, 20.0]),
+            piece([0.0; 3], [3.0; 3]),
+            open,
+            flat,
+            piece([0.0; 3], [300.0, 300.0, 5.0]),
+        ];
+        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, (256.0, 256.0));
+        let issues = check(&k, 0.4);
+        assert!(issues[0].is_empty(), "{:?}", issues[0]);
+        assert!(matches!(issues[1].as_slice(), [Issue::Thin(t)] if (*t - 0.6).abs() < 1e-3), "{:?}", issues[1]);
+        assert!(matches!(issues[2].as_slice(), [Issue::Tiny(_)]), "{:?}", issues[2]);
+        assert!(issues[3].contains(&Issue::Open));
+        assert!(issues[4].contains(&Issue::Degenerate(1)) && issues[4].contains(&Issue::Open), "{:?}", issues[4]);
+        assert!(issues[5].contains(&Issue::Oversize));
+    }
     use crate::split::tests::cuboid;
 
     fn piece(slot: u8, lo: Vec3, hi: Vec3, contacts: Vec<(usize, f32)>) -> Piece {
@@ -275,7 +367,7 @@ mod tests {
     #[test]
     fn plates_hold_one_colour_and_stay_on_the_bed() {
         let pieces: Vec<Piece> = (0..12).map(|i| piece((i % 2) as u8, [0.0; 3], [40.0, 30.0, 5.0], vec![])).collect();
-        let k = kit(Split { pieces, voxel_mm: 0.5 }, (120.0, 120.0));
+        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, (120.0, 120.0));
         assert!(k.plates.len() >= 2);
         for plate in &k.plates {
             assert!(plate.pieces.iter().all(|&i| k.pieces[i].slot == plate.slot));

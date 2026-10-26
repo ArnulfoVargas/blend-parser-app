@@ -480,8 +480,15 @@ mod tests {
             let t = std::time::Instant::now();
             let kit = bp_core::kit::kit(split, bp_3mf::Printer::default().bed_mm());
             let palette: Vec<String> = project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
-            let info =
-                bp_3mf::KitInfo { name: "spider", palette: &palette, slots: &[], printer: &bp_3mf::Printer::default() };
+            let info = bp_3mf::KitInfo {
+                name: "spider",
+                palette: &palette,
+                slots: &[],
+                filament_names: &[],
+                printer: &bp_3mf::Printer::default(),
+                params: bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot: None, min_piece_mm3: 20.0 },
+                density_g_cm3: 1.24,
+            };
             let zip = std::env::temp_dir().join(format!("blendparser-piezas-{depth_mm}.zip"));
             let summary = bp_3mf::write_kit_zip(std::fs::File::create(&zip).unwrap(), &kit, &info).unwrap();
             eprintln!(

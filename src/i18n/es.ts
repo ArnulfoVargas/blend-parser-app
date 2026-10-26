@@ -455,6 +455,8 @@ export const es = {
   "export.piecesSaved": { one: "{count} pieza guardada en {path}", other: "{count} piezas guardadas en {path}" },
 
   "zip.saved": { one: "{n} pieza en {plates} placas, con guía de armado, guardada en {path}.", other: "{n} piezas en {plates} placas, con guía de armado, guardadas en {path}." },
+  "zip.review": { one: "{n} pieza necesita revisión: mira resumen.html.", other: "{n} piezas necesitan revisión: mira resumen.html." },
+  "zip.dropped": { one: "{n} zona demasiado fina quedó fuera.", other: "{n} zonas demasiado finas quedaron fuera." },
   "zip.oversize": { one: "{n} no cabe en la placa; revisa la guía.", other: "{n} no caben en la placa; revisa la guía." },
   "zip.help": "Divide el modelo en piezas sólidas, una o varias por color, que encajan entre sí. El .zip trae un 3MF con las piezas acomodadas en placas de un solo color, un STL por pieza y una guía de armado con imágenes.",
   "zip.detail": "Detalle de las uniones",
