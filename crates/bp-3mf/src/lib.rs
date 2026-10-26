@@ -18,6 +18,8 @@ pub struct Part<'a> {
     pub tris: &'a [[u32; 3]],
     /// Encoded `paint_color` per triangle.
     pub paint: &'a [String],
+    /// The printed object it belongs to; parts of one object are printed joined.
+    pub object: u32,
 }
 
 pub struct Model<'a> {
@@ -29,6 +31,8 @@ pub struct Model<'a> {
     pub flush: Flush,
     /// Layer height the user set; `None` keeps the process preset's.
     pub layer_mm: Option<f32>,
+    /// Where the model's centre sits from the plate's centre, in millimetres.
+    pub offset_mm: [f32; 2],
 }
 
 /// How the slicer flushes between filaments, so it matches the waste estimate.
@@ -94,53 +98,129 @@ fn objects_xml(model: &Model) -> String {
     x
 }
 
-fn main_xml(model: &Model, object_id: usize) -> String {
+/// The parts of each printed object, in object order; each is its own item on the plate.
+fn objects(model: &Model) -> Vec<Vec<usize>> {
+    let mut ids: Vec<u32> = model.parts.iter().map(|p| p.object).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.iter().map(|&o| (0..model.parts.len()).filter(|&i| model.parts[i].object == o).collect()).collect()
+}
+
+/// The id of the `k`-th object: after the parts' own mesh objects.
+fn object_id(model: &Model, k: usize) -> usize {
+    model.parts.len() + 1 + k
+}
+
+/// The first object takes the model's name; pieces cut off it, their first part's.
+fn object_name(model: &Model, k: usize, parts: &[usize]) -> String {
+    if k == 0 {
+        model.name.to_string()
+    } else {
+        parts.first().map_or_else(|| model.name.to_string(), |&i| model.parts[i].name.to_string())
+    }
+}
+
+fn main_xml(model: &Model) -> String {
     let (cx, cy) = model.printer.plate_centre();
-    let mut comps = String::new();
-    for i in 0..model.parts.len() {
+    let (cx, cy) = (cx + model.offset_mm[0], cy + model.offset_mm[1]);
+    let (mut resources, mut items) = (String::new(), String::new());
+    for (k, parts) in objects(model).iter().enumerate() {
+        let id = object_id(model, k);
+        let mut comps = String::new();
+        for &i in parts {
+            let _ = writeln!(
+                comps,
+                "    <component p:path=\"/3D/Objects/object_1.model\" objectid=\"{}\" p:UUID=\"0001{i:04x}-b206-40ff-9872-83e8017abed1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>",
+                i + 1
+            );
+        }
+        let _ = write!(
+            resources,
+            "  <object id=\"{id}\" p:UUID=\"{:08x}-61cb-4c03-9d28-80fed5dfa1dc\" type=\"model\">
+   <components>
+{comps}   </components>
+  </object>
+",
+            k + 1
+        );
+        // Every piece is placed by its own vertices: they all share the plate's centre.
         let _ = writeln!(
-            comps,
-            "    <component p:path=\"/3D/Objects/object_1.model\" objectid=\"{}\" p:UUID=\"0001{i:04x}-b206-40ff-9872-83e8017abed1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>",
-            i + 1
+            items,
+            "  <item objectid=\"{id}\" p:UUID=\"{:08x}-b1ec-4553-aec9-835e5b724bb4\" transform=\"1 0 0 0 1 0 0 0 1 {cx} {cy} 0\" printable=\"1\"/>",
+            k + 2
         );
     }
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" {NS}>\n \
-<metadata name=\"Application\">BambuStudio-02.03.01.00</metadata>\n \
-<metadata name=\"BambuStudio:3mfVersion\">2</metadata>\n \
-<metadata name=\"BambuStudio:MmPaintingVersion\">1</metadata>\n \
-<metadata name=\"Title\">{title}</metadata>\n <resources>\n  \
-<object id=\"{object_id}\" p:UUID=\"00000001-61cb-4c03-9d28-80fed5dfa1dc\" type=\"model\">\n   <components>\n{comps}   </components>\n  </object>\n \
-</resources>\n <build p:UUID=\"2c7c17d8-22b5-4d84-8835-1976022ea369\">\n  \
-<item objectid=\"{object_id}\" p:UUID=\"00000002-b1ec-4553-aec9-835e5b724bb4\" transform=\"1 0 0 0 1 0 0 0 1 {cx} {cy} 0\" printable=\"1\"/>\n \
-</build>\n</model>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<model unit=\"millimeter\" xml:lang=\"en-US\" {NS}>
+ <metadata name=\"Application\">BambuStudio-02.03.01.00</metadata>
+ <metadata name=\"BambuStudio:3mfVersion\">2</metadata>
+ <metadata name=\"BambuStudio:MmPaintingVersion\">1</metadata>
+ <metadata name=\"Title\">{title}</metadata>
+ <resources>
+{resources} </resources>
+ <build p:UUID=\"2c7c17d8-22b5-4d84-8835-1976022ea369\">
+{items} </build>
+</model>
+",
         title = escape(model.name)
     )
 }
 
-fn settings_xml(model: &Model, object_id: usize) -> String {
-    let total: usize = model.parts.iter().map(|p| p.tris.len()).sum();
-    let mut parts = String::new();
-    for (i, p) in model.parts.iter().enumerate() {
+fn settings_xml(model: &Model) -> String {
+    let (mut objects_cfg, mut instances) = (String::new(), String::new());
+    for (k, ids) in objects(model).iter().enumerate() {
+        let id = object_id(model, k);
+        let total: usize = ids.iter().map(|&i| model.parts[i].tris.len()).sum();
+        let mut parts = String::new();
+        for &i in ids {
+            let p = &model.parts[i];
+            let _ = write!(
+                parts,
+                "    <part id=\"{}\" subtype=\"normal_part\">
+      <metadata key=\"name\" value=\"{}\"/>
+      <metadata key=\"matrix\" value=\"1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\"/>
+      <mesh_stat face_count=\"{}\" edges_fixed=\"0\" degenerate_facets=\"0\" facets_removed=\"0\" facets_reversed=\"0\" backwards_edges=\"0\"/>
+    </part>
+",
+                i + 1,
+                escape(p.name),
+                p.tris.len()
+            );
+        }
         let _ = write!(
-            parts,
-            "    <part id=\"{}\" subtype=\"normal_part\">\n      <metadata key=\"name\" value=\"{}\"/>\n      \
-<metadata key=\"matrix\" value=\"1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\"/>\n      \
-<mesh_stat face_count=\"{}\" edges_fixed=\"0\" degenerate_facets=\"0\" facets_removed=\"0\" facets_reversed=\"0\" backwards_edges=\"0\"/>\n    </part>\n",
-            i + 1,
-            escape(p.name),
-            p.tris.len()
+            objects_cfg,
+            "  <object id=\"{id}\">
+    <metadata key=\"name\" value=\"{name}\"/>
+    <metadata key=\"extruder\" value=\"1\"/>
+    <metadata face_count=\"{total}\"/>
+{parts}  </object>
+",
+            name = escape(&object_name(model, k, ids))
+        );
+        let _ = write!(
+            instances,
+            "    <model_instance>
+      <metadata key=\"object_id\" value=\"{id}\"/>
+      <metadata key=\"instance_id\" value=\"0\"/>
+      <metadata key=\"identify_id\" value=\"{}\"/>
+    </model_instance>
+",
+            k + 1
         );
     }
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n  <object id=\"{object_id}\">\n    \
-<metadata key=\"name\" value=\"{name}\"/>\n    <metadata key=\"extruder\" value=\"1\"/>\n    \
-<metadata face_count=\"{total}\"/>\n{parts}  </object>\n  <plate>\n    \
-<metadata key=\"plater_id\" value=\"1\"/>\n    <metadata key=\"plater_name\" value=\"\"/>\n    \
-<metadata key=\"locked\" value=\"false\"/>\n    <model_instance>\n      \
-<metadata key=\"object_id\" value=\"{object_id}\"/>\n      <metadata key=\"instance_id\" value=\"0\"/>\n      \
-<metadata key=\"identify_id\" value=\"1\"/>\n    </model_instance>\n  </plate>\n  <assemble>\n  </assemble>\n</config>\n",
-        name = escape(model.name)
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<config>
+{objects_cfg}  <plate>
+    <metadata key=\"plater_id\" value=\"1\"/>
+    <metadata key=\"plater_name\" value=\"\"/>
+    <metadata key=\"locked\" value=\"false\"/>
+{instances}  </plate>
+  <assemble>
+  </assemble>
+</config>
+"
     )
 }
 
@@ -228,16 +308,15 @@ fn rels(target: &str) -> String {
 }
 
 pub fn write<W: Write + Seek>(out: W, model: &Model) -> zip::result::ZipResult<()> {
-    let object_id = model.parts.len() + 1;
     let mut z = zip::ZipWriter::new(out);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let files: [(&str, String); 7] = [
         ("[Content_Types].xml", CONTENT_TYPES.to_string()),
         ("_rels/.rels", rels("/3D/3dmodel.model")),
-        ("3D/3dmodel.model", main_xml(model, object_id)),
+        ("3D/3dmodel.model", main_xml(model)),
         ("3D/_rels/3dmodel.model.rels", rels("/3D/Objects/object_1.model")),
         ("3D/Objects/object_1.model", objects_xml(model)),
-        ("Metadata/model_settings.config", settings_xml(model, object_id)),
+        ("Metadata/model_settings.config", settings_xml(model)),
         ("Metadata/project_settings.config", project_json(model)),
     ];
     for (name, body) in files {
@@ -260,7 +339,7 @@ mod tests {
         let paint = vec!["4".to_string(), "8".into(), "0C".into(), "40C0C0C30C0C0C30C0C0C3".into()];
         let model = Model {
             name: "test & co",
-            parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint }],
+            parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint, object: 0 }],
             filaments: vec!["#4d2720".into(), "#222222".into(), "#E8A461".into()],
             printer: Printer::default(),
             flush: Flush {
@@ -269,6 +348,7 @@ mod tests {
                 ..Default::default()
             },
             layer_mm: Some(0.16),
+            offset_mm: [0.0; 2],
         };
         let mut buf = Cursor::new(Vec::new());
         write(&mut buf, &model).unwrap();
@@ -296,6 +376,32 @@ mod tests {
         assert!(v.get("printable_area").is_none());
     }
 
+    #[test]
+    fn a_piece_cut_off_is_an_object_of_its_own() {
+        let positions = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
+        let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
+        let paint = vec!["4".to_string(); 4];
+        let part = |name, object| Part { name, positions: &positions, tris: &tris, paint: &paint, object };
+        let model = Model {
+            name: "m",
+            parts: vec![part("a", 0), part("b (2)", 1), part("c", 0)],
+            filaments: vec!["#FFFFFF".into()],
+            printer: Printer::default(),
+            flush: Flush::default(),
+            layer_mm: None,
+            offset_mm: [0.0; 2],
+        };
+        let main = main_xml(&model);
+        assert_eq!(main.matches("<item ").count(), 2);
+        assert!(main.contains("objectid=\"4\"") && main.contains("objectid=\"5\""));
+        let cfg = settings_xml(&model);
+        assert_eq!(cfg.matches("<model_instance>").count(), 2);
+        assert!(cfg.contains("value=\"b (2)\""));
+        // The model's object keeps both of its parts.
+        let first = &cfg[..cfg.find("<object id=\"5\"").unwrap()];
+        assert_eq!(first.matches("<part ").count(), 2);
+    }
+
     fn config(printer: Printer) -> serde_json::Value {
         let model = Model {
             name: "t",
@@ -304,6 +410,7 @@ mod tests {
             printer,
             flush: Flush::default(),
             layer_mm: None,
+            offset_mm: [0.0; 2],
         };
         serde_json::from_str(&project_json(&model)).unwrap()
     }

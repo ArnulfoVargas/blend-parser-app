@@ -107,6 +107,14 @@ pub struct PlateDto {
     /// Tower footprint, brim included, and whether its depth is the estimate.
     pub tower_mm: [f32; 2],
     pub tower_estimated: bool,
+    /// Where the model's centre sits from the plate's centre.
+    pub offset_mm: [f32; 2],
+    /// The model is turned from the file's orientation.
+    pub rotated: bool,
+    /// The last cut can be undone.
+    pub can_undo_cut: bool,
+    /// Printed objects: the model and the pieces cut off it that were kept.
+    pub objects: usize,
 }
 
 #[derive(Serialize)]
@@ -117,6 +125,13 @@ pub struct SettingsDto {
     pub flatten_mm: f32,
     pub repair: bool,
     pub min_piece_mm: f32,
+    pub orient: bool,
+    pub fill_holes: bool,
+    pub split_vertices: bool,
+    pub deep_clean: bool,
+    pub drop_floating: bool,
+    /// Rows of the rotation applied to the model as loaded.
+    pub rotation: bp_core::Mat3,
     pub border_detail: u8,
     pub min_island_mm2: f32,
     pub printer: String,
@@ -129,6 +144,7 @@ pub struct SettingsDto {
 pub struct Summary {
     pub file_name: String,
     pub file_size: u64,
+    pub import_warnings: Vec<bp_blend::ImportWarning>,
     pub parts: Vec<PartDto>,
     pub materials: Vec<MaterialDto>,
     pub slots: Vec<SlotDto>,
@@ -155,6 +171,26 @@ pub struct Summary {
     pub undo_label: Option<String>,
     /// Triangles painted by hand; a new colour detection discards them.
     pub painted_triangles: usize,
+}
+
+/// A turn: the new summary and, when the preview could follow as it is,
+/// `p' = matrix · p + shift` for its positions.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnDto {
+    pub summary: Summary,
+    pub rigid: Option<RigidDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RigidDto {
+    pub matrix: [[f32; 3]; 3],
+    pub shift: [f32; 3],
+}
+
+pub fn turn(doc: &Document, prefs: &Prefs, rigid: Option<bp_core::project::RigidMove>) -> TurnDto {
+    TurnDto { summary: summary(doc, prefs), rigid: rigid.map(|m| RigidDto { matrix: m.matrix, shift: m.shift }) }
 }
 
 #[derive(Serialize)]
@@ -259,7 +295,7 @@ pub fn waste_and_plate(
         tower_gap_mm: prefs.plate.tower_gap_mm,
         margin_mm: prefs.plate.margin_mm,
     };
-    let check = bp_3mf::plate::check(&doc.printer, [size[0], size[1]], &reserve);
+    let check = bp_3mf::plate::check_at(&doc.printer, [size[0], size[1]], doc.offset_mm, &reserve);
     let plate = PlateDto {
         fits: check.fits(),
         check,
@@ -267,6 +303,10 @@ pub fn waste_and_plate(
         needs_tower,
         tower_mm,
         tower_estimated: prefs.plate.tower_depth_mm.is_none(),
+        offset_mm: doc.offset_mm,
+        rotated: doc.project.is_rotated(),
+        can_undo_cut: doc.project.can_undo_cut(),
+        objects: doc.project.object_count(),
     };
     (waste, plate)
 }
@@ -274,7 +314,17 @@ pub fn waste_and_plate(
 pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     let p: &Project = &doc.project;
     let stats = p.stats();
-    let MeshOps { keep_ratio, flatten_mm, repair, min_piece_mm } = p.mesh_ops();
+    let MeshOps {
+        keep_ratio,
+        flatten_mm,
+        repair,
+        min_piece_mm,
+        orient,
+        fill_holes,
+        split_vertices,
+        drop_floating,
+        deep_clean,
+    } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
     let min_detail = doc.printer.min_detail_mm2();
@@ -283,6 +333,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     Summary {
         file_name: doc.file_name.clone(),
         file_size: doc.file_size,
+        import_warnings: doc.import_warnings.clone(),
         parts: p.scene().parts.iter().map(|x| PartDto { name: x.name.clone(), triangles: x.tris.len() }).collect(),
         materials: p
             .scene()
@@ -331,6 +382,12 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             flatten_mm,
             repair,
             min_piece_mm,
+            orient,
+            fill_holes,
+            split_vertices,
+            deep_clean,
+            drop_floating,
+            rotation: p.rotation(),
             border_detail,
             min_island_mm2,
             printer: doc.printer.profile.id.clone(),

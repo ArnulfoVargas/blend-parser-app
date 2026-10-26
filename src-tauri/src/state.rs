@@ -15,11 +15,14 @@ pub struct Document {
     pub project: Project,
     pub file_name: String,
     pub file_size: u64,
+    pub import_warnings: Vec<bp_blend::ImportWarning>,
     /// A copy of the store's pick, kept in step by the printer commands.
     pub printer: Printer,
     /// Flush volumes the user typed for a swap, by `#RRGGBB` of the old and the
     /// new colour, so they follow the colours when slots move.
     pub flush: HashMap<(String, String), f32>,
+    /// Where the model's centre sits from the plate's centre, in millimetres.
+    pub offset_mm: [f32; 2],
 }
 
 #[derive(Default)]

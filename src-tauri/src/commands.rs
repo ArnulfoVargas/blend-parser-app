@@ -9,7 +9,7 @@ use serde_json::json;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::dto::{self, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary};
+use crate::dto::{self, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary, TurnDto};
 use crate::error::{in_range, AppError, CmdResult};
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::profiles::Store;
@@ -80,10 +80,26 @@ pub fn blender_status(app: AppHandle) -> Option<String> {
     blender_path(&app).ok().map(|p| p.display().to_string())
 }
 
-/// A `.blend` passed on the command line ("Open with…"), if any.
+/// Files the model references and whether each is at hand, with `extras` the
+/// files and folders the user added. Reads the model only; Blender is not started.
+#[tauri::command]
+pub async fn inspect_model(
+    path: String,
+    extras: Vec<String>,
+    library: Option<String>,
+) -> CmdResult<Vec<bp_blend::companions::Companion>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let extras: Vec<PathBuf> = extras.into_iter().map(PathBuf::from).collect();
+        Ok(bp_blend::companions::inspect_with(Path::new(&path), &extras, library.as_deref().map(Path::new)))
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// A supported model passed on the command line ("Open with…"), if any.
 #[tauri::command]
 pub fn initial_file() -> Option<String> {
-    std::env::args().skip(1).find(|a| a.to_lowercase().ends_with(".blend"))
+    std::env::args().skip(1).find(|a| bp_blend::supports(Path::new(a)))
 }
 
 #[tauri::command]
@@ -97,7 +113,14 @@ pub fn set_blender_path(app: AppHandle, path: String) -> CmdResult<String> {
 }
 
 #[tauri::command]
-pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
+pub async fn open_blend(
+    app: AppHandle,
+    path: String,
+    extras: Option<Vec<String>>,
+    textures: Option<Vec<(String, String)>>,
+    library: Option<String>,
+    blend: Option<String>,
+) -> CmdResult<Summary> {
     let blender = blender_path(&app)?;
     let printer = with_store(&app, |s| Ok(s.printer()))?;
     let handle = app.clone();
@@ -110,9 +133,15 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
             let _ = handle.emit("progress", ProgressDto { key: key.to_string(), name: name.to_string() });
         };
         emit("blender");
-        let scene = bp_blend::extract(&blender, file, &mut |m| emit(m))?;
+        let additions = bp_blend::Additions {
+            files: extras.unwrap_or_default().into_iter().map(PathBuf::from).collect(),
+            textures: textures.unwrap_or_default().into_iter().map(|(m, p)| (m, PathBuf::from(p))).collect(),
+            library: library.map(PathBuf::from),
+            blend: blend.map(PathBuf::from),
+        };
+        let imported = bp_blend::extract_with_files(&blender, file, &additions, &mut |m| emit(m))?;
         emit("palette");
-        let mut project = bp_core::Project::new(scene, 4);
+        let mut project = bp_core::Project::new(imported.scene, 4);
         let state = handle.state::<AppState>();
         let prefs = state.prefs.lock()?;
         project.set_print_ops(print_ops(&printer, &prefs));
@@ -120,8 +149,10 @@ pub async fn open_blend(app: AppHandle, path: String) -> CmdResult<Summary> {
             project,
             file_name: file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path.clone()),
             file_size: size,
+            import_warnings: imported.warnings,
             printer,
             flush: Default::default(),
+            offset_mm: [0.0; 2],
         };
         let summary = dto::summary(&doc, &prefs);
         *state.doc.lock()? = Some(doc);
@@ -188,10 +219,13 @@ pub async fn reset_size(app: AppHandle) -> CmdResult<Summary> {
 }
 
 /// The largest uniform size that fits the plate, its margin and the tower's
-/// reserved space, and that the printer reaches in height.
+/// reserved space, and that the printer reaches in height. The model goes back
+/// to the plate's centre first: that is where it has the most room to grow.
 #[tauri::command]
 pub async fn fit_to_plate(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {
+        let moved = d.offset_mm;
+        d.offset_mm = [0.0; 2];
         let s = dto::summary(d, prefs);
         let flat = s.size.target_mm[2] - s.size_mm[2];
         let by_height = (d.printer.max_height_mm() + flat) / s.size.target_mm[2];
@@ -199,9 +233,65 @@ pub async fn fit_to_plate(app: AppHandle) -> CmdResult<Summary> {
         // A hair under the limit, so the footprint does not touch the edge it was fitted to.
         let size = s.size.target_mm.map(|v| (v * k * 0.999 * 100.0).floor() / 100.0);
         if k.is_nan() || k <= 0.0 || size.iter().any(|v| !SIZE_RANGE.contains(v)) {
+            d.offset_mm = moved;
             return Err(AppError::new("error.noRoom"));
         }
         d.project.set_size_mm(size);
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Moves the model's centre to `mm` from the plate's centre.
+#[tauri::command]
+pub async fn set_offset(app: AppHandle, mm: [f32; 2]) -> CmdResult<Summary> {
+    let mm = mm.map(|v| if v.is_finite() { v.clamp(-1000.0, 1000.0) } else { 0.0 });
+    with_doc(app, move |d, prefs| {
+        d.offset_mm = mm;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Turns the model `degrees` about X (0), Y (1) or Z (2); it lands back on the
+/// plate. When the turn moved the preview as it is, says how, so the UI moves
+/// it instead of fetching it again.
+#[tauri::command]
+pub async fn rotate(app: AppHandle, axis: usize, degrees: f32) -> CmdResult<TurnDto> {
+    with_doc(app, move |d, prefs| {
+        let rigid = d.project.rotate(axis, degrees);
+        Ok(dto::turn(d, prefs, rigid))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn reset_rotation(app: AppHandle) -> CmdResult<TurnDto> {
+    with_doc(app, |d, prefs| {
+        let rigid = d.project.reset_rotation();
+        Ok(dto::turn(d, prefs, rigid))
+    })
+    .await
+}
+
+/// Cuts the model `t` of the way along `axis` (0 to 1 over the preview) and
+/// keeps the low or the high side; with `keep_other`, the other side too, as an
+/// object of its own beside it.
+#[tauri::command]
+pub async fn cut_model(app: AppHandle, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        if !d.project.cut(axis, t, keep_low, keep_other) {
+            return Err(AppError::new("error.cutMisses"));
+        }
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, |d, prefs| {
+        d.project.undo_cut();
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -233,13 +323,15 @@ pub async fn set_mesh_ops(
     repair: bool,
     min_piece_mm: f32,
 ) -> CmdResult<Summary> {
-    let ops = MeshOps {
-        keep_ratio: keep_ratio.clamp(0.05, 1.0),
-        flatten_mm: flatten_mm.max(0.0),
-        repair,
-        min_piece_mm: min_piece_mm.max(0.0),
-    };
     with_doc(app, move |d, prefs| {
+        // The settings panel has no say over the printability fixes; keep them.
+        let ops = MeshOps {
+            keep_ratio: keep_ratio.clamp(0.05, 1.0),
+            flatten_mm: flatten_mm.max(0.0),
+            repair,
+            min_piece_mm: min_piece_mm.max(0.0),
+            ..d.project.mesh_ops()
+        };
         d.project.set_mesh_ops(ops);
         Ok(dto::summary(d, prefs))
     })
@@ -465,7 +557,13 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
             name: &name,
             parts: parts
                 .iter()
-                .map(|p| bp_3mf::Part { name: &p.name, positions: &p.positions, tris: &p.tris, paint: &p.paint })
+                .map(|p| bp_3mf::Part {
+                    name: &p.name,
+                    positions: &p.positions,
+                    tris: &p.tris,
+                    paint: &p.paint,
+                    object: p.object,
+                })
                 .collect(),
             filaments,
             printer: d.printer.clone(),
@@ -476,10 +574,106 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
                 prime_mm3: prefs.waste.prime_mm3,
             },
             layer_mm: prefs.waste.layer_mm,
+            offset_mm: d.offset_mm,
         };
         let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
         bp_3mf::write(std::io::BufWriter::new(file), &model)
             .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
+    })
+    .await
+}
+
+fn printability_for_doc(
+    d: &Document,
+    prefs: &Prefs,
+    params: bp_core::printability::Params,
+) -> bp_core::printability::Report {
+    let project = &d.project;
+    let mut report = project.printability(params);
+    report.printer = Some(d.printer.profile.id.clone());
+    let stats = project.stats();
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
+    let fits = plate.fits && stats.size_mm[2] <= d.printer.max_height_mm();
+    report.checks.push(bp_core::printability::Check::new(
+        "buildVolume",
+        "checked",
+        usize::from(!fits),
+        "error",
+        // Footprint, margin, tower and height all decide this; one number would mislead.
+        None,
+        None,
+        vec![],
+    ));
+    report
+}
+
+/// Runs only on request; large reports never slow down every painting summary.
+#[tauri::command]
+pub async fn analyze_printability(
+    app: AppHandle,
+    params: bp_core::printability::Params,
+) -> CmdResult<bp_core::printability::Report> {
+    if !params.valid() {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, prefs| Ok(printability_for_doc(d, prefs, params))).await
+}
+
+/// The mesh operations a printability fix (or its revert) changes; the rest stay.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeshFix {
+    repair: Option<bool>,
+    orient: Option<bool>,
+    fill_holes: Option<bool>,
+    split_vertices: Option<bool>,
+    deep_clean: Option<bool>,
+    drop_floating: Option<bool>,
+    min_piece_mm: Option<f32>,
+    flatten_mm: Option<f32>,
+}
+
+/// One undoable step, so Ctrl+Z restores geometry, colours and hand painting.
+#[tauri::command]
+pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        let now = d.project.mesh_ops();
+        d.project.fix_mesh(MeshOps {
+            repair: fix.repair.unwrap_or(now.repair),
+            orient: fix.orient.unwrap_or(now.orient),
+            fill_holes: fix.fill_holes.unwrap_or(now.fill_holes),
+            split_vertices: fix.split_vertices.unwrap_or(now.split_vertices),
+            deep_clean: fix.deep_clean.unwrap_or(now.deep_clean),
+            drop_floating: fix.drop_floating.unwrap_or(now.drop_floating),
+            min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
+            flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),
+            ..now
+        });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Turns the model to the orientation with the least overhang; one undoable step.
+#[tauri::command]
+pub async fn orient_for_print(app: AppHandle, overhang_deg: f32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        let r = d.project.best_rotation(overhang_deg.clamp(0.0, 90.0));
+        d.project.set_rotation(r);
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Sets the model's rotation from load (rows of a 3×3 matrix); reverts a turn.
+#[tauri::command]
+pub async fn set_rotation(app: AppHandle, rotation: bp_core::Mat3) -> CmdResult<Summary> {
+    if rotation.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, prefs| {
+        d.project.set_rotation(rotation);
+        Ok(dto::summary(d, prefs))
     })
     .await
 }

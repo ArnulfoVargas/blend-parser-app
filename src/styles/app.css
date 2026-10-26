@@ -227,6 +227,11 @@ details.group > summary:focus-visible { outline: 2px solid var(--color-focus); o
 .group__sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); color: var(--color-muted); }
 details.group[open] .group__sum { visibility: hidden; }
 .group__body { display: flex; flex-direction: column; gap: var(--space-sm); padding-block: var(--space-sm) var(--space-xs); }
+/* Se pliega en vez de desaparecer de golpe: altura, hueco y opacidad a la vez */
+.reveal { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 260ms var(--ease-out), margin-top 260ms var(--ease-out), opacity 200ms ease, visibility 0s; }
+.reveal > * { min-height: 0; overflow: hidden; }
+.reveal.is-gone { grid-template-rows: 0fr; margin-top: calc(-1 * var(--space-sm)); opacity: 0; visibility: hidden; transition-delay: 0s, 0s, 0s, 260ms; }
+@media (prefers-reduced-motion: reduce) { .reveal { transition: none; } }
 
 .banner { position: absolute; z-index: 3; top: var(--space-md); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: var(--space-md); max-width: calc(100% - 2 * var(--space-md)); padding: var(--space-xs) var(--space-xs) var(--space-xs) var(--space-md); border-radius: var(--radius-input); background: var(--color-warn-soft); color: var(--color-warn-ink); box-shadow: 0 0 0 1px var(--color-warn), var(--shadow-card); font-size: var(--text-sm); font-weight: 500; }
 .banner p { white-space: nowrap; }
@@ -464,7 +469,26 @@ details.group[open] .group__sum { visibility: hidden; }
 .toolbar__expand { color: var(--color-muted); }
 .toolbar__expand .toolbar__icon { transition: transform var(--dur-short) var(--ease-out); }
 .toolbar[data-expanded="true"] .toolbar__expand .toolbar__icon { transform: rotate(180deg); }
-.app[data-tool="measure"] .brush, .app[data-tool="size"] .brush { display: none; }
+.app[data-tool="measure"] .brush, .app[data-tool="size"] .brush, .app[data-tool="move"] .brush, .app[data-tool="rotate"] .brush, .app[data-tool="section"] .brush { display: none; }
+/* The cut stays on with other tools: its button says so, as the plate's does. */
+.toolbar__btn[data-on="true"]:not([aria-pressed="true"]) { background: var(--color-accent-soft); color: var(--color-ink); }
+.toolbar__icon .cut { fill: color-mix(in oklab, currentColor 22%, transparent); }
+
+/* What moving, turning and the cut need, under the view */
+.place { display: none; flex: none; align-items: center; gap: var(--space-xs); font-size: var(--text-sm); color: var(--color-ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.app[data-tool="move"] .place[data-for="move"], .app[data-tool="rotate"] .place[data-for="rotate"], .app[data-tool="section"] .place[data-for="section"] { display: flex; }
+.place .range { width: 120px; }
+/* The cut's controls come in groups, set apart by a rule; they wrap a whole group at a time. */
+.place[data-for="section"] { flex: 1 1 auto; flex-wrap: wrap; row-gap: var(--space-xs); column-gap: 0; }
+.place__group { display: flex; flex: none; align-items: center; gap: var(--space-xs); padding: 0 var(--space-sm); }
+.place__group:first-child { padding-left: 0; }
+.place__group + .place__group { border-left: 1px solid var(--color-rule); }
+.place .check { min-height: 36px; }
+.app[data-tool="section"] .stage__foot { flex-wrap: wrap; row-gap: var(--space-xs); }
+.app[data-tool="section"] .stage__hint { flex-basis: 100%; text-align: left; }
+.seg--sm button { min-height: 30px; padding: 0 var(--space-sm); }
+#cut-flip[aria-pressed="true"] { background: var(--color-accent-soft); color: var(--color-ink); }
+@media (max-width: 75rem) { .place .range { width: 100px; } }
 
 /* Etiquetas sobre la vista: la medida y las medidas editables */
 .overlay { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }
@@ -506,3 +530,15 @@ details.group[open] .group__sum { visibility: hidden; }
 .size-chip.is-x .size-chip__axis, .tape-label.is-x { background: var(--axis-x); color: var(--glint); }
 .size-chip.is-y .size-chip__axis, .tape-label.is-y { background: var(--axis-y); color: var(--glint); }
 .size-chip.is-z .size-chip__axis, .tape-label.is-z { background: var(--axis-z); color: var(--glint); }
+
+/* Avisos de importación: a warning note, one group per kind of loss. */
+.import-warnings { display: flex; flex-direction: column; gap: var(--space-sm); padding: var(--space-sm); border-radius: var(--radius-input); background: var(--color-warn-soft); color: var(--color-warn-ink); box-shadow: inset 0 0 0 1px var(--color-warn); font-size: var(--text-sm); line-height: 1.4; }
+.import-warnings[hidden] { display: none; }
+.import-warnings__head { display: flex; align-items: center; gap: var(--space-xs); font-weight: 500; }
+.import-warnings__head::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--color-warn); box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-warn) 35%, transparent); }
+.import-warnings__group { display: flex; flex-direction: column; gap: var(--space-2xs); padding-top: var(--space-xs); border-top: 1px dashed color-mix(in oklab, var(--color-warn) 70%, transparent); }
+.import-warnings__group strong { font-weight: 500; }
+.import-warnings ul { display: flex; flex-wrap: wrap; gap: var(--space-2xs); margin: 0; padding: 0; list-style: none; }
+.import-warnings li { max-width: 100%; padding: 0 var(--space-xs); border-radius: 6px; background: color-mix(in oklab, var(--glint) 70%, transparent); font: var(--text-xs)/1.8 var(--font-outlier); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default; }
+.import-warnings li.import-warnings__more { background: none; font-family: var(--font-body); }
+.import-warnings .help { font-size: var(--text-xs); color: inherit; opacity: 0.85; }
