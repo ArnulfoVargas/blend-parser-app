@@ -26,7 +26,9 @@ use crate::separate;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Closure {
     /// The patch pushed inward `thickness` along the surface normals, joined to it by walls.
-    Shell { thickness: f32 },
+    /// The rest keeps a pocket of that size; the piece is `clearance` smaller than the pocket
+    /// round its border and under it, so the two fit together after printing.
+    Shell { thickness: f32, clearance: f32 },
     /// Each border loop closed with a fan to its centre, moved `depth` into the part
     /// along the region's mean normal (negative bulges it outwards).
     Cap { depth: f32 },
@@ -46,6 +48,10 @@ pub enum RegionError {
     ThinWall { count: usize },
     /// The shell's inner surface turns over at `count` faces: the surface curves tighter than the thickness.
     Folded { count: usize },
+    /// The clearance is not less than the thickness, or pulling the border in by it folds `count` faces.
+    Clearance { count: usize },
+    /// The pieces would take more room than the part had: they overlap somewhere.
+    Overlap,
 }
 
 /// A result part and, for each of its triangles, the triangle of the input it
@@ -167,7 +173,10 @@ pub fn split(part: &Part, selected: &[bool], closure: Closure) -> Result<Split, 
     let mut closing: Vec<[u32; 3]> = vec![];
 
     match closure {
-        Closure::Shell { thickness } => {
+        Closure::Shell { thickness, clearance } => {
+            if clearance < 0.0 || clearance >= thickness {
+                return Err(RegionError::Clearance { count: 0 });
+            }
             // Vertex normals over the whole part, so the inner surface is the same from both sides.
             let mut normal = vec![[0.0f32; 3]; positions.len()];
             for t in &tris {
@@ -206,21 +215,67 @@ pub fn split(part: &Part, selected: &[bool], closure: Closure) -> Result<Split, 
             if thin > 0 {
                 return Err(RegionError::ThinWall { count: thin });
             }
+            // With a clearance the piece has vertices of its own: its border pulled
+            // in along the surface and its inner face that much short of the pocket's.
+            let mut own: HashMap<u32, u32> = HashMap::new();
+            let mut own_inner: HashMap<u32, u32> = HashMap::new();
+            if clearance > 0.0 {
+                let mut inward: HashMap<u32, Vec<Vec3>> = HashMap::new();
+                for &(a, b, ..) in border.iter().flatten() {
+                    let n = geom::normalize(geom::add(normal[a as usize], normal[b as usize]));
+                    let left = geom::normalize(geom::cross(n, geom::sub(positions[b as usize], positions[a as usize])));
+                    inward.entry(a).or_default().push(left);
+                    inward.entry(b).or_default().push(left);
+                }
+                for (&v, dirs) in &inward {
+                    let d = geom::normalize(dirs.iter().fold([0.0; 3], |s, &x| geom::add(s, x)));
+                    // A corner's two edges both move back by the clearance.
+                    let reach = clearance / dirs.iter().map(|&x| geom::dot(d, x)).fold(1.0f32, f32::min).max(0.3);
+                    own.insert(v, positions.len() as u32);
+                    positions.push(geom::add(positions[v as usize], geom::scale(d, reach)));
+                }
+                for v in inner.keys().copied().collect::<Vec<_>>() {
+                    let from = own.get(&v).copied().unwrap_or(v);
+                    let down = geom::scale(normal[v as usize], -(thickness - clearance));
+                    own_inner.insert(v, positions.len() as u32);
+                    positions.push(geom::add(positions[from as usize], down));
+                }
+            }
+            let outer_of = |v: u32| own.get(&v).copied().unwrap_or(v);
+            let inner_of = |v: u32| own_inner.get(&v).copied().unwrap_or(inner[&v]);
+            let mut pulled = 0;
+            for list in &mut pieces {
+                for ((t, ..), _) in list.iter_mut() {
+                    let moved = t.map(outer_of);
+                    if moved != *t
+                        && geom::dot(face_normal(corners(moved, &positions)), face_normal(corners(*t, &positions)))
+                            <= 0.0
+                    {
+                        pulled += 1;
+                    }
+                    *t = moved;
+                }
+            }
+            if pulled > 0 {
+                return Err(RegionError::Clearance { count: pulled });
+            }
             let mut folded = 0;
             for (ti, t) in tris.iter().enumerate() {
                 if !is_selected(ti) {
                     continue;
                 }
                 let i = t.map(|v| inner[&v]);
+                let pi = t.map(inner_of);
                 let outer = face_normal(corners(*t, &positions));
-                if geom::dot(face_normal(corners(i, &positions)), outer) <= 0.0 {
-                    folded += 1;
+                for f in [i, pi] {
+                    if geom::dot(face_normal(corners(f, &positions)), outer) <= 0.0 {
+                        folded += 1;
+                    }
                 }
-                let tri = (i, part.tri_loops[ti], source(ti));
+                let l = part.tri_loops[ti];
                 // The region's inner face looks into the pocket; the rest's looks out of it.
-                let reversed = ([i[2], i[1], i[0]], [tri.1[2], tri.1[1], tri.1[0]], tri.2);
-                pieces[region[ti]].push((reversed, Some(ti as u32)));
-                rest.push((tri, Some(ti as u32)));
+                pieces[region[ti]].push((([pi[2], pi[1], pi[0]], [l[2], l[1], l[0]], source(ti)), Some(ti as u32)));
+                rest.push(((i, l, source(ti)), Some(ti as u32)));
                 closing.push(i);
             }
             if folded > 0 {
@@ -228,11 +283,14 @@ pub fn split(part: &Part, selected: &[bool], closure: Closure) -> Result<Split, 
             }
             for (r, edges) in border.iter().enumerate() {
                 for &(a, b, ti, k) in edges {
-                    let (ia, ib) = (inner[&a], inner[&b]);
                     let (la, lb) = (corner(ti, k), corner(ti, (k + 1) % 3));
                     let src = source(ti);
-                    for (t, l) in [([b, a, ia], [lb, la, la]), ([b, ia, ib], [lb, la, lb])] {
+                    let walls =
+                        |a: u32, b: u32, ia: u32, ib: u32| [([b, a, ia], [lb, la, la]), ([b, ia, ib], [lb, la, lb])];
+                    for (t, l) in walls(outer_of(a), outer_of(b), inner_of(a), inner_of(b)) {
                         pieces[r].push(((t, l, src), None));
+                    }
+                    for (t, l) in walls(a, b, inner[&a], inner[&b]) {
                         let back = [t[2], t[1], t[0]];
                         rest.push(((back, [l[2], l[1], l[0]], src), None));
                         closing.push(back);
@@ -313,14 +371,16 @@ pub fn split(part: &Part, selected: &[bool], closure: Closure) -> Result<Split, 
 
     let build = |tris: Vec<(Tri, Option<u32>)>| piece(part, &positions, tris);
     let mut regions: Vec<(Piece, Vec3)> = pieces.into_iter().map(build).zip(directions).collect();
+    let rest = build(rest);
+    // Closed pieces that fit together never add up to more than the part.
+    let whole = volume(part);
+    let taken: f32 = regions.iter().map(|(p, _)| p.volume).sum::<f32>() + rest.volume;
+    if regions.iter().all(|(p, _)| p.closed) && rest.closed && taken > whole + whole.abs() * 1e-4 + 1e-6 {
+        return Err(RegionError::Overlap);
+    }
     regions.sort_by_key(|(p, _)| std::cmp::Reverse(p.part.tris.len()));
     let (regions, directions) = regions.into_iter().unzip();
-    Ok(Split {
-        rest: build(rest),
-        regions,
-        closure: closing.into_iter().map(|t| corners(t, &positions)).collect(),
-        directions,
-    })
+    Ok(Split { rest, regions, closure: closing.into_iter().map(|t| corners(t, &positions)).collect(), directions })
 }
 
 /// The triangles as a part of their own: only the vertices they use, the input's materials and corners.
@@ -457,7 +517,7 @@ pub(crate) mod tests {
     fn a_shell_comes_off_and_leaves_a_pocket_it_fits() {
         let part = grid_box([0.0; 3], [10.0; 3], 5);
         let selected = top_patch(&part, 10.0, 2.0, 8.0);
-        let s = split(&part, &selected, Closure::Shell { thickness: 1.0 }).unwrap();
+        let s = split(&part, &selected, Closure::Shell { thickness: 1.0, clearance: 0.0 }).unwrap();
         assert_eq!(s.regions.len(), 1);
         let shell = &s.regions[0];
         assert!(shell.closed && s.rest.closed);
@@ -468,6 +528,31 @@ pub(crate) mod tests {
         // The outer faces still know their triangle, the inner ones the face they came from.
         assert_eq!(shell.origins.iter().filter(|o| o.is_some()).count(), 2 * selected.iter().filter(|&&s| s).count());
         assert!(!s.closure.is_empty());
+    }
+
+    #[test]
+    fn a_clearance_makes_the_shell_smaller_than_its_pocket() {
+        let part = grid_box([0.0; 3], [10.0; 3], 5);
+        let selected = top_patch(&part, 10.0, 2.0, 8.0);
+        let s = split(&part, &selected, Closure::Shell { thickness: 1.0, clearance: 0.5 }).unwrap();
+        let shell = &s.regions[0];
+        assert!(shell.closed && s.rest.closed);
+        // The pocket is still 6 × 6 × 1; the shell is 0.5 short of it all round and under it.
+        assert!((s.rest.volume - (1000.0 - 36.0)).abs() < 1e-2, "{}", s.rest.volume);
+        assert!((shell.volume - 5.0 * 5.0 * 0.5).abs() < 1e-2, "{}", shell.volume);
+        let (lo, hi) = shell.part.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
+            (std::array::from_fn(|i| lo[i].min(v[i])), std::array::from_fn(|i| hi[i].max(v[i])))
+        });
+        assert!(
+            (lo[0] - 2.5).abs() < 1e-4 && (hi[0] - 7.5).abs() < 1e-4 && (lo[2] - 9.5).abs() < 1e-4,
+            "{lo:?} {hi:?}"
+        );
+
+        // No clearance can be as thick as the shell, nor pull the border past the faces inside it.
+        let too_thick = split(&part, &selected, Closure::Shell { thickness: 1.0, clearance: 1.0 });
+        assert_eq!(too_thick.unwrap_err(), RegionError::Clearance { count: 0 });
+        let too_wide = split(&part, &selected, Closure::Shell { thickness: 4.0, clearance: 3.0 });
+        assert!(matches!(too_wide, Err(RegionError::Clearance { count }) if count > 0), "{too_wide:?}");
     }
 
     #[test]
@@ -491,12 +576,12 @@ pub(crate) mod tests {
         let part = grid_box([0.0, 0.0, 0.0], [10.0, 10.0, 2.0], 5);
         let selected = top_patch(&part, 2.0, 2.0, 8.0);
         assert!(matches!(
-            split(&part, &selected, Closure::Shell { thickness: 3.0 }),
+            split(&part, &selected, Closure::Shell { thickness: 3.0, clearance: 0.0 }),
             Err(RegionError::ThinWall { .. })
         ));
-        assert!(split(&part, &selected, Closure::Shell { thickness: 1.0 }).is_ok());
+        assert!(split(&part, &selected, Closure::Shell { thickness: 1.0, clearance: 0.0 }).is_ok());
         assert_eq!(
-            split(&part, &vec![false; part.tris.len()], Closure::Shell { thickness: 1.0 }).unwrap_err(),
+            split(&part, &vec![false; part.tris.len()], Closure::Shell { thickness: 1.0, clearance: 0.0 }).unwrap_err(),
             RegionError::Empty
         );
 
@@ -505,7 +590,7 @@ pub(crate) mod tests {
         let a = top_patch(&part, 10.0, 2.0, 4.0);
         let b = top_patch(&part, 10.0, 4.0, 6.0);
         let both: Vec<bool> = a.iter().zip(&b).map(|(x, y)| *x || *y).collect();
-        let r = split(&part, &both, Closure::Shell { thickness: 1.0 });
+        let r = split(&part, &both, Closure::Shell { thickness: 1.0, clearance: 0.0 });
         assert_eq!(r.unwrap_err(), RegionError::PinchedBorder);
     }
 
@@ -515,7 +600,7 @@ pub(crate) mod tests {
         let a = top_patch(&part, 10.0, 0.0, 4.0);
         let b = top_patch(&part, 10.0, 6.0, 10.0);
         let both: Vec<bool> = a.iter().zip(&b).map(|(x, y)| *x || *y).collect();
-        let s = split(&part, &both, Closure::Shell { thickness: 1.0 }).unwrap();
+        let s = split(&part, &both, Closure::Shell { thickness: 1.0, clearance: 0.0 }).unwrap();
         assert_eq!(s.regions.len(), 2);
         assert!(s.regions.iter().all(|r| r.closed) && s.rest.closed);
 
@@ -534,7 +619,7 @@ pub(crate) mod tests {
         part.tri_loops.remove(bottom);
         part.tri_source.remove(bottom);
         let selected = top_patch(&part, 10.0, 2.0, 8.0);
-        let s = split(&part, &selected, Closure::Shell { thickness: 1.0 }).unwrap();
+        let s = split(&part, &selected, Closure::Shell { thickness: 1.0, clearance: 0.0 }).unwrap();
         assert!(s.regions[0].closed);
         assert!(!s.rest.closed);
     }

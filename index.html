@@ -359,28 +359,67 @@
           <p class="sep-status" id="sep-status" role="status" aria-live="polite"></p>
         </div>
         <div class="reg-controls" id="reg-controls" aria-labelledby="reg-title">
-          <div class="reg-row">
-            <h3 class="sep-title" id="reg-title" data-i18n="reg.title">Region</h3>
-            <span class="sep-count" id="reg-count" role="status"></span>
-            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.mode"><button type="button" id="reg-add" aria-pressed="true" data-i18n="reg.add">Select</button><button type="button" id="reg-erase" aria-pressed="false" data-i18n="reg.erase" data-i18n-attr="title:reg.eraseHelp">Erase</button></div>
-            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.reach"><button type="button" id="reg-visible" aria-pressed="true" data-i18n="reg.visible" data-i18n-attr="title:reg.visibleHelp">Visible faces</button><button type="button" id="reg-through" aria-pressed="false" data-i18n="reg.through" data-i18n-attr="title:reg.throughHelp">Through the model</button></div>
-            <div class="reg-tools" role="group" data-i18n-attr="aria-label:reg.tools">
-              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="grow" data-i18n="reg.grow" data-i18n-attr="title:reg.growHelp">Grow</button>
-              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="connected" data-i18n="reg.connected" data-i18n-attr="title:reg.connectedHelp">Whole piece</button>
-              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="smooth" data-i18n="reg.smooth" data-i18n-attr="title:reg.smoothHelp">Smooth border</button>
-              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="invert" data-i18n="reg.invert">Invert</button>
-              <button class="btn btn--quiet btn--sm" type="button" data-reg-op="clear" data-i18n="reg.clear">Clear</button>
+          <h3 class="visually-hidden" id="reg-title" data-i18n="reg.title">Region</h3>
+          <section class="reg-row" aria-labelledby="reg-step1">
+            <h4 class="reg-label" id="reg-step1"><span class="reg-step__n" aria-hidden="true">1</span><span data-i18n="reg.step1">Select the area</span></h4>
+            <span class="reg-chip" id="reg-count" role="status"></span>
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.pickWith">
+              <button type="button" id="reg-by-brush" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20c2.5 0 4-1.5 4-4 0-1.4 1-2.5 2.4-2.5S13 14.6 13 16c0 2.8-3 4-9 4z"/><path d="m12 13 8-8"/></svg><span data-i18n="reg.byBrush">Brush</span></button>
+              <button type="button" id="reg-by-colour" aria-pressed="false" data-i18n-attr="title:reg.byColourHelp"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5c3.5 4 6 7 6 10a6 6 0 0 1-12 0c0-3 2.5-6 6-10z"/></svg><span data-i18n="reg.byColour">By colour</span></button>
             </div>
-          </div>
+            <div class="reg-opts" data-reg-brush>
+              <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.mode"><button type="button" id="reg-add" aria-pressed="true" data-i18n="reg.add">Select</button><button type="button" id="reg-erase" aria-pressed="false" data-i18n="reg.erase" data-i18n-attr="title:reg.eraseHelp">Erase</button></div>
+              <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.reach"><button type="button" id="reg-visible" aria-pressed="true" data-i18n="reg.visible" data-i18n-attr="title:reg.visibleHelp">Visible faces</button><button type="button" id="reg-through" aria-pressed="false" data-i18n="reg.through" data-i18n-attr="title:reg.throughHelp">Through</button></div>
+              <label class="reg-field reg-range"><span data-i18n="stage.radius">Radius</span><input class="range" id="reg-radius" type="range" min="0.5" max="20" step="0.5" value="3"><output class="num" id="reg-radius-out" for="reg-radius">3 mm</output></label>
+            </div>
+            <div class="reg-opts" data-reg-colour hidden>
+              <label class="reg-field"><span data-i18n="reg.match">Same</span><select class="sep-goes" id="reg-match"><option value="filament" data-i18n="reg.matchFilament">filament</option><option value="material" data-i18n="reg.matchMaterial">original material</option><option value="similar" data-i18n="reg.matchSimilar">similar colour</option></select></label>
+              <label class="reg-field reg-range" id="reg-tolerance-row" hidden><span data-i18n="reg.tolerance" data-i18n-attr="title:reg.toleranceHelp">Tolerance ΔE</span><input class="range" id="reg-tolerance" type="range" min="1" max="60" step="1" value="10"><output class="num" id="reg-tolerance-out" for="reg-tolerance">10</output></label>
+              <label class="check"><input type="checkbox" id="reg-contiguous"><span data-i18n="reg.contiguous" data-i18n-attr="title:reg.contiguousHelp">Only joined</span></label>
+              <button class="reg-flag" type="button" id="reg-refine" hidden data-i18n-attr="title:reg.refineHelp"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20 20 4M4 12l8-8M12 20l8-8"/></svg><span id="reg-refine-note"></span></button>
+            </div>
+            <div class="reg-tools" role="group" data-i18n-attr="aria-label:reg.tools">
+              <button class="reg-tool" type="button" data-reg-op="grow" data-i18n-attr="title:reg.growHelp;aria-label:reg.grow"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="8" height="8" rx="1"/><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+              <button class="reg-tool" type="button" data-reg-op="smooth" data-i18n-attr="title:reg.smoothHelp;aria-label:reg.smooth"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c3-6 6 2 9-3s6 1 9-3"/></svg></button>
+              <button class="reg-tool" type="button" data-reg-op="connected" data-i18n-attr="title:reg.connectedHelp;aria-label:reg.connected"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8 12 4l8 4v8l-8 4-8-4z"/><path d="m4 8 8 4 8-4M12 12v8"/></svg></button>
+              <button class="reg-tool" type="button" data-reg-op="invert" data-i18n-attr="title:reg.invertHelp;aria-label:reg.invert"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" class="fill"/></svg></button>
+              <button class="reg-tool" type="button" data-reg-op="clear" data-i18n-attr="title:reg.clearHelp;aria-label:reg.clear"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg></button>
+            </div>
+          </section>
           <div class="reg-row">
-            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.action"><button type="button" id="reg-extract" aria-pressed="true" data-i18n="reg.extract">Extract as a piece</button><button type="button" id="reg-remove" aria-pressed="false" data-i18n="reg.remove">Remove</button></div>
-            <label class="reg-field"><span data-i18n="reg.closure">Close with</span><select class="sep-goes" id="reg-closure"><option value="shell" data-i18n="reg.shell">a shell</option><option value="cap" data-i18n="reg.cap">a cap</option></select></label>
-            <label class="reg-field"><span id="reg-mm-label"></span><span class="unit-input"><input class="input" id="reg-mm" type="number" inputmode="decimal" min="0.1" max="50" step="0.1" value="2"><span aria-hidden="true">mm</span></span></label>
-            <div class="sep-place" id="reg-place"><span data-i18n="sep.place">New objects</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:sep.place"><button type="button" id="reg-assembled" aria-pressed="true" data-i18n="sep.assembled">Where they are</button><button type="button" id="reg-flat" aria-pressed="false" data-i18n="reg.flat" data-i18n-attr="title:reg.flatHelp">On the plate</button></div></div>
-            <label class="check" id="reg-pull-row"><input type="checkbox" id="reg-pull"><span data-i18n="reg.pull">Show apart</span></label>
+            <fieldset class="reg-group" id="reg-step2" disabled>
+              <legend class="reg-label"><span class="reg-step__n" aria-hidden="true">2</span><span data-i18n="reg.step2">What to do</span></legend>
+              <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.action">
+                <button type="button" id="reg-extract" aria-pressed="true" data-i18n-attr="title:reg.extractDesc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18v-7h-6v-2H9v2H3z"/><path d="M12 9V3m-3 3 3-3 3 3" class="accent"/></svg><span data-i18n="reg.extract">Extract</span></button>
+                <button type="button" id="reg-remove" aria-pressed="false" data-i18n-attr="title:reg.removeDesc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18v-7h-6v-2H9v2H3z"/><path d="m9 3 6 6m0-6-6 6" class="accent"/></svg><span data-i18n="reg.remove">Remove</span></button>
+              </div>
+            </fieldset>
+            <fieldset class="reg-group" id="reg-step3" disabled>
+              <legend class="reg-label"><span class="reg-step__n" aria-hidden="true">3</span><span data-i18n="reg.step3">Close with</span></legend>
+              <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.closure">
+                <button type="button" id="reg-shell" aria-pressed="true" data-i18n-attr="title:reg.shellDesc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v14H3z"/><path d="M8 6v4h8V6" class="fill"/><path d="M8 10h8" class="accent"/></svg><span data-i18n="reg.shellTitle">Shell</span></button>
+                <button type="button" id="reg-cap" aria-pressed="false" data-i18n-attr="title:reg.capDesc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v14H3z"/><path d="m8 6 4 6 4-6" class="fill"/><path d="m8 6 4 6 4-6" class="accent"/></svg><span data-i18n="reg.capTitle">Cap</span></button>
+              </div>
+              <label class="reg-field reg-range"><span id="reg-mm-label"></span><input class="range" id="reg-mm-range" type="range" min="0.4" max="10" step="0.1" value="2" aria-hidden="true" tabindex="-1"><span class="unit-input"><input class="input" id="reg-mm" type="number" inputmode="decimal" min="0.1" max="50" step="0.1" value="2"><span aria-hidden="true">mm</span></span></label>
+              <details class="reg-more" id="reg-more">
+                <summary data-i18n-attr="title:reg.more"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg><span data-i18n="reg.more">More</span></summary>
+                <div class="reg-more__menu">
+                  <label class="reg-field" id="reg-clearance-row"><span data-i18n="reg.clearance">Clearance</span><span class="unit-input"><input class="input" id="reg-clearance" type="number" inputmode="decimal" min="0" max="5" step="0.05" value="0"><span aria-hidden="true">mm</span></span></label>
+                  <p class="reg-note" id="reg-clearance-note" data-i18n="reg.clearanceHelp"></p>
+                  <div class="reg-field" id="reg-place"><span data-i18n="sep.place">New objects</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:sep.place"><button type="button" id="reg-assembled" aria-pressed="true" data-i18n="sep.assembled">Where they are</button><button type="button" id="reg-flat" aria-pressed="false" data-i18n="reg.flat" data-i18n-attr="title:reg.flatHelp">On the plate</button></div></div>
+                  <label class="check" id="reg-group-row"><input type="checkbox" id="reg-group"><span data-i18n="reg.group">One object</span></label>
+                  <p class="reg-note" id="reg-group-note" data-i18n="reg.groupHelp"></p>
+                </div>
+              </details>
+            </fieldset>
           </div>
-          <div class="sep-foot">
-            <p class="sep-status" id="reg-status" role="status" aria-live="polite"></p>
+          <div class="reg-row reg-foot">
+            <div class="reg-result">
+              <div class="reg-summary" id="reg-summary"></div>
+              <p class="sep-status" id="reg-status" role="status" aria-live="polite"></p>
+              <div class="reg-fixes" id="reg-fixes"></div>
+            </div>
+            <div class="seg seg--sm" role="group" id="reg-view" data-i18n-attr="aria-label:reg.view"><button type="button" id="reg-together" aria-pressed="true" data-i18n="reg.together">Together</button><button type="button" id="reg-apart" aria-pressed="false" data-i18n="reg.apart" data-i18n-attr="title:reg.apartHelp">Apart</button></div>
             <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="reg-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="reg-apply" data-i18n-attr="title:reg.applyHelp">Apply</button></div>
           </div>
         </div>

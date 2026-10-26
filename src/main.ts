@@ -219,6 +219,7 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   },
   toolClick: (tool, triangle, additive) => {
     if (tool === "separate") separatePanel.click(triangle, additive);
+    if (tool === "region") void regionPanel.click(triangle, additive);
   },
   select: (o, d) => (summary ? regionPanel.stroke(o, d) : Promise.resolve(null)),
   endSelect: () => regionPanel.endStroke(),
@@ -435,6 +436,17 @@ const regionPanel = new RegionPanel({
     });
     return done;
   },
+  cursor: () => syncBrush(),
+  picking: (on) => {
+    app.dataset.regionPick = on ? "colour" : "brush";
+    viewer.setRegionPicking(on);
+    if (app.dataset.tool === "region") setHint(t(on ? "hint.regionColour" : "hint.region"));
+  },
+  refine: async () => {
+    const before = summary?.triangles ?? 0;
+    await apply(() => api.refineToPaint(), () =>
+      toast(t("reg.refined", { count: (summary?.triangles ?? 0) - before, n: nf((summary?.triangles ?? 0) - before) }), "ok", { label: t("cut.undo"), run: () => void undo() }));
+  },
   close: () => setTool("orbit"),
   error: errText,
 });
@@ -445,7 +457,8 @@ function syncBrush() {
   bind("radiusOut", `${nf(radiusMm(), 1)} mm`);
   const scale = summary && viewer.modelHeight() > 0 ? summary.sizeMm[2] / viewer.modelHeight() : 1;
   viewer.brushRadius = radiusMm() / scale;
-  const hex = summary?.slots[brushSlot]?.hex;
+  // The region brush selects rather than paints: its footprint has the selection's colour.
+  const hex = app.dataset.tool === "region" ? regionPanel.cursorColour() : summary?.slots[brushSlot]?.hex;
   if (hex) {
     app.style.setProperty("--brush", hex);
     viewer.setBrushColor(hex);
@@ -1533,9 +1546,12 @@ function setTool(tool: Tool) {
   viewer.setTool(tool);
   if (tool === "separate") separatePanel.open(); else separatePanel.close();
   if (tool === "region") regionPanel.open(); else regionPanel.close();
+  syncBrush();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
-  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
+  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
+    : tool === "region" ? t(regionPanel.hint())
+    : t(`hint.${tool}`));
   syncMeasure();
 }
 

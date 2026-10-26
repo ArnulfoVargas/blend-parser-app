@@ -49,6 +49,8 @@ pub fn run() {
             commands::selection_op,
             commands::preview_region,
             commands::apply_region,
+            commands::select_by_colour,
+            commands::refine_to_paint,
             commands::set_mesh_ops,
             commands::analyze_printability,
             commands::fix_mesh,

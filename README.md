@@ -41,6 +41,11 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   visibles o atravesando el modelo, con borrar, ampliar, pieza entera, suavizar e invertir) y la
   elimina o la extrae como pieza, cerrada con una carcasa de grosor elegido o con una tapa a una
   profundidad elegida. La superficie de cierre se ve antes de aplicar.
+- Separar por color: en Región, un clic elige todas las caras del mismo filamento, material
+  original o color parecido (ΔE ajustable), en todo el modelo o sólo las unidas. Los bordes de
+  color que cruzan triángulos pueden convertirse en aristas para que la selección los siga. Cada
+  región separada sale como pieza propia o todas en un objeto, y con carcasa se puede dar holgura
+  para que la pieza encaje en el hueco que deja.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 
@@ -242,7 +247,8 @@ crates/
     split       Una pieza cerrada por color (cáscara o sólido completo)
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     separate    Piezas desconectadas con tolerancia de soldadura y propuestas de corte
-    region      Cortar una región de la superficie: carcasa o tapa, con su validación
+    region      Cortar una región de la superficie: carcasa (con holgura) o tapa, con su validación
+    refine      Bordes de color dentro de un triángulo convertidos en aristas, sin uniones en T
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
   bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa
@@ -314,6 +320,34 @@ con Blender unos 2,5 s.
   la cara interior de una carcasa toma la pintura de la cara de la que sale, y paredes y tapas el
   color de la superficie donde la tocan. Varias regiones separadas son varias piezas; extraídas
   quedan en su sitio o sobre la placa junto al modelo, con la cara exterior hacia arriba.
+
+### Separar por color y volúmenes complementarios (#38)
+
+- **Elegir por color.** Con **Por color**, un clic toma las caras del mismo **filamento**, del mismo
+  **material original** o de un **color parecido** al de la cara tocada (ΔE CIE76 con tolerancia
+  ajustable), en todo el modelo o **sólo unidas**. Ctrl o Mayús añaden y Alt quita. Al cambiar el
+  criterio o la tolerancia se repite la última elección sobre la selección de la que partió, y el
+  recuento de triángulos y regiones deja ver si la selección se fragmenta.
+- **Bordes dentro de un triángulo.** La pintura subdivide los triángulos donde cruza un borde de
+  color. **Seguir los bordes de color** convierte esas subdivisiones en triángulos reales: los
+  triángulos vecinos se dividen igual y no quedan uniones en T, así que la malla sigue cerrada.
+  Después, elegir por filamento sigue el borde tal como está pintado, también donde cruzaba un
+  triángulo original, en vez de tomar cada triángulo por su color mayoritario. Las UV, los colores
+  y la pintura a mano pasan a los triángulos nuevos. Es un paso de `Ctrl+Z`. Si la malla está
+  simplificada, aplanada o reparada de forma que sus triángulos ya no son los del modelo, se avisa y
+  no se hace.
+- **Piezas separadas o agrupadas.** Cada región desconectada sale como un objeto propio, o con
+  **Un solo objeto** todas juntas.
+- **Volúmenes complementarios.** Con carcasa, la pieza ya no se superpone al modelo: el resto queda
+  con el hueco que ocupaba. La **holgura** hace la pieza más pequeña que su hueco por el borde (se
+  retira a lo largo de la superficie) y por debajo (es más fina), sin tocar el hueco. Se rechazan
+  una holgura igual o mayor que el grosor, una holgura que dobla las caras del borde y unas piezas
+  que sumen más volumen que el modelo, es decir, que se solapan. Se avisa de las piezas más
+  estrechas que dos anchos de boquilla, además de lo que ya comprueba Región (paredes finas y
+  carcasas que se doblan en curvas cerradas).
+- Las piezas son objetos del 3MF como cualquier corte. La exportación por color en ZIP sigue oculta
+  y se rehace en #1; cuando vuelva, los bordes ajustados también le sirven, porque usa el color
+  mayoritario de cada triángulo.
 
 ### Diagnóstico local de viabilidad FDM (alcance inicial de #7)
 
