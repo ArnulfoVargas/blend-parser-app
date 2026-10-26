@@ -35,6 +35,7 @@ import { Viewer, sectionNormal, type Section, type Tool, type View } from "./vie
 import { CutPanel } from "./cut-panel";
 import { CutReview } from "./cut-review";
 import { SeparatePanel } from "./separate-panel";
+import { RegionPanel } from "./region-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -219,6 +220,8 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   toolClick: (tool, triangle, additive) => {
     if (tool === "separate") separatePanel.click(triangle, additive);
   },
+  select: (o, d) => (summary ? regionPanel.stroke(o, d) : Promise.resolve(null)),
+  endSelect: () => regionPanel.endStroke(),
 });
 
 /** Points in preview units for the current size. */
@@ -415,6 +418,27 @@ const separatePanel = new SeparatePanel({
   error: errText,
 });
 
+// ---- cutting a selected region out ---------------------------------------------------
+
+const regionPanel = new RegionPanel({
+  summary: () => summary,
+  radiusMm: () => radiusMm(),
+  tint: (colors, mix) => viewer.setTriangleTint(colors, mix),
+  overlay: (preview, pull) => viewer.setRegionPreview(preview, pull),
+  apply: async (closure, action) => {
+    measured = [];
+    let done = false;
+    await apply(() => api.applyRegion(closure, action), () => {
+      done = true;
+      const n = summary?.plate.objects ?? 0;
+      toast(action.kind === "remove" ? t("reg.removed") : t("reg.extracted", { count: n, n }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  close: () => setTool("orbit"),
+  error: errText,
+});
+
 const radiusInput = $<HTMLInputElement>("#radius");
 const radiusMm = () => Number(radiusInput.value);
 function syncBrush() {
@@ -435,6 +459,7 @@ async function reloadMesh(frame = false) {
   syncBrush();
   syncMeasure();
   separatePanel.meshChanged();
+  regionPanel.meshChanged();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
@@ -1504,9 +1529,10 @@ function setView(v: View) {
 function setTool(tool: Tool) {
   app.dataset.tool = tool;
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
-  radiusInput.disabled = tool !== "brush";
+  radiusInput.disabled = tool !== "brush" && tool !== "region";
   viewer.setTool(tool);
   if (tool === "separate") separatePanel.open(); else separatePanel.close();
+  if (tool === "region") regionPanel.open(); else regionPanel.close();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
@@ -1585,6 +1611,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "r") setTool("rotate");
   else if (e.key === "c") setTool("section");
   else if (e.key === "d") setTool("separate");
+  else if (e.key === "x") setTool("region");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
@@ -1593,6 +1620,7 @@ window.addEventListener("keydown", (e) => {
     setTool("orbit");
   }
   else if (e.key === "Escape" && app.dataset.tool === "separate") setTool("orbit");
+  else if (e.key === "Escape" && app.dataset.tool === "region") setTool("orbit");
   else if (e.key === "Escape" && measured.length) {
     measured = [];
     syncMeasure();
@@ -1722,6 +1750,7 @@ onLangChange(() => {
   bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
   if (summary) render(summary);
   separatePanel.update();
+  regionPanel.update();
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });

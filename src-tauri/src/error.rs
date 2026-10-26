@@ -68,3 +68,20 @@ pub fn in_range(v: f32, range: std::ops::RangeInclusive<f32>, key: &'static str)
         Err(AppError::with(key, json!({ "min": range.start(), "max": range.end() })))
     }
 }
+
+impl From<bp_core::RegionFailure> for AppError {
+    fn from(e: bp_core::RegionFailure) -> Self {
+        use bp_core::region::RegionError as R;
+        use bp_core::RegionFailure as F;
+        match e {
+            F::Region(R::Empty) => Self::new("error.regionEmpty"),
+            F::Region(R::AmbiguousBorder) => Self::new("error.regionBorder"),
+            F::Region(R::PinchedBorder) => Self::new("error.regionPinched"),
+            F::Region(R::AmbiguousCap) => Self::new("error.regionCap"),
+            F::Region(R::ThinWall { count }) => Self::with("error.regionThin", json!({ "count": count })),
+            F::Region(R::Folded { count }) => Self::with("error.regionFolded", json!({ "count": count })),
+            F::Everything => Self::new("error.regionEverything"),
+            F::Flat => Self::new("error.regionFlat"),
+        }
+    }
+}

@@ -2,7 +2,7 @@
 //! after each change, so the UI never has to keep its own copy in sync.
 
 use bp_core::{ColorOps, MeshOps, Project, Waste, WasteParams};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::state::Document;
@@ -539,4 +539,86 @@ pub fn prefs(p: &Prefs) -> PrefsDto {
 pub struct ProgressDto {
     pub key: String,
     pub name: String,
+}
+
+/// The region selection: its triangles (global preview ids) and how many separate regions they make.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionDto {
+    pub tris: Vec<u32>,
+    pub count: usize,
+    pub regions: usize,
+}
+
+pub fn selection(p: &Project) -> SelectionDto {
+    let (count, regions) = p.selection_regions();
+    SelectionDto { tris: p.selection(), count, regions }
+}
+
+/// A brush stroke of the region selection: where it landed and the triangles that changed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectStrokeDto {
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub tris: Vec<u32>,
+}
+
+/// How a cut region is closed: a shell `mm` thick, or a cap `mm` deep.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ClosureDto {
+    Shell { mm: f32 },
+    Cap { mm: f32 },
+}
+
+/// What happens to the region: it goes, or it becomes objects of its own.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum RegionActionDto {
+    Remove,
+    Extract { lay_flat: bool },
+}
+
+impl From<ClosureDto> for bp_core::region::Closure {
+    fn from(c: ClosureDto) -> Self {
+        match c {
+            ClosureDto::Shell { mm } => Self::Shell { thickness: mm },
+            ClosureDto::Cap { mm } => Self::Cap { depth: mm },
+        }
+    }
+}
+
+impl From<RegionActionDto> for bp_core::RegionAction {
+    fn from(a: RegionActionDto) -> Self {
+        match a {
+            RegionActionDto::Remove => Self::Remove,
+            RegionActionDto::Extract { lay_flat } => Self::Extract { lay_flat },
+        }
+    }
+}
+
+/// What cutting the region out would make, in preview coordinates: the
+/// closing faces and each piece's surface as flat xyz triangles (9 floats each).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionPreviewDto {
+    pub closure: Vec<f32>,
+    pub pieces: Vec<Vec<f32>>,
+    pub directions: Vec<[f32; 3]>,
+    pub piece_mm3: Vec<f32>,
+    pub rest_mm3: f32,
+    pub closed: bool,
+}
+
+pub fn region_preview(p: bp_core::RegionPreview) -> RegionPreviewDto {
+    let flat = |tris: &[[[f32; 3]; 3]]| tris.iter().flatten().flatten().copied().collect();
+    RegionPreviewDto {
+        closure: flat(&p.closure),
+        pieces: p.pieces.iter().map(|t| flat(t)).collect(),
+        directions: p.directions,
+        piece_mm3: p.piece_mm3,
+        rest_mm3: p.rest_mm3,
+        closed: p.closed,
+    }
 }
