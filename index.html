@@ -32,6 +32,7 @@
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undoSize"><span data-i18n="menu.undoSize"></span></button></li>
           <li role="separator" class="menu__sep"></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="printers"><span data-i18n="menu.printers"></span></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="filaments"><span data-i18n="menu.filaments"></span></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="waste"><span data-i18n="menu.waste"></span></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="prefs"><span data-i18n="menu.prefs"></span> <kbd>Ctrl+,</kbd></button></li>
         </ul>
@@ -544,6 +545,48 @@
         <button class="btn btn--primary" type="submit" id="waste-save" data-i18n="wasteForm.save"></button>
       </footer>
     </form>
+  </dialog>
+
+  <dialog class="dialog dialog--wide dialog--sheet" id="filaments-dialog" aria-labelledby="h-filaments">
+    <div class="sheet">
+      <header class="sheet__head">
+        <h2 id="h-filaments" data-i18n="filaments.title">Mis filamentos</h2>
+        <p class="help" data-i18n="filaments.help"></p>
+        <label class="check"><input type="checkbox" id="inventory-only"> <span data-i18n="filaments.inventoryOnly"></span></label>
+        <input class="input" id="filament-search" type="search" autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:filaments.search;aria-label:filaments.search">
+      </header>
+      <div class="sheet__body">
+        <div class="filaments" id="filament-list"></div>
+        <form class="sheet__section filament-form" id="filament-form" novalidate>
+          <h3 data-i18n="filaments.addTitle">Añadir uno propio</h3>
+          <div class="filament-form__grid">
+            <div class="field"><label for="ff-brand" data-i18n="filaments.brand">Marca</label><input class="input" id="ff-brand" maxlength="40" autocomplete="off"></div>
+            <div class="field"><label for="ff-kind" data-i18n="filaments.kind">Línea</label><input class="input" id="ff-kind" maxlength="40" autocomplete="off" list="ff-kinds" placeholder="PLA Matte"><datalist id="ff-kinds"></datalist></div>
+            <div class="field"><label for="ff-name" data-i18n="filaments.name">Color</label><input class="input" id="ff-name" maxlength="60" autocomplete="off"></div>
+            <div class="field"><label for="ff-hex" data-i18n="filaments.hex">Muestra</label><input class="input filament-form__hex" id="ff-hex" type="color" value="#808080"></div>
+          </div>
+          <p class="form-error" id="filament-error" role="alert" hidden></p>
+          <div><button class="btn btn--quiet btn--sm" type="submit" data-i18n="filaments.add">Añadir a mis filamentos</button></div>
+        </form>
+      </div>
+      <footer class="sheet__foot">
+        <span class="help" data-bind="ownedCount"></span>
+        <span class="sheet__spacer"></span>
+        <button class="btn btn--primary" type="button" id="filaments-close" data-i18n="common.close">Cerrar</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="slot-filament-dialog" aria-labelledby="h-slot-filament">
+    <div class="dialog__body">
+      <h2 id="h-slot-filament" data-bind="slotFilamentTitle"></h2>
+      <p class="help" data-bind="slotFilamentHelp"></p>
+      <div class="picker--block" id="slot-filament-picker"></div>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="button" id="slot-filament-clear" data-i18n="filaments.clear">Quitar filamento</button>
+        <button class="btn btn--primary" type="button" id="slot-filament-close" data-i18n="common.close">Cerrar</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog class="dialog dialog--wide" id="printer-dialog" aria-labelledby="h-printers">

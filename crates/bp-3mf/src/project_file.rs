@@ -36,6 +36,9 @@ pub struct Settings {
     pub flush: Vec<(String, String, f32)>,
     /// Where the model's centre sits from the plate's centre.
     pub offset_mm: [f32; 2],
+    /// The filament on each slot that has one, by the slot's colour (`#RRGGBB`).
+    #[serde(default)]
+    pub filaments: Vec<(String, crate::filament::Filament)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]

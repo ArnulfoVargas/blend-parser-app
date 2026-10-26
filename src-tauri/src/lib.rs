@@ -3,6 +3,7 @@
 mod commands;
 mod dto;
 mod error;
+mod filaments;
 mod prefs;
 mod profiles;
 mod saved;
@@ -21,6 +22,7 @@ pub fn run() {
             let state = app.state::<state::AppState>();
             *state.printers.lock().expect("printer store") = profiles::Store::load(dir.join("printers.json"));
             *state.prefs.lock().expect("settings") = prefs::Prefs::load(dir.join("settings.json"));
+            *state.filaments.lock().expect("filaments") = filaments::FilamentStore::load(dir.join("filaments.json"));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -32,6 +34,12 @@ pub fn run() {
             commands::save_project,
             commands::inspect_model,
             commands::set_palette,
+            commands::filaments,
+            commands::set_filament_owned,
+            commands::save_filament,
+            commands::delete_filament,
+            commands::set_inventory_only,
+            commands::set_slot_filament,
             commands::suggest_palette,
             commands::reduce_palette,
             commands::merge_slots,
