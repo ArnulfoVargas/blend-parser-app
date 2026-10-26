@@ -30,7 +30,13 @@ pub struct MaterialDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlotDto {
+    /// The colour it prints: its filament's, or the one found in the model.
     pub hex: String,
+    /// The colour found in the model, which decides what the slot paints.
+    pub detected_hex: String,
+    /// The filament picked for it, and its ΔE from the colour found.
+    pub filament: Option<bp_3mf::filament::Filament>,
+    pub filament_delta_e: Option<f32>,
     pub triangles: usize,
     /// Closest other slot (0-based) and the ΔE between them.
     pub nearest: Option<(usize, f32)>,
@@ -241,6 +247,23 @@ pub struct PaintDto {
     pub tris: Vec<u32>,
 }
 
+/// Every filament to pick from, the user's inventory, and whether colours come only from it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilamentsDto {
+    pub filaments: Vec<bp_3mf::filament::Filament>,
+    pub owned: Vec<String>,
+    pub inventory_only: bool,
+}
+
+pub fn filaments(store: &crate::filaments::FilamentStore) -> FilamentsDto {
+    FilamentsDto {
+        filaments: store.all(),
+        owned: store.owned.iter().cloned().collect(),
+        inventory_only: store.inventory_only,
+    }
+}
+
 /// Every printer to pick from, the current pick, and what a custom one can use.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -270,14 +293,16 @@ pub fn layer_mm(printer: &bp_3mf::Printer, prefs: &WastePrefs) -> f32 {
 /// Flush per swap between every pair of slots, the user's values first.
 pub fn flush_matrix(doc: &Document) -> (Vec<f32>, Vec<bool>) {
     let pal = doc.project.palette();
+    // Typed flush follows the slots' colours; the estimate, the colours they print.
+    let shown = doc.slot_colors();
     let n = pal.len();
     let mut volumes = Vec::with_capacity(n * n);
     let mut set = Vec::with_capacity(n * n);
-    for &a in pal {
-        for &b in pal {
+    for (&a, &sa) in pal.iter().zip(&shown) {
+        for (&b, &sb) in pal.iter().zip(&shown) {
             let key = (bp_core::color::to_hex(a), bp_core::color::to_hex(b));
             let typed = doc.flush.get(&key).copied().filter(|_| a != b);
-            volumes.push(typed.unwrap_or_else(|| bp_core::waste::default_flush(a, b)));
+            volumes.push(typed.unwrap_or_else(|| bp_core::waste::default_flush(sa, sb)));
             set.push(typed.is_some());
         }
     }
@@ -382,9 +407,18 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         slots: p
             .palette()
             .iter()
+            .zip(doc.slot_colors())
+            .zip(doc.slot_filaments())
             .zip(&stats.per_slot)
             .zip(&stats.nearest)
-            .map(|((c, &n), &nearest)| SlotDto { hex: bp_core::color::to_hex(*c), triangles: n, nearest })
+            .map(|((((c, shown), f), &n), &nearest)| SlotDto {
+                hex: bp_core::color::to_hex(shown),
+                detected_hex: bp_core::color::to_hex(*c),
+                filament: f.cloned(),
+                filament_delta_e: f.map(|_| bp_core::palette::delta_e(*c, shown)),
+                triangles: n,
+                nearest,
+            })
             .collect(),
         source_triangles: stats.source_triangles,
         triangles: stats.triangles,

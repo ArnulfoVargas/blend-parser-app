@@ -165,6 +165,8 @@ struct Doc {
     printer: bp_3mf::Printer,
     flush: Vec<(String, String, f32)>,
     offset_mm: [f32; 2],
+    /// The filament on each slot that has one, by the slot's colour.
+    filaments: Vec<(String, bp_3mf::filament::Filament)>,
     warnings: Vec<String>,
 }
 
@@ -187,6 +189,7 @@ fn open(input: &Path, args: &Args, config: &Config) -> Result<Doc, String> {
             printer,
             flush: s.flush,
             offset_mm: s.offset_mm,
+            filaments: s.filaments,
             warnings: s.import_warnings.into_iter().map(|w| format!("{}: {}", w.code, w.detail)).collect(),
         });
     }
@@ -201,6 +204,7 @@ fn open(input: &Path, args: &Args, config: &Config) -> Result<Doc, String> {
         printer: config.printer(),
         flush: vec![],
         offset_mm: [0.0; 2],
+        filaments: vec![],
         warnings: imported.warnings.into_iter().map(|w| format!("{}: {}", w.code, w.detail)).collect(),
     })
 }
@@ -263,14 +267,25 @@ fn convert(input: &Path, args: &Args, config: &Config) -> Result<Report, String>
 
     let output = output_for(input, args);
     let stats = p.stats();
-    let palette = p.palette().to_vec();
+    let detected = p.palette().to_vec();
+    // Each slot prints its filament's colour when the project picked one, as in the app.
+    let slot_filament: Vec<Option<&bp_3mf::filament::Filament>> = detected
+        .iter()
+        .map(|c| doc.filaments.iter().find(|f| f.0 == bp_core::color::to_hex(*c)).map(|f| &f.1))
+        .collect();
+    let palette: Vec<_> = detected
+        .iter()
+        .zip(&slot_filament)
+        .map(|(&c, f)| f.and_then(|f| bp_core::color::parse_hex(&f.hex)).unwrap_or(c))
+        .collect();
+    let keys: Vec<String> = detected.iter().map(|c| bp_core::color::to_hex(*c)).collect();
     let hex: Vec<String> = palette.iter().map(|c| bp_core::color::to_hex(*c)).collect();
     // Flush per swap: what the user typed in the project, the colours' estimate otherwise.
     let n = palette.len();
     let volumes: Vec<f32> = (0..n * n)
         .map(|i| {
             let (a, b) = (i / n, i % n);
-            let typed = doc.flush.iter().find(|f| f.0 == hex[a] && f.1 == hex[b]).map(|f| f.2).filter(|_| a != b);
+            let typed = doc.flush.iter().find(|f| f.0 == keys[a] && f.1 == keys[b]).map(|f| f.2).filter(|_| a != b);
             typed.unwrap_or_else(|| bp_core::waste::default_flush(palette[a], palette[b]))
         })
         .collect();
@@ -306,6 +321,7 @@ fn convert(input: &Path, args: &Args, config: &Config) -> Result<Report, String>
             })
             .collect(),
         filaments: hex.clone(),
+        slots: slot_filament.iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &doc.printer))).collect(),
         printer: doc.printer.clone(),
         flush: bp_3mf::Flush {
             volumes_mm3: volumes,

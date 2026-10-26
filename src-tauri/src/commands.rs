@@ -145,7 +145,7 @@ pub async fn open_blend(
         let state = handle.state::<AppState>();
         let prefs = state.prefs.lock()?;
         project.set_print_ops(print_ops(&printer, &prefs));
-        let doc = Document {
+        let mut doc = Document {
             project,
             file_name: file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path.clone()),
             file_size: size,
@@ -153,7 +153,12 @@ pub async fn open_blend(
             printer,
             flush: Default::default(),
             offset_mm: [0.0; 2],
+            filaments: Default::default(),
         };
+        // With colours from the inventory only, the model starts with spools the user has.
+        if let Some(owned) = state.filaments.lock()?.inventory() {
+            doc.suggest_from_inventory(&owned, 4);
+        }
         let summary = dto::summary(&doc, &prefs);
         *state.doc.lock()? = Some(doc);
         Ok(summary)
@@ -208,11 +213,89 @@ pub async fn set_palette(app: AppHandle, colors: Vec<String>) -> CmdResult<Summa
     .await
 }
 
+/// Detects `count` colours again; with colours from the inventory only, picks
+/// the `count` owned spools that paint the model best instead.
 #[tauri::command]
 pub async fn suggest_palette(app: AppHandle, count: usize) -> CmdResult<Summary> {
+    let owned = app.state::<AppState>().filaments.lock()?.inventory();
     with_doc(app, move |d, prefs| {
-        let pal = d.project.suggest_palette(count);
-        d.project.set_palette(pal);
+        match &owned {
+            Some(owned) => d.suggest_from_inventory(owned, count),
+            None => {
+                let pal = d.project.suggest_palette(count);
+                d.project.set_palette(pal);
+            }
+        }
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Every filament to pick from, which ones the user has, and whether colours
+/// come only from those.
+#[tauri::command]
+pub fn filaments(app: AppHandle) -> CmdResult<dto::FilamentsDto> {
+    let state = app.state::<AppState>();
+    let store = state.filaments.lock()?;
+    Ok(dto::filaments(&store))
+}
+
+fn with_filaments(
+    app: &AppHandle,
+    f: impl FnOnce(&mut crate::filaments::FilamentStore) -> CmdResult<()>,
+) -> CmdResult<dto::FilamentsDto> {
+    let state = app.state::<AppState>();
+    let mut store = state.filaments.lock()?;
+    f(&mut store)?;
+    store.save()?;
+    Ok(dto::filaments(&store))
+}
+
+#[tauri::command]
+pub fn set_filament_owned(app: AppHandle, id: String, owned: bool) -> CmdResult<dto::FilamentsDto> {
+    with_filaments(&app, |s| s.set_owned(&id, owned))
+}
+
+/// Saves one of the user's filaments; a blank id makes a new one, which they own.
+#[tauri::command]
+pub fn save_filament(app: AppHandle, filament: bp_3mf::filament::Filament) -> CmdResult<dto::FilamentsDto> {
+    with_filaments(&app, |s| s.upsert(filament).map(|_| ()))
+}
+
+#[tauri::command]
+pub fn delete_filament(app: AppHandle, id: String) -> CmdResult<dto::FilamentsDto> {
+    with_filaments(&app, |s| {
+        s.remove(&id);
+        Ok(())
+    })
+}
+
+/// Whether suggested colours come only from the owned filaments.
+#[tauri::command]
+pub fn set_inventory_only(app: AppHandle, on: bool) -> CmdResult<dto::FilamentsDto> {
+    with_filaments(&app, |s| {
+        s.inventory_only = on;
+        Ok(())
+    })
+}
+
+/// Puts filament `id` on `slot`, or takes it off with `None`. The slot keeps
+/// painting what it painted; it prints in the filament's colour.
+#[tauri::command]
+pub async fn set_slot_filament(app: AppHandle, slot: usize, id: Option<String>) -> CmdResult<Summary> {
+    let filament = match &id {
+        Some(id) => {
+            Some(app.state::<AppState>().filaments.lock()?.find(id).ok_or(AppError::new("error.unknownFilament"))?)
+        }
+        None => None,
+    };
+    with_doc(app, move |d, prefs| {
+        let hex =
+            d.project.palette().get(slot).map(|c| bp_core::color::to_hex(*c)).ok_or(AppError::new("error.badSlots"))?;
+        match filament {
+            Some(f) => d.filaments.insert(hex, f),
+            None => d.filaments.remove(&hex),
+        };
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -593,8 +676,8 @@ pub async fn export_color_zip(
     in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
     with_doc(app, move |d, _| {
         let pieces = d.project.color_pieces(thickness_mm, main_solid);
-        let hexes: Vec<String> =
-            pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
+        let colors = d.slot_colors();
+        let hexes: Vec<String> = pieces.iter().map(|p| bp_core::color::to_hex(colors[p.slot as usize])).collect();
         let files: Vec<bp_3mf::ColorFile> = pieces
             .iter()
             .zip(&hexes)
@@ -629,7 +712,9 @@ pub async fn export_3mf(
         if parts.is_empty() {
             return Err(AppError::new("error.noObjects"));
         }
-        let filaments = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+        let filaments = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+        let slots =
+            d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let (volumes_mm3, _) = dto::flush_matrix(d);
         let model = bp_3mf::Model {
@@ -646,6 +731,7 @@ pub async fn export_3mf(
                 })
                 .collect(),
             filaments,
+            slots,
             printer: d.printer.clone(),
             flush: bp_3mf::Flush {
                 volumes_mm3,

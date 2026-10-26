@@ -3,7 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type Vec3 = [number, number, number];
 
-export interface Slot { hex: string; triangles: number; nearest: [number, number] | null }
+/** A spool colour: Bambu Lab's catalogue or the user's own. */
+export interface Filament { id: string; brand: string; kind: string; nameEs: string; nameEn: string; hex: string; custom: boolean }
+export interface Filaments { filaments: Filament[]; owned: string[]; inventoryOnly: boolean }
+/** `hex` is what the slot prints (its filament's colour, when it has one); `detectedHex`, the colour found in the model. */
+export interface Slot { hex: string; detectedHex: string; filament: Filament | null; filamentDeltaE: number | null; triangles: number; nearest: [number, number] | null }
 export interface Repair { weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
@@ -171,6 +175,13 @@ export const api = {
     invoke<Companion[]>("inspect_model", { path, extras, library }),
   setPalette: (colors: string[]) => invoke<Summary>("set_palette", { colors }),
   suggestPalette: (count: number) => invoke<Summary>("suggest_palette", { count }),
+  filaments: () => invoke<Filaments>("filaments"),
+  setFilamentOwned: (id: string, owned: boolean) => invoke<Filaments>("set_filament_owned", { id, owned }),
+  saveFilament: (filament: Filament) => invoke<Filaments>("save_filament", { filament }),
+  deleteFilament: (id: string) => invoke<Filaments>("delete_filament", { id }),
+  setInventoryOnly: (on: boolean) => invoke<Filaments>("set_inventory_only", { on }),
+  /** Puts a filament on a slot; null takes it off. */
+  setSlotFilament: (slot: number, id: string | null) => invoke<Summary>("set_slot_filament", { slot, id }),
   setSize: (mm: Vec3) => invoke<Summary>("set_size", { mm }),
   undoSize: () => invoke<Summary>("undo_size"),
   resetSize: () => invoke<Summary>("reset_size"),

@@ -7,6 +7,7 @@ use std::io::{Seek, Write};
 
 use zip::write::SimpleFileOptions;
 
+pub mod filament;
 pub mod plate;
 mod printer;
 pub mod project_file;
@@ -30,6 +31,9 @@ pub struct Model<'a> {
     pub parts: Vec<Part<'a>>,
     /// Filament colours as `#RRGGBB`, slot 1 first.
     pub filaments: Vec<String>,
+    /// The filament on each slot, where the user picked one; the rest print as
+    /// the printer's PLA. Shorter than `filaments` is fine.
+    pub slots: Vec<Option<filament::SlotFilament>>,
     pub printer: Printer,
     pub flush: Flush,
     /// Layer height the user set; `None` keeps the process preset's.
@@ -300,6 +304,10 @@ fn project_json(model: &Model) -> String {
     };
     let n = model.filaments.len().max(1);
     let rep = |v: &str| vec![v.to_string(); n];
+    let slot = |i: usize| model.slots.get(i).cloned().flatten();
+    let settings_ids: Vec<String> =
+        (0..n).map(|i| slot(i).and_then(|s| s.preset).unwrap_or_else(|| filament.clone())).collect();
+    let types: Vec<String> = (0..n).map(|i| slot(i).map_or_else(|| "PLA".to_string(), |s| s.material)).collect();
     let (tower_x, tower_y) = printer.tower_origin();
     let f = &model.flush;
     let flush: Vec<String> = (0..n * n)
@@ -311,8 +319,8 @@ fn project_json(model: &Model) -> String {
         .collect();
     let mut cfg = serde_json::json!({
         "filament_colour": model.filaments.iter().map(|c| format!("{}FF", c.to_uppercase())).collect::<Vec<_>>(),
-        "filament_settings_id": rep(&filament),
-        "filament_type": rep("PLA"),
+        "filament_settings_id": settings_ids,
+        "filament_type": types,
         "filament_minimal_purge_on_wipe_tower": rep("15"),
         "filament_flow_ratio": rep("0.98"),
         "filament_diameter": rep("1.75"),
@@ -431,6 +439,7 @@ mod tests {
             piece: "piece",
             parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint, object: 0 }],
             filaments: vec!["#4d2720".into(), "#222222".into(), "#E8A461".into()],
+            slots: vec![None, Some(filament::for_slot("PETG HF", &Printer::default()))],
             printer: Printer::default(),
             flush: Flush {
                 volumes_mm3: (0..9).map(|i| i as f32 * 100.0).collect(),
@@ -466,6 +475,10 @@ mod tests {
         assert!(main.contains("1 0 0 0 1 0 0 0 1 133 133 0"));
         assert!(s.contains("<vertex x=\"5\" y=\"-5\" z=\"0\"/>"), "{s}");
         assert_eq!(v["printer_settings_id"], "Bambu Lab A1 0.4 nozzle");
+        // Slot 2 carries its own filament; the others print as the printer's PLA.
+        assert_eq!(v["filament_type"], serde_json::json!(["PLA", "PETG", "PLA"]));
+        assert_eq!(v["filament_settings_id"][1], "Bambu PETG HF @BBL A1");
+        assert_eq!(v["filament_settings_id"][2], "Bambu PLA Basic @BBL A1");
         assert!(v.get("printable_area").is_none());
     }
 
@@ -480,6 +493,7 @@ mod tests {
             piece: "pieza",
             parts: vec![part("a", 0), part("b (2)", 1), part("c", 0)],
             filaments: vec!["#FFFFFF".into()],
+            slots: vec![],
             printer: Printer::default(),
             flush: Flush::default(),
             layer_mm: None,
@@ -512,6 +526,7 @@ mod tests {
                 Part { name: "b", positions: &right, tris: &tris, paint: &paint, object: 1 },
             ],
             filaments: vec!["#FFFFFF".into()],
+            slots: vec![],
             printer: Printer::default(),
             flush: Flush::default(),
             layer_mm: None,
@@ -541,6 +556,7 @@ mod tests {
                 piece: "piece",
                 parts: vec![Part { name: "a", positions: &positions, tris: &tris, paint: &paint, object: 0 }],
                 filaments: vec!["#FFFFFF".into()],
+                slots: vec![],
                 printer: Printer::default(),
                 flush: Flush::default(),
                 layer_mm: None,
@@ -581,6 +597,7 @@ mod tests {
             piece: "piece",
             parts: vec![],
             filaments: vec!["#FFFFFF".into()],
+            slots: vec![],
             printer,
             flush: Flush::default(),
             layer_mm: None,

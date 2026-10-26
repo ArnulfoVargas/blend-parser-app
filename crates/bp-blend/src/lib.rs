@@ -436,6 +436,7 @@ mod tests {
                 })
                 .collect(),
             filaments,
+            slots: vec![],
             printer: bp_3mf::Printer::default(),
             flush: bp_3mf::Flush { volumes_mm3: matrix, ..Default::default() },
             layer_mm: None,

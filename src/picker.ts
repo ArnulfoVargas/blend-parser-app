@@ -14,6 +14,8 @@ export interface PickerItem {
   keywords?: string;
   /** What the closed button shows, when the label alone is too short out of its group. */
   full?: string;
+  /** A colour dot before the label (`#RRGGBB`). */
+  swatch?: string;
 }
 
 interface PickerOptions {
@@ -204,6 +206,10 @@ export class Picker {
       opt.setAttribute("aria-selected", String(item.value === this.current));
       opt.dataset.value = item.value;
       opt.dataset.index = String(index);
+      if (item.swatch) {
+        opt.classList.add("has-swatch");
+        opt.style.setProperty("--t", item.swatch);
+      }
       opt.append(Object.assign(document.createElement("span"), { className: "picker__label", textContent: item.label }));
       if (item.detail) opt.append(Object.assign(document.createElement("span"), { className: "picker__detail", textContent: item.detail }));
       group.append(opt);

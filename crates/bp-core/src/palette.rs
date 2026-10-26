@@ -159,6 +159,77 @@ pub fn auto_palette(samples: &[Rgb], k: usize) -> Vec<Rgb> {
 }
 
 /// CIE76 colour difference (ΔE) between two sRGB colours.
+/// Picks `k` of `candidates` (spools the user has, say) to paint `samples`
+/// with: the ones that leave the least total ΔE from each sample to its closest
+/// pick. Samples are binned and weighted as [`auto_palette`] does, so small but
+/// distinct details count. Greedy picks, then swaps while one lowers the total.
+/// Returns indices into `candidates`, at most `k` and no repeats.
+pub fn pick_from(samples: &[Rgb], candidates: &[Rgb], k: usize) -> Vec<usize> {
+    let k = k.clamp(1, candidates.len().max(1));
+    if candidates.len() <= k {
+        return (0..candidates.len()).collect();
+    }
+    let mut bins: std::collections::HashMap<u32, ([f32; 3], u32)> = std::collections::HashMap::new();
+    for c in samples {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 31.0).round() as u32;
+        let e = bins.entry(q(c[0]) << 10 | q(c[1]) << 5 | q(c[2])).or_insert(([0.0; 3], 0));
+        for (acc, v) in e.0.iter_mut().zip(c) {
+            *acc += v;
+        }
+        e.1 += 1;
+    }
+    let bins: Vec<(Lab, f32)> =
+        bins.into_values().map(|(s, n)| (srgb_to_lab(s.map(|v| v / n as f32)), (n as f32).sqrt())).collect();
+    let labs: Vec<Lab> = candidates.iter().map(|&c| srgb_to_lab(c)).collect();
+    // Distance from every bin to every candidate, once.
+    let d: Vec<Vec<f32>> = bins.iter().map(|b| labs.iter().map(|l| dist2(b.0, *l).sqrt()).collect()).collect();
+    let cost = |picks: &[usize]| -> f32 {
+        bins.iter().zip(&d).map(|(b, row)| b.1 * picks.iter().map(|&p| row[p]).fold(f32::MAX, f32::min)).sum()
+    };
+    let mut picks: Vec<usize> = vec![];
+    while picks.len() < k {
+        let mut best: Option<(f32, usize)> = None;
+        for c in 0..labs.len() {
+            if picks.contains(&c) {
+                continue;
+            }
+            picks.push(c);
+            let v = cost(&picks);
+            picks.pop();
+            if best.is_none_or(|b| v < b.0) {
+                best = Some((v, c));
+            }
+        }
+        match best {
+            Some((_, c)) => picks.push(c),
+            None => break,
+        }
+    }
+    let mut now = cost(&picks);
+    for _ in 0..4 {
+        let mut better = false;
+        for i in 0..picks.len() {
+            for c in 0..labs.len() {
+                if picks.contains(&c) {
+                    continue;
+                }
+                let old = std::mem::replace(&mut picks[i], c);
+                let v = cost(&picks);
+                if v < now - 1e-3 {
+                    now = v;
+                    better = true;
+                } else {
+                    picks[i] = old;
+                }
+            }
+        }
+        if !better {
+            break;
+        }
+    }
+    picks
+}
+
 pub fn delta_e(a: Rgb, b: Rgb) -> f32 {
     dist2(srgb_to_lab(a), srgb_to_lab(b)).sqrt()
 }
@@ -243,6 +314,32 @@ fn nearest(centers: &[Lab], l: Lab) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_the_spools_closest_to_the_model() {
+        // Red, a dark blue and a little white.
+        let mut s = vec![];
+        s.extend(std::iter::repeat_n([0.80, 0.10, 0.10], 6000));
+        s.extend(std::iter::repeat_n([0.10, 0.12, 0.40], 3000));
+        s.extend(std::iter::repeat_n([0.95, 0.95, 0.95], 200));
+        let spools = [
+            [1.0, 1.0, 1.0],    // white
+            [0.0, 0.0, 0.0],    // black
+            [0.85, 0.08, 0.10], // red
+            [1.0, 0.42, 0.07],  // orange
+            [0.04, 0.17, 0.65], // blue
+            [0.36, 0.40, 0.47], // grey
+        ];
+        let mut p = pick_from(&s, &spools, 3);
+        p.sort_unstable();
+        assert_eq!(p, vec![0, 2, 4]);
+        // Two spools: the white is the one to give up.
+        let mut p = pick_from(&s, &spools, 2);
+        p.sort_unstable();
+        assert_eq!(p, vec![2, 4]);
+        // As many spools as asked for, or fewer: all of them.
+        assert_eq!(pick_from(&s, &spools[..2], 4), vec![0, 1]);
+    }
 
     #[test]
     fn keeps_a_small_distinct_colour() {

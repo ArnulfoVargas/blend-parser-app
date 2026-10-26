@@ -22,6 +22,10 @@ fn project() -> Project {
 }
 
 fn save(p: &Project, path: &Path) {
+    save_with(p, path, vec![]);
+}
+
+fn save_with(p: &Project, path: &Path, filaments: Vec<(String, bp_3mf::filament::Filament)>) {
     let settings = bp_3mf::project_file::Settings {
         format: bp_3mf::project_file::FORMAT,
         app_version: "test".into(),
@@ -32,6 +36,7 @@ fn save(p: &Project, path: &Path) {
         nozzle_mm: 0.4,
         flush: vec![],
         offset_mm: [0.0; 2],
+        filaments,
     };
     let file = std::fs::File::create(path).unwrap();
     bp_3mf::project_file::write(file, &serde_json::to_string(&settings).unwrap(), &p.to_bytes()).unwrap();
@@ -52,7 +57,9 @@ fn converts_a_folder_of_projects() {
     std::fs::create_dir_all(&config).unwrap();
     let p = project();
     save(&p, &inputs.join("a.bpproj"));
-    save(&p, &inputs.join("b.bpproj"));
+    // Slot 1 of b carries a PETG spool.
+    let spool = bp_3mf::filament::catalog().into_iter().find(|f| f.kind == "PETG HF").unwrap();
+    save_with(&p, &inputs.join("b.bpproj"), vec![(bp_core::color::to_hex(p.palette()[0]), spool.clone())]);
     std::fs::write(inputs.join("notes.txt"), "not a model").unwrap();
 
     let run = |extra: &[&str]| {
@@ -81,6 +88,11 @@ fn converts_a_folder_of_projects() {
     }
     let cfg = read(&out.join("b.3mf"), "Metadata/project_settings.config");
     assert!(cfg.contains("Bambu Lab A1 0.4 nozzle"), "the project's printer");
+    let cfg: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+    assert_eq!(cfg["filament_type"][0], "PETG");
+    assert_eq!(cfg["filament_settings_id"][0], "Bambu PETG HF @BBL A1");
+    assert_eq!(cfg["filament_colour"][0], format!("{}FF", spool.hex));
+    assert_eq!(cfg["filament_type"][1], "PLA");
 
     // A damaged project does not stop the others; the exit code says one failed.
     std::fs::write(inputs.join("c.bpproj"), "broken").unwrap();

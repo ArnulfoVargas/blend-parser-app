@@ -16,6 +16,8 @@ import {
   api,
   isAppError,
   type BucketPick,
+  type Filament,
+  type Filaments,
   type PlatePrefs,
   type PrinterProfile,
   type Printers,
@@ -942,8 +944,10 @@ function renderSlots(s: Summary) {
         <strong class="mono">${slot.hex}</strong>
         <span class="slot__count">${t("slot.triangles", { count: slot.triangles, n: nf(slot.triangles) })}</span>
         <span class="slot__near${close ? " is-close" : ""}">${near ? t("slot.near", { n: near[0] + 1, de: nf(near[1]) }) : t("slot.only")}</span>
+        <span class="slot__filament"></span>
       </button>
-      <div class="slot__actions">${s.slots.length < 2 ? "" : `
+      <div class="slot__actions">
+        <button class="btn btn--quiet btn--sm slot__spool" type="button">${t("filaments.pick")}</button>${s.slots.length < 2 ? "" : `
         ${close ? `<button class="btn btn--quiet btn--sm slot__join" type="button">${t("slot.joinWith", { n: near![0] + 1 })}</button>` : ""}
         <label class="visually-hidden" for="merge-${i}">${t("slot.mergeLabel", { n })}</label>
         <select class="slot__merge" id="merge-${i}">
@@ -955,9 +959,24 @@ function renderSlots(s: Summary) {
     const input = li.querySelector<HTMLInputElement>('input[type="color"]')!;
     input.addEventListener("input", () => li.style.setProperty("--t", input.value));
     input.addEventListener("change", () => {
-      const colors = s.slots.map((x, j) => (j === i ? input.value : x.hex));
+      // The colours found in the model decide what each slot paints; filaments only change how it prints.
+      const colors = s.slots.map((x, j) => (j === i ? input.value : x.detectedHex));
       void apply(() => api.setPalette(colors));
     });
+    // From the inventory, a slot's colour is a spool's: picked, not typed.
+    input.disabled = inventoryActive();
+    if (input.disabled) input.parentElement!.title = t("filaments.inventoryLocked");
+    const spool = li.querySelector<HTMLElement>(".slot__filament")!;
+    if (slot.filament) {
+      const f = slot.filament;
+      const words = { brand: f.brand, kind: f.kind, name: filamentName(f) };
+      const far = (slot.filamentDeltaE ?? 0) > CLOSE_DELTA_E;
+      spool.classList.toggle("is-far", far);
+      spool.textContent = far ? t("filaments.far", { ...words, de: nf(slot.filamentDeltaE ?? 0) }) : t("filaments.onSlot", words);
+    } else {
+      spool.textContent = t("filaments.noneOnSlot");
+    }
+    li.querySelector(".slot__spool")!.addEventListener("click", () => void openSlotFilament(i));
     li.querySelector(".slot__pick")!.addEventListener("click", () => {
       brushSlot = i;
       list.querySelectorAll(".slot__pick").forEach((b, j) => {
@@ -984,6 +1003,153 @@ function renderSlots(s: Summary) {
     return li;
   }));
 }
+
+// ---- filaments ---------------------------------------------------------------------------
+
+let filaments: Filaments | null = null;
+/** Suggested colours come only from the owned spools: asked for, and there are some. */
+const inventoryActive = () => Boolean(filaments?.inventoryOnly && filaments.owned.length);
+const filamentName = (f: Filament) => (currentLang() === "es" ? f.nameEs : f.nameEn) || f.nameEn || f.nameEs;
+
+const filamentsDialog = $<HTMLDialogElement>("#filaments-dialog");
+const filamentSearch = $<HTMLInputElement>("#filament-search");
+const inventoryOnly = $<HTMLInputElement>("#inventory-only");
+
+/** Lower case, no accents: "maté" finds "Matte". */
+const folded = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+/** Every filament by line, the user's own first, filtered by the search; each with "I have it". */
+function renderFilaments() {
+  if (!filaments) return;
+  const f = filaments;
+  inventoryOnly.checked = f.inventoryOnly;
+  bind("ownedCount", t("filaments.owned", { count: f.owned.length }));
+  const q = folded(filamentSearch.value.trim());
+  const shown = f.filaments.filter((x) => !q || folded(`${x.brand} ${x.kind} ${x.nameEs} ${x.nameEn} ${x.hex}`).includes(q));
+  const groups = new Map<string, Filament[]>();
+  for (const x of shown) {
+    const key = x.custom ? t("filaments.mine") : x.kind;
+    groups.set(key, [...(groups.get(key) ?? []), x]);
+  }
+  const owned = new Set(f.owned);
+  const sections = [...groups].sort(([a], [b]) => (a === t("filaments.mine") ? -1 : b === t("filaments.mine") ? 1 : 0)).map(([kind, list]) => {
+    const section = Object.assign(document.createElement("section"), { className: "filaments__group" });
+    const ul = Object.assign(document.createElement("ul"), { className: "filaments__list" });
+    ul.append(...list.map((x) => {
+      const li = Object.assign(document.createElement("li"), { className: "filaments__item" });
+      const label = document.createElement("label");
+      const box = Object.assign(document.createElement("input"), { type: "checkbox", checked: owned.has(x.id) });
+      box.setAttribute("aria-label", t("filaments.have", { name: `${x.brand} ${x.kind} ${filamentName(x)}` }));
+      box.addEventListener("change", () => void updateFilaments(() => api.setFilamentOwned(x.id, box.checked)));
+      const dot = Object.assign(document.createElement("i"), { className: "swatch-dot" });
+      dot.style.setProperty("--t", x.hex);
+      const name = Object.assign(document.createElement("span"), { className: "name", textContent: x.custom ? `${x.brand} ${x.kind} ${filamentName(x)}`.trim() : filamentName(x), title: x.hex });
+      label.append(box, dot, name);
+      li.append(label);
+      if (x.custom) {
+        const del = Object.assign(document.createElement("button"), { className: "link", type: "button", textContent: t("filaments.delete") });
+        del.addEventListener("click", () => void updateFilaments(() => api.deleteFilament(x.id)));
+        li.append(del);
+      }
+      return li;
+    }));
+    section.append(Object.assign(document.createElement("h3"), { textContent: kind }), ul);
+    return section;
+  });
+  const list = $("#filament-list");
+  if (!sections.length) list.replaceChildren(Object.assign(document.createElement("p"), { className: "help", textContent: t("filaments.none", { q: filamentSearch.value.trim() }) }));
+  else list.replaceChildren(...sections);
+  $("#ff-kinds").replaceChildren(...[...new Set(f.filaments.map((x) => x.kind))].map((k) => new Option(k)));
+}
+
+/** Runs a change to the user's filaments, then shows them again. */
+async function updateFilaments(call: () => Promise<Filaments>) {
+  try {
+    filaments = await call();
+    renderFilaments();
+    if (summary) render(summary);
+  } catch (e) {
+    toast(errText(e), "error");
+  }
+}
+
+async function openFilaments() {
+  if (document.querySelector("dialog[open]")) return;
+  filaments = await api.filaments();
+  filamentSearch.value = "";
+  $("#filament-error").hidden = true;
+  renderFilaments();
+  filamentsDialog.showModal();
+  filamentSearch.focus();
+}
+filamentSearch.addEventListener("input", renderFilaments);
+inventoryOnly.addEventListener("change", () => void updateFilaments(() => api.setInventoryOnly(inventoryOnly.checked)));
+$("#filaments-close").addEventListener("click", () => filamentsDialog.close());
+$("#filament-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = (id: string) => $<HTMLInputElement>(id).value.trim();
+  const draft: Filament = { id: "", brand: v("#ff-brand"), kind: v("#ff-kind"), nameEs: v("#ff-name"), nameEn: "", hex: v("#ff-hex"), custom: true };
+  void (async () => {
+    try {
+      filaments = await api.saveFilament(draft);
+      $("#filament-error").hidden = true;
+      ["#ff-name"].forEach((id) => ($<HTMLInputElement>(id).value = ""));
+      renderFilaments();
+    } catch (err) {
+      const box = $("#filament-error");
+      box.textContent = errText(err);
+      box.hidden = false;
+    }
+  })();
+});
+
+// Picking the filament for one slot: the owned ones when colours come from the inventory.
+const slotDialog = $<HTMLDialogElement>("#slot-filament-dialog");
+let slotEditing = 0;
+const slotPickerTexts = (): PickerTexts => ({
+  label: t("filaments.picker"),
+  placeholder: t("filaments.search"),
+  searchLabel: t("filaments.search"),
+  none: t("filaments.pickerNone"),
+  empty: (q) => t("filaments.none", { q }),
+});
+const slotPicker = new Picker($("#slot-filament-picker"), {
+  ...slotPickerTexts(),
+  onPick: (id) => {
+    slotDialog.close();
+    void apply(() => api.setSlotFilament(slotEditing, id));
+  },
+});
+
+async function openSlotFilament(slot: number) {
+  if (!summary) return;
+  filaments = await api.filaments();
+  slotEditing = slot;
+  const owned = new Set(filaments.owned);
+  const pool = inventoryActive() ? filaments.filaments.filter((f) => owned.has(f.id)) : filaments.filaments;
+  // What the user has first, then the rest by line.
+  const sorted = [...pool.filter((f) => owned.has(f.id)), ...pool.filter((f) => !owned.has(f.id))];
+  slotPicker.setItems(sorted.map((f) => ({
+    value: f.id,
+    label: filamentName(f),
+    group: f.custom ? t("filaments.mine") : f.kind,
+    detail: `${f.brand} · ${f.hex}`,
+    keywords: `${f.brand} ${f.kind} ${f.nameEs} ${f.nameEn} ${f.hex}`,
+    full: `${f.brand} ${f.kind} ${filamentName(f)}`,
+    swatch: f.hex,
+  })));
+  slotPicker.setValue(summary.slots[slot]?.filament?.id ?? "");
+  bind("slotFilamentTitle", t("filaments.slotTitle", { n: slot + 1 }));
+  bind("slotFilamentHelp", inventoryActive() ? `${t("filaments.slotHelp")} ${t("filaments.slotHelpOwned")}` : t("filaments.slotHelp"));
+  $<HTMLButtonElement>("#slot-filament-clear").disabled = !summary.slots[slot]?.filament;
+  slotDialog.showModal();
+  slotPicker.button.focus();
+}
+$("#slot-filament-clear").addEventListener("click", () => {
+  slotDialog.close();
+  void apply(() => api.setSlotFilament(slotEditing, null));
+});
+$("#slot-filament-close").addEventListener("click", () => slotDialog.close());
 
 // ---- opening files ---------------------------------------------------------------------
 
@@ -1819,6 +1985,7 @@ const COMMANDS: Record<string, { run: () => void; enabled?: () => boolean }> = {
   saveAs: { run: () => void saveProject(true), enabled: ready },
   export: { run: () => $("#export").click(), enabled: ready },
   printers: { run: () => openPrinterDialog() },
+  filaments: { run: () => void openFilaments() },
   undo: { run: () => void undo(), enabled: () => ready() && Boolean(summary?.canUndo) },
   undoSize: { run: () => $("#size-undo").click(), enabled: () => ready() && Boolean(summary?.size.canUndo) },
   waste: { run: () => $("#open-waste").click(), enabled: ready },
@@ -1863,6 +2030,8 @@ onLangChange(() => {
     renderPrinterList();
     $("#pf-nozzles legend").textContent = t("printers.nozzles");
   }
+  if (filamentsDialog.open) renderFilaments();
+  slotPicker.relabel(slotPickerTexts());
   if (wasteDialog.open) {
     const keep = readWasteForm();
     fillMaterials();
@@ -1927,6 +2096,7 @@ void api.printers().then((p) => {
   renderPrinterPick(p.selected, p.nozzleMm);
 });
 void api.prefs().then((p) => (prefs = p));
+void api.filaments().then((f) => (filaments = f));
 void currentVersion().then((v) => bind("version", `v${v}`));
 // Check quietly once the window has settled; only a newer version is announced.
 window.setTimeout(() => void checkForUpdates(true), 4000);

@@ -26,6 +26,15 @@ pub fn save(doc: &Document, path: &str) -> CmdResult<()> {
         nozzle_mm: doc.printer.nozzle_mm,
         flush: doc.flush.iter().map(|((a, b), v)| (a.clone(), b.clone(), *v)).collect(),
         offset_mm: doc.offset_mm,
+        filaments: doc
+            .project
+            .palette()
+            .iter()
+            .filter_map(|c| {
+                let hex = bp_core::color::to_hex(*c);
+                doc.filaments.get(&hex).map(|f| (hex, f.clone()))
+            })
+            .collect(),
     };
     let json = serde_json::to_string_pretty(&settings).map_err(AppError::internal)?;
     let model = doc.project.to_bytes();
@@ -71,6 +80,7 @@ pub fn open(path: &str, store: &Store) -> CmdResult<Document> {
         printer,
         flush: s.flush.into_iter().map(|(a, b, v)| ((a, b), v)).collect(),
         offset_mm: s.offset_mm,
+        filaments: s.filaments.into_iter().collect(),
     })
 }
 
@@ -105,6 +115,7 @@ mod tests {
             printer,
             flush: [(("#E61A1A".to_string(), "#1A1AE6".to_string()), 321.0)].into_iter().collect(),
             offset_mm: [12.0, -3.5],
+            filaments: Default::default(),
         }
     }
 

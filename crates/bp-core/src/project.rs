@@ -775,6 +775,14 @@ impl Project {
         palette::auto_palette(&samples, n.clamp(1, 16))
     }
 
+    /// Which `n` of `candidates` (spool colours) paint the model with the least
+    /// total ΔE from its colours (see [`palette::pick_from`]), as indices.
+    pub fn suggest_from(&self, candidates: &[Rgb], n: usize) -> Vec<usize> {
+        let field = ColorField::new(&self.scene, &self.shape);
+        let samples = palette::surface_samples(&field, &self.shape, 300_000, 1);
+        palette::pick_from(&samples, candidates, n.clamp(1, 16))
+    }
+
     /// Replaces the target colours and repaints. With the same number of slots,
     /// each slot keeps the colours merged into it; otherwise merges are reset.
     /// Hand painting on slots that no longer exist is dropped.

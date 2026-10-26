@@ -19,6 +19,14 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   a mano) y persisten aunque se recalcule.
 - Vista previa 3D: orbitar, mover y acercar; vista de filamentos o de textura original.
 - Pincel sobre la malla con los colores objetivo, con deshacer (`Ctrl+Z`).
+- Mis filamentos (menú Editar): los 298 colores de un solo tono de Bambu Lab, con su línea
+  (PLA Basic, PETG HF…) y su nombre en español e inglés, más los tuyos. Marca los que tienes y,
+  con «Sugerir colores solo con los que tengo», la paleta se elige entre esas bobinas (la
+  combinación de N que deja menos ΔE frente al modelo). Cada ranura puede llevar su filamento:
+  sigue pintando lo mismo, se imprime y estima con el color de la bobina, avisa si se aleja del
+  color del modelo, y el 3MF nombra su material y, si Bambu Studio lo trae para la impresora,
+  su preset («Bambu PETG HF @BBL X1C»). El inventario se guarda en `filaments.json` y los
+  filamentos de cada ranura, en el proyecto.
 - Cubeta por color original (`K`): un clic elige el color que el modelo tiene ahí (aunque
   la paleta lo haya unido a otra ranura) y lo manda a la ranura del pincel, en esa zona
   conectada o en todo el modelo, o lo añade como color nuevo. La zona se resalta antes de
@@ -76,6 +84,19 @@ la boquilla y la altura de capa.
 
 Quedan fuera las impresoras de dos extrusores (H2D, H2D Pro, H2C, X2D): su 3MF necesita otra
 configuración de filamentos.
+
+## Catálogo de filamentos
+
+`crates/bp-3mf/src/filaments.json` sale de `resources/profiles/BBL/filament/filaments_color_codes.json`
+y `resources/profiles/BBL.json` de [BambuStudio](https://github.com/bambulab/BambuStudio):
+
+```sh
+node scripts/sync-filaments.mjs [commit]
+```
+
+Guarda los colores de un solo tono (los degradados y multicolor no son un color de ranura), el
+material de cada línea según su preset y las impresoras para las que Bambu Studio tiene preset.
+Como el de impresoras, se ejecuta solo a mano y el JSON se guarda en Git.
 
 ## Torre de purga y desperdicio
 
