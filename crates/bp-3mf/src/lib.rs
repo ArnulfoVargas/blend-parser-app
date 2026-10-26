@@ -76,7 +76,7 @@ pub struct Flush {
 
 impl Default for Flush {
     fn default() -> Self {
-        Self { volumes_mm3: vec![], multiplier: 1.0, into_infill: false, prime_mm3: 20.0 }
+        Self { volumes_mm3: vec![], multiplier: 1.0, into_infill: false, prime_mm3: 45.0 }
     }
 }
 
@@ -330,9 +330,9 @@ fn project_json(model: &Model) -> String {
         "retract_restart_extra_toolchange": rep("0"),
         "standby_temperature_delta": "-5",
         "enable_prime_tower": if n > 1 { "1" } else { "0" },
-        "prime_tower_width": "20",
+        "prime_tower_width": "35",
         "prime_tower_brim_width": "3",
-        "prime_volume": format!("{}", f.prime_mm3.round()),
+        "filament_prime_volume": rep(&format!("{}", f.prime_mm3.round())),
         "flush_into_infill": if f.into_infill { "1" } else { "0" },
         "flush_into_objects": "0",
         "flush_into_support": "1",
@@ -466,6 +466,9 @@ mod tests {
         assert_eq!(v["flush_volumes_matrix"][1], "100");
         assert_eq!(v["flush_volumes_matrix"][3], "300");
         assert_eq!(v["flush_multiplier"], "1.5");
+        // Primed per filament under the name Bambu Studio 2 reads.
+        assert_eq!(v["filament_prime_volume"], serde_json::json!(["45", "45", "45"]));
+        assert!(v.get("prime_volume").is_none());
         assert_eq!(v["wipe_tower_x"][0], "15");
         assert_eq!(v["layer_height"], "0.16");
         let mut main = String::new();

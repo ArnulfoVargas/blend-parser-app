@@ -6,17 +6,19 @@
 //!   Bambu Studio's flush multiplier does. Part of it can go into the model's
 //!   infill or supports instead of the bin.
 //! - **Start**: the purge line every print begins with.
-//! - **Prime tower**: its walls and sparse fill on every layer up to the last
-//!   swap, plus the priming done on it at each swap. On printers that purge
-//!   into the tower rather than a chute the flush ends up there too; it is
-//!   still reported as flush, never twice.
+//! - **Prime tower**: Bambu Studio 2's square tower with ribs, its walls and
+//!   sparse fill on every layer up to the last swap, plus the priming done on
+//!   it at each swap. On printers that purge into the tower rather than a
+//!   chute the flush ends up there too; it is still reported as flush, never
+//!   twice.
 //!
-//! The slicer decides the exact order and volumes; this is an estimate to
-//! compare settings and to reserve room on the plate.
+//! The flushes, the tower's size and how it is printed follow Bambu Studio
+//! (`FlushVolCalc.cpp`, `Print.cpp`, `WipeTower.cpp`). The slicer decides the
+//! exact order and volumes; this is an estimate to compare settings and to
+//! reserve room on the plate.
 
-use crate::color::{srgb_to_lab, Rgb};
+use crate::color::{delta_e2000, srgb_to_lab, Rgb};
 use crate::estimate::{plan, SwapEstimate};
-use crate::palette::delta_e;
 
 /// Print settings the estimate depends on, in millimetres, mm³ and g/cm³.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,15 +31,14 @@ pub struct WasteParams {
     pub flush_multiplier: f32,
     /// Purge line at the start of the print.
     pub start_purge_mm3: f32,
-    /// Primed on the tower at each swap.
+    /// Primed on the tower at each swap (Bambu Studio's `filament_prime_volume`).
     pub prime_mm3: f32,
     /// Share of the flush that infill or supports take instead (0 to 1); an assumption.
     pub flush_reuse: f32,
     /// Whether a prime tower is printed at all.
     pub tower: bool,
-    /// Tower width without its brim.
-    pub tower_width_mm: f32,
-    /// Tower depth without its brim; `None` estimates it from the busiest layer.
+    /// Side of the square tower without its brim; `None` sizes it as Bambu
+    /// Studio does, from the busiest layer and the print's height.
     pub tower_depth_mm: Option<f32>,
     pub tower_brim_mm: f32,
     /// The printer purges into a chute; otherwise the flush goes into the tower.
@@ -53,10 +54,9 @@ impl Default for WasteParams {
             density_g_cm3: 1.24,
             flush_multiplier: 1.0,
             start_purge_mm3: 120.0,
-            prime_mm3: 20.0,
+            prime_mm3: 45.0,
             flush_reuse: 0.0,
             tower: true,
-            tower_width_mm: 20.0,
             tower_depth_mm: None,
             tower_brim_mm: 3.0,
             purge_chute: true,
@@ -64,19 +64,139 @@ impl Default for WasteParams {
     }
 }
 
-/// Smallest and largest flush Bambu Studio suggests for single-nozzle printers.
-pub const MIN_FLUSH_MM3: f32 = 107.0;
-pub const MAX_FLUSH_MM3: f32 = 800.0;
+/// The most Bambu Studio flushes at one swap.
+pub const MAX_FLUSH_MM3: f32 = 900.0;
 
-/// Flush for a swap from `from` to `to`: more for very different colours, and
-/// more again when the new colour is lighter, which shows any trace of the old.
-pub fn default_flush(from: Rgb, to: Rgb) -> f32 {
+/// Bambu Studio's measured flushes on single-nozzle printers
+/// (`resources/flush/flush_data_standard.txt`), above the nozzle's own volume:
+/// the colours it was measured with, then (from, to, mm³).
+const MEASURED_COLOURS: [u32; 12] = [
+    0x000000, 0xC12E1F, 0x00AE42, 0x545454, 0xD1D3D5, 0x5B6579, 0xF4EE2A, 0x9D432C, 0x5E43B7, 0x0A2989, 0xFF6A13,
+    0x8E9089,
+];
+const MEASURED: [(u32, u32, f32); 58] = [
+    (0x000000, 0xF4EE2A, 450.0),
+    (0x000000, 0x5E43B7, 330.0),
+    (0xC12E1F, 0xF4EE2A, 420.0),
+    (0xC12E1F, 0xFF6A13, 210.0),
+    (0x00AE42, 0xD1D3D5, 330.0),
+    (0x00AE42, 0xF4EE2A, 240.0),
+    (0x00AE42, 0xFF6A13, 270.0),
+    (0x545454, 0x00AE42, 180.0),
+    (0x545454, 0xD1D3D5, 240.0),
+    (0x545454, 0xF4EE2A, 270.0),
+    (0x545454, 0x5E43B7, 120.0),
+    (0x545454, 0xFF6A13, 300.0),
+    (0x545454, 0x8E9089, 120.0),
+    (0xD1D3D5, 0xF4EE2A, 120.0),
+    (0xD1D3D5, 0xFF6A13, 150.0),
+    (0x5B6579, 0xC12E1F, 120.0),
+    (0x5B6579, 0x00AE42, 90.0),
+    (0x5B6579, 0xD1D3D5, 120.0),
+    (0x5B6579, 0xF4EE2A, 180.0),
+    (0x5B6579, 0x9D432C, 120.0),
+    (0x5B6579, 0x0A2989, 90.0),
+    (0x5B6579, 0xFF6A13, 180.0),
+    (0x5B6579, 0x8E9089, 90.0),
+    (0xF4EE2A, 0x000000, 120.0),
+    (0xF4EE2A, 0xC12E1F, 90.0),
+    (0xF4EE2A, 0x00AE42, 150.0),
+    (0xF4EE2A, 0x9D432C, 150.0),
+    (0xF4EE2A, 0xFF6A13, 90.0),
+    (0x9D432C, 0x00AE42, 240.0),
+    (0x9D432C, 0xD1D3D5, 300.0),
+    (0x9D432C, 0xF4EE2A, 270.0),
+    (0x9D432C, 0xFF6A13, 180.0),
+    (0x9D432C, 0x8E9089, 210.0),
+    (0x5E43B7, 0x00AE42, 180.0),
+    (0x5E43B7, 0xD1D3D5, 270.0),
+    (0x5E43B7, 0xF4EE2A, 270.0),
+    (0x5E43B7, 0x9D432C, 150.0),
+    (0x5E43B7, 0xFF6A13, 270.0),
+    (0x5E43B7, 0x8E9089, 210.0),
+    (0x0A2989, 0xC12E1F, 330.0),
+    (0x0A2989, 0x00AE42, 210.0),
+    (0x0A2989, 0x545454, 150.0),
+    (0x0A2989, 0xD1D3D5, 450.0),
+    (0x0A2989, 0x5B6579, 240.0),
+    (0x0A2989, 0x9D432C, 270.0),
+    (0x0A2989, 0x5E43B7, 180.0),
+    (0x0A2989, 0xFF6A13, 390.0),
+    (0x0A2989, 0x8E9089, 270.0),
+    (0xFF6A13, 0xC12E1F, 90.0),
+    (0xFF6A13, 0xD1D3D5, 210.0),
+    (0xFF6A13, 0xF4EE2A, 210.0),
+    (0xFF6A13, 0x9D432C, 120.0),
+    (0xFF6A13, 0x8E9089, 180.0),
+    (0x8E9089, 0xC12E1F, 150.0),
+    (0x8E9089, 0x00AE42, 120.0),
+    (0x8E9089, 0xD1D3D5, 150.0),
+    (0x8E9089, 0xF4EE2A, 270.0),
+    (0x8E9089, 0xFF6A13, 150.0),
+];
+
+fn rgb_of(hex: u32) -> Rgb {
+    [(hex >> 16) as f32 / 255.0, ((hex >> 8) & 0xFF) as f32 / 255.0, (hex & 0xFF) as f32 / 255.0]
+}
+
+/// The measured flush for a swap whose colours match measured ones (CIEDE2000
+/// within 5, the first match in Bambu Studio's order), if it was measured.
+fn measured_flush(from: Rgb, to: Rgb) -> Option<f32> {
+    let like = |c: Rgb| {
+        let lab = srgb_to_lab(c);
+        MEASURED_COLOURS.iter().copied().find(|&m| delta_e2000(srgb_to_lab(rgb_of(m)), lab) <= 5.0)
+    };
+    let (a, b) = (like(from)?, like(to)?);
+    MEASURED.iter().find(|m| m.0 == a && m.1 == b).map(|m| m.2)
+}
+
+/// Hue, saturation (0 to 1) and value, as Bambu Studio converts them.
+fn hsv(c: Rgb) -> (f32, f32, f32) {
+    let [r, g, b] = c;
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let d = max - min;
+    let h = if d.abs() < 0.001 {
+        0.0
+    } else if max == r {
+        60.0 * ((g - b) / d % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (h, if max.abs() < 0.001 { 0.0 } else { d / max }, max)
+}
+
+/// Bambu Studio's flush for a swap from `from` to `to` on a single nozzle
+/// (`FlushVolCalculator`): the measured value where both colours were measured,
+/// otherwise its formula, which weighs how far apart the hues are against how
+/// much lighter the new colour is (a light colour after a dark one shows any
+/// trace of it); then the nozzle's own volume, `min_mm3`, on top, capped at
+/// [`MAX_FLUSH_MM3`]. Before the flush multiplier.
+pub fn default_flush(from: Rgb, to: Rgb, min_mm3: f32) -> f32 {
+    let q = |c: Rgb| c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0);
+    let (from, to) = (q(from), q(to));
     if from == to {
         return 0.0;
     }
-    let lighter = (srgb_to_lab(to)[0] - srgb_to_lab(from)[0]).max(0.0);
-    let k = ((0.6 * delta_e(from, to) + 1.2 * lighter) / 150.0).clamp(0.0, 1.0);
-    (MIN_FLUSH_MM3 + (MAX_FLUSH_MM3 - MIN_FLUSH_MM3) * k).round()
+    let colour = measured_flush(from, to).unwrap_or_else(|| {
+        let ((h1, s1, v1), (h2, s2, v2)) = (hsv(from), hsv(to));
+        let (h1, h2) = (h1.to_radians(), h2.to_radians());
+        let (dx, dy) = (h1.cos() * s1 * v1 - h2.cos() * s2 * v2, h1.sin() * s1 * v1 - h2.sin() * s2 * v2);
+        let mut hs = (dx * dx + dy * dy).sqrt().min(1.2);
+        let luma = |c: Rgb| c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
+        let (l1, l2) = (luma(from), luma(to));
+        let lumi = if l2 >= l1 {
+            (l2 - l1).powf(0.7) * 560.0
+        } else {
+            hs = hs.min(0.67 * v2 + 0.33 * v1);
+            (l1 - l2) * 80.0
+        };
+        let hs = 230.0 * hs;
+        // Two sides of a triangle 120° apart: neither difference hides the other.
+        (hs * hs + lumi * lumi - 2.0 * hs * lumi * 120f32.to_radians().cos()).sqrt().max(60.0)
+    });
+    (colour + min_mm3.max(0.0)).min(MAX_FLUSH_MM3).floor()
 }
 
 /// The volumes and what they weigh. Volumes in mm³.
@@ -100,6 +220,37 @@ pub struct Waste {
     pub tower_height_mm: f32,
 }
 
+/// Tower line width against the nozzle, as Bambu Studio prints it.
+const LINE_PER_NOZZLE: f32 = 1.25;
+/// Rib width (`prime_tower_rib_width`) and how far apart sparse lines are (`wipe_tower_bridging`).
+const RIB_WIDTH_MM: f32 = 8.0;
+const BRIDGING_MM: f32 = 10.0;
+/// Infill gap of what is primed on the tower (`prime_tower_infill_gap`, 150 %).
+const INFILL_GAP: f32 = 1.5;
+
+/// The least a tower this tall is deep, so it stands (`WipeTower::min_depth_per_height`).
+pub fn min_tower_depth(height_mm: f32) -> f32 {
+    const STEPS: [(f32, f32); 4] = [(5.0, 5.0), (100.0, 20.0), (250.0, 40.0), (350.0, 60.0)];
+    if height_mm <= STEPS[0].0 {
+        return STEPS[0].1;
+    }
+    for w in STEPS.windows(2) {
+        let ((h0, d0), (h1, d1)) = (w[0], w[1]);
+        if height_mm < h1 {
+            return d0 + (height_mm - h0) / (h1 - h0) * (d1 - d0);
+        }
+    }
+    STEPS[3].1
+}
+
+/// Side of Bambu Studio's square tower for a print `height_mm` tall whose
+/// busiest layer puts `per_layer_mm3` on it: wide enough for that layer at
+/// 150 % infill gap, never under the least for its height, plus the ribs.
+pub fn tower_side(per_layer_mm3: f32, layer_mm: f32, height_mm: f32) -> f32 {
+    let depth = (per_layer_mm3.max(0.0) / layer_mm.max(0.01) * INFILL_GAP).sqrt();
+    depth.max(min_tower_depth(height_mm)) + RIB_WIDTH_MM / std::f32::consts::SQRT_2
+}
+
 /// `flush(from, to)` gives the volume of one swap before the multiplier. The
 /// colours are ordered, layer by layer, to flush as little as possible.
 pub fn waste(swaps: &SwapEstimate, params: &WasteParams, flush: impl Fn(u8, u8) -> f32) -> Waste {
@@ -120,22 +271,21 @@ pub fn waste(swaps: &SwapEstimate, params: &WasteParams, flush: impl Fn(u8, u8) 
     }
     let tower_layers = changes.last().map_or(0, |c| c.0 + 1);
     if p.tower && tower_layers > 0 {
-        let width = p.tower_width_mm.max(1.0);
         let layer = p.layer_mm.max(0.01);
-        // The busiest layer has to fit in one layer of the tower; it is never
-        // shallower than it is wide.
-        let depth = p.tower_depth_mm.unwrap_or((busiest_layer / (layer * width)).clamp(width, 250.0));
-        let line = p.nozzle_mm * 1.125;
+        let side = p.tower_depth_mm.unwrap_or_else(|| tower_side(busiest_layer, layer, swaps.layers as f32 * layer));
+        let line = p.nozzle_mm * LINE_PER_NOZZLE;
         let height = tower_layers as f32 * layer;
-        let walls = 2.0 * (width + depth) * line * height;
-        // Layers without a swap get a sparse fill, about a tenth of the area.
+        // The square's outline and its four ribs, on every layer.
+        let walls = (4.0 * side + 4.0 * RIB_WIDTH_MM) * line * height;
+        // Layers without a swap only bridge across, a line every 10 mm; the first is solid.
         let quiet = tower_layers.saturating_sub(changes.chunk_by(|a, b| a.0 == b.0).count() as u32) as f32;
-        let sparse = quiet * width * depth * layer * 0.1;
+        let sparse = quiet * side * side * layer * (line / BRIDGING_MM).min(1.0);
+        let first = side * side * layer;
         let brim = p.tower_brim_mm.max(0.0);
-        let brim_vol = ((width + 2.0 * brim) * (depth + 2.0 * brim) - width * depth) * layer;
+        let brim_vol = ((side + 2.0 * brim).powi(2) - side * side) * layer;
         let priming = changes.len() as f32 * p.prime_mm3;
-        w.tower_mm3 = walls + sparse + brim_vol + priming;
-        w.tower_footprint_mm = [width + 2.0 * brim, depth + 2.0 * brim];
+        w.tower_mm3 = walls + sparse + first + brim_vol + priming;
+        w.tower_footprint_mm = [side + 2.0 * brim; 2];
         w.tower_height_mm = height;
     }
     w.total_mm3 = w.flush_mm3 + w.start_mm3 + w.tower_mm3;
@@ -157,12 +307,27 @@ mod tests {
     #[test]
     fn flush_depends_on_the_direction() {
         let (black, white) = ([0.0; 3], [1.0; 3]);
-        let to_white = default_flush(black, white);
-        let to_black = default_flush(white, black);
+        let to_white = default_flush(black, white, 107.0);
+        let to_black = default_flush(white, black, 107.0);
         assert!(to_white > to_black, "{to_white} {to_black}");
-        assert_eq!(to_white, MAX_FLUSH_MM3);
-        assert_eq!(default_flush(white, white), 0.0);
-        assert!(default_flush([0.5, 0.2, 0.2], [0.52, 0.2, 0.2]) < 150.0);
+        // Black to white: 560 for the lightness, plus the nozzle; white to black: 80 and a little hue.
+        assert_eq!(to_white, 667.0);
+        assert_eq!(to_black, 187.0);
+        assert_eq!(default_flush(white, white, 107.0), 0.0);
+        // Nearly the same colour still flushes the nozzle and the formula's floor.
+        assert_eq!(default_flush([0.5, 0.2, 0.2], [0.52, 0.2, 0.2], 92.0), 152.0);
+        assert!(default_flush(black, white, 600.0) <= MAX_FLUSH_MM3);
+    }
+
+    #[test]
+    fn measured_colours_use_bambus_measurements() {
+        let hex = |h: u32| rgb_of(h);
+        // Black to Bambu yellow was measured at 450, on top of the nozzle's 107.
+        assert_eq!(default_flush(hex(0x000000), hex(0xF4EE2A), 107.0), 557.0);
+        // A colour within ΔE00 5 of a measured one counts as it.
+        assert_eq!(default_flush(hex(0x020202), hex(0xF2EC2C), 92.0), 542.0);
+        // Not measured in that direction: the formula.
+        assert_ne!(default_flush(hex(0xF4EE2A), hex(0x5E43B7), 107.0), 107.0 + 270.0);
     }
 
     #[test]
@@ -194,21 +359,37 @@ mod tests {
     }
 
     #[test]
-    fn a_tower_without_a_chute_grows_deeper() {
+    fn a_tower_without_a_chute_grows_bigger() {
         let s = swaps(vec![(0, 0b001), (3, 0b111)]);
         let chute = waste(&s, &WasteParams::default(), |_, _| 300.0);
         let tower = waste(&s, &WasteParams { purge_chute: false, ..Default::default() }, |_, _| 300.0);
         assert!(tower.tower_footprint_mm[1] > chute.tower_footprint_mm[1]);
-        assert_eq!(tower.tower_footprint_mm[0], 26.0);
+        // Square, as Bambu Studio 2 prints it.
+        assert_eq!(tower.tower_footprint_mm[0], tower.tower_footprint_mm[1]);
         // The flush stays flush; the tower only adds its own walls.
         assert_eq!(tower.flush_mm3, chute.flush_mm3);
     }
 
     #[test]
-    fn a_set_tower_depth_wins_over_the_estimate() {
+    fn the_tower_is_sized_as_bambu_studio_sizes_it() {
+        // Short prints: the least depth for the height wins, plus the ribs.
+        assert_eq!(min_tower_depth(3.0), 5.0);
+        assert!((min_tower_depth(175.0) - 30.0).abs() < 1e-4);
+        assert_eq!(min_tower_depth(500.0), 60.0);
+        let ribs = 8.0 / std::f32::consts::SQRT_2;
+        assert!(
+            (tower_side(45.0, 0.2, 50.0) - (min_tower_depth(50.0).max((45.0f32 / 0.2 * 1.5).sqrt()) + ribs)).abs()
+                < 1e-4
+        );
+        // A busy layer outgrows it: four swaps' priming at 0.2 mm.
+        assert!((tower_side(180.0, 0.2, 10.0) - ((180.0f32 / 0.2 * 1.5).sqrt() + ribs)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_set_tower_size_wins_over_the_estimate() {
         let s = swaps(vec![(0, 0b01), (3, 0b11)]);
         let w = waste(&s, &WasteParams { tower_depth_mm: Some(60.0), ..Default::default() }, |_, _| 300.0);
-        assert_eq!(w.tower_footprint_mm, [26.0, 66.0]);
+        assert_eq!(w.tower_footprint_mm, [66.0, 66.0]);
     }
 
     #[test]

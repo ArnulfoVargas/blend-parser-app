@@ -286,7 +286,17 @@ fn convert(input: &Path, args: &Args, config: &Config) -> Result<Report, String>
         .map(|i| {
             let (a, b) = (i / n, i % n);
             let typed = doc.flush.iter().find(|f| f.0 == keys[a] && f.1 == keys[b]).map(|f| f.2).filter(|_| a != b);
-            typed.unwrap_or_else(|| bp_core::waste::default_flush(palette[a], palette[b]))
+            // The colours' flush on this printer, then the materials', as Bambu Studio works it out.
+            typed.unwrap_or_else(|| {
+                match bp_core::waste::default_flush(palette[a], palette[b], doc.printer.flush_min_mm3()) {
+                    0.0 => 0.0,
+                    v => bp_3mf::filament::flush(
+                        slot_filament[a].map(|f| f.kind.as_str()),
+                        slot_filament[b].map(|f| f.kind.as_str()),
+                        v,
+                    ),
+                }
+            })
         })
         .collect();
     let w = &config.waste;

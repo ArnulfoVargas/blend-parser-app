@@ -101,11 +101,13 @@ Como el de impresoras, se ejecuta solo a mano y el JSON se guarda en Git.
 ## Torre de purga y desperdicio
 
 BlendParser **no cambia la torre** que el 3MF pide a Bambu Studio: sigue en la posición de
-siempre (`wipe_tower_x/y`) y la genera el laminador. La app estima su huella (20 mm de ancho
-más 3 mm de borde, y un fondo según la purga de la capa con más cambios, o el que se indique)
-y aparta ese espacio, con la separación y el margen elegidos, al comprobar si el modelo cabe
-y al ajustarlo a la placa. El modelo sigue centrado. Las zonas excluidas (`bed_exclude_area`)
-salen del perfil de Bambu Studio.
+siempre (`wipe_tower_x/y`) y la genera el laminador. La app estima su huella como la imprime
+Bambu Studio 2, cuadrada y con nervios: el lado justo para el cebado de la capa con más
+cambios con un 150 % de separación, nunca menos que el mínimo para su altura (5 mm hasta
+5 mm de alto, 20 a 100 mm, 40 a 250 mm, 60 desde 350 mm), más los nervios (8 mm / √2) y 3 mm
+de borde; o el lado que se indique. Aparta ese espacio, con la separación y el margen
+elegidos, al comprobar si el modelo cabe y al ajustarlo a la placa. El modelo sigue
+centrado. Las zonas excluidas (`bed_exclude_area`) salen del perfil de Bambu Studio.
 
 Los cambios se cuentan como el laminador los hace: un color solo cuenta en una capa si ocupa
 al menos dos líneas de la boquilla (las astillas de borde no provocan un cambio), y el orden de
@@ -114,9 +116,20 @@ filamento cargado y termina en el que conviene a la siguiente.
 
 El desperdicio suma tres partes, cada una una sola vez: purga en los cambios (a la basura;
 la parte aprovechada en relleno o soportes se muestra aparte y no suma), purga inicial y
-torre (paredes, relleno de capas sin cambios, borde y cebado por cambio). En las impresoras
-sin conducto de purga la purga acaba en la torre, pero se cuenta como purga. La purga por
-cambio va de 107 a 800 mm³ según ΔE y lo que aclara el nuevo color, como sugiere Bambu Studio.
+torre (paredes y nervios con líneas de 1,25 × la boquilla, puentes cada 10 mm en las capas sin
+cambios, primera capa maciza, borde y 45 mm³ de cebado por cambio, como `filament_prime_volume`).
+En las impresoras sin conducto de purga la purga acaba en la torre, pero se cuenta como purga.
+
+La purga por cambio es la de la tabla de Bambu Studio (`FlushVolCalc.cpp`):
+
+- Si los dos colores están a menos de ΔE00 5 de los que Bambu midió
+  (`resources/flush/flush_data_standard.txt`), el valor medido; si no, su fórmula, que combina
+  la distancia de tono y saturación con cuánto aclara el nuevo color (de oscuro a claro cuesta
+  mucho más), con un mínimo de 60 mm³.
+- Encima, el volumen de la boquilla de la impresora (`nozzle_volume`: 92 mm³ en A1, A1 mini y
+  A2L, 107 en X1 y P1, 110 en P2S, 145 en H2S; 0 en las demás), con un tope de 900 mm³.
+- Con filamentos elegidos en las ranuras, al menos lo que Bambu midió entre materiales (PLA y
+  PETG, 650 mm³), 230 mm³ al pasar a un material de soporte y 700 como mínimo al salir de él.
 
 Pendiente: comparar la estimación con lo que informa Bambu Studio al laminar. La CLI de
 Bambu Studio 2.x se cierra al laminar desde la línea de comandos en Windows, así que hay que

@@ -403,7 +403,7 @@ mod tests {
         let pal = project.palette().to_vec();
         let n = pal.len();
         let matrix: Vec<f32> =
-            pal.iter().flat_map(|&a| pal.iter().map(move |&b| bp_core::waste::default_flush(a, b))).collect();
+            pal.iter().flat_map(|&a| pal.iter().map(move |&b| bp_core::waste::default_flush(a, b, 107.0))).collect();
         let params = bp_core::WasteParams { tower: n > 1, ..Default::default() };
         let w = bp_core::waste::waste(&lite.swaps, &params, |a, b| matrix[a as usize * n + b as usize]);
         eprintln!(
