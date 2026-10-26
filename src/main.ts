@@ -983,9 +983,16 @@ async function confirmOversize(): Promise<boolean> {
   });
 }
 
-$("#export").addEventListener("click", async () => {
+/** The name a printed object has in the 3MF: the model's, or the model's with its piece number. */
+function objectName(id: number): string {
+  const model = summary?.fileName.replace(MODEL_EXT, "") ?? "";
+  return id === 0 ? model : t("export.pieceName", { model, n: id + 1 });
+}
+
+/** Saves the 3MF with `objects` (all when null). */
+async function export3mf(objects: number[] | null) {
   const btn = $<HTMLButtonElement>("#export");
-  if (app.dataset.state !== "ready" || !summary || btn.getAttribute("aria-busy") === "true") return;
+  if (!summary || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
   const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
   if (!path) return;
@@ -993,8 +1000,9 @@ $("#export").addEventListener("click", async () => {
   btn.setAttribute("aria-disabled", "true");
   bind("exportLabel", t("export.busy"));
   try {
-    await api.export3mf(path);
-    toast(t("export.saved", { path }));
+    await api.export3mf(path, currentLang(), objects);
+    const n = objects?.length ?? summary.plate.objectIds.length;
+    toast(n > 1 ? t("export.piecesSaved", { count: n, path }) : t("export.saved", { path }));
   } catch (e) {
     toast(errText(e), "error");
   } finally {
@@ -1002,6 +1010,35 @@ $("#export").addEventListener("click", async () => {
     btn.setAttribute("aria-disabled", "false");
     bind("exportLabel", t("export.label"));
   }
+}
+
+// With pieces cut off the model, the user picks which go in; all are ticked.
+const piecesDialog = $<HTMLDialogElement>("#pieces-dialog");
+const piecesList = $<HTMLFieldSetElement>("#pieces-list");
+function fillPieces(ids: number[]) {
+  piecesList.replaceChildren(...ids.map((id) => {
+    const label = Object.assign(document.createElement("label"), { className: "check" });
+    const input = Object.assign(document.createElement("input"), { type: "checkbox", checked: true, value: String(id) });
+    label.append(input, " ", Object.assign(document.createElement("span"), { textContent: objectName(id) }));
+    return label;
+  }));
+  $("#pieces-error").hidden = true;
+}
+$("#export").addEventListener("click", () => {
+  if (app.dataset.state !== "ready" || !summary) return;
+  const ids = summary.plate.objectIds;
+  if (ids.length < 2) return void export3mf(null);
+  fillPieces(ids);
+  piecesDialog.showModal();
+});
+$("#export-pieces").addEventListener("click", () => {
+  const picked = [...piecesList.querySelectorAll<HTMLInputElement>("input:checked")].map((i) => Number(i.value));
+  if (!picked.length) {
+    $("#pieces-error").hidden = false;
+    return;
+  }
+  piecesDialog.close();
+  void export3mf(picked.length === summary?.plate.objectIds.length ? null : picked);
 });
 
 const zipDialog = $<HTMLDialogElement>("#zip-dialog");

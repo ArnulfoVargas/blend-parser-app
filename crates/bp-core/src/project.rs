@@ -565,6 +565,16 @@ impl Project {
         self.scene.parts.iter().map(|p| p.object as usize + 1).max().unwrap_or(1)
     }
 
+    /// The printed objects there are, in order: 0 for the model, the rest for
+    /// pieces cut off it. Ids stay as they were given, gaps and all, so a piece
+    /// keeps its number (and its name in the 3MF) when another goes.
+    pub fn object_ids(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.scene.parts.iter().map(|p| p.object).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Puts back what the last cut took, in the orientation the model has now.
     pub fn undo_cut(&mut self) -> bool {
         let Some(s) = self.cut_history.pop() else { return false };
@@ -1140,6 +1150,32 @@ mod tests {
             object: 0,
         };
         Scene { parts: vec![part], ..Default::default() }
+    }
+
+    #[test]
+    fn pieces_kept_from_cuts_never_overlap() {
+        let mut p = Project::new(scene(), 2);
+        assert!(p.cut(2, 0.5, true, true));
+        // The second cut goes through the model and the first piece both.
+        assert!(p.cut(2, 0.5, true, true));
+        assert_eq!(p.object_ids(), vec![0, 1, 2, 3]);
+        // Footprint of each object on the plate.
+        let mut boxes: Vec<(u32, [f32; 4])> = vec![];
+        for part in p.export_parts() {
+            let (lo, hi) = part.positions.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), v| {
+                ([lo[0].min(v[0]), lo[1].min(v[1])], [hi[0].max(v[0]), hi[1].max(v[1])])
+            });
+            match boxes.iter_mut().find(|b| b.0 == part.object) {
+                Some(b) => b.1 = [b.1[0].min(lo[0]), b.1[1].min(lo[1]), b.1[2].max(hi[0]), b.1[3].max(hi[1])],
+                None => boxes.push((part.object, [lo[0], lo[1], hi[0], hi[1]])),
+            }
+        }
+        for (i, a) in boxes.iter().enumerate() {
+            for b in &boxes[i + 1..] {
+                let apart = a.1[2] <= b.1[0] || b.1[2] <= a.1[0] || a.1[3] <= b.1[1] || b.1[3] <= a.1[1];
+                assert!(apart, "{a:?} overlaps {b:?}");
+            }
+        }
     }
 
     #[test]

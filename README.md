@@ -32,6 +32,10 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   simplificar la malla y aplanar la base, con estimación de cambios de filamento y purga.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
+- Piezas en un solo 3MF: cada pieza que se conserva al cortar es un objeto aparte, con su
+  origen en el centro de su huella y un nombre estable («Modelo – pieza 2») que sigue a la
+  pieza aunque se dejen otras fuera. Al exportar se eligen las piezas; el acomodo fino y el
+  reparto en placas se dejan a Bambu Studio (Organizar).
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 

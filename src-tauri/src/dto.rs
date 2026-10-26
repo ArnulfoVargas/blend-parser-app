@@ -115,6 +115,8 @@ pub struct PlateDto {
     pub can_undo_cut: bool,
     /// Printed objects: the model and the pieces cut off it that were kept.
     pub objects: usize,
+    /// Their ids, which number their names in the 3MF (see `bp_3mf::object_name`).
+    pub object_ids: Vec<u32>,
 }
 
 #[derive(Serialize)]
@@ -307,6 +309,7 @@ pub fn waste_and_plate(
         rotated: doc.project.is_rotated(),
         can_undo_cut: doc.project.can_undo_cut(),
         objects: doc.project.object_count(),
+        object_ids: doc.project.object_ids(),
     };
     (waste, plate)
 }
