@@ -30,7 +30,7 @@ import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { setupPrintability } from "./printability";
-import { Viewer, type Axis, type Section, type Tool, type View } from "./viewer";
+import { Viewer, type Axis, type Section, type ThumbAngle, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -989,6 +989,24 @@ function objectName(id: number): string {
   return id === 0 ? model : t("export.pieceName", { model, n: id + 1 });
 }
 
+// Where the 3MF's thumbnail is drawn from, remembered between sessions.
+const thumbSelect = $<HTMLSelectElement>("#thumb-angle");
+const THUMB_KEY = "blendparser.thumbAngle";
+try {
+  const saved = localStorage.getItem(THUMB_KEY);
+  if (saved === "iso" || saved === "front" || saved === "current") thumbSelect.value = saved;
+} catch {
+  // Storage blocked: three-quarter view.
+}
+thumbSelect.addEventListener("change", () => {
+  try {
+    localStorage.setItem(THUMB_KEY, thumbSelect.value);
+  } catch {
+    // Not remembered; it still applies now.
+  }
+});
+const thumbAngle = () => thumbSelect.value as ThumbAngle;
+
 /** Saves the 3MF with `objects` (all when null). */
 async function export3mf(objects: number[] | null) {
   const btn = $<HTMLButtonElement>("#export");
@@ -1000,7 +1018,9 @@ async function export3mf(objects: number[] | null) {
   btn.setAttribute("aria-disabled", "true");
   bind("exportLabel", t("export.busy"));
   try {
-    await api.export3mf(path, currentLang(), objects);
+    // Without pictures the file still goes out; Bambu Studio draws its own.
+    const pngs = await viewer.snapshot([512, 128], thumbAngle()).catch(() => null);
+    await api.export3mf(path, currentLang(), objects, pngs && [pngs[0], pngs[1]]);
     const n = objects?.length ?? summary.plate.objectIds.length;
     toast(n > 1 ? t("export.piecesSaved", { count: n, path }) : t("export.saved", { path }));
   } catch (e) {

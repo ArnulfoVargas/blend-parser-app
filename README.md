@@ -36,6 +36,9 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   origen en el centro de su huella y un nombre estable («Modelo – pieza 2») que sigue a la
   pieza aunque se dejen otras fuera. Al exportar se eligen las piezas; el acomodo fino y el
   reparto en placas se dejan a Bambu Studio (Organizar).
+- Miniatura en el 3MF: el modelo con sus colores de filamento, dibujado por el visor
+  (tres cuartos, de frente o como se ve; en Preferencias), para Bambu Studio, Bambu Handy y
+  el explorador de archivos. Si el visor no puede dibujarla, el 3MF sale sin ella.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 

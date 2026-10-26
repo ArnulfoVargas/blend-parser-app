@@ -87,6 +87,7 @@ fn real_multicolor_imports_and_missing_resources() {
             flush: Default::default(),
             layer_mm: None,
             offset_mm: [0.0; 2],
+            thumbnail: None,
         };
         let mut out = std::io::Cursor::new(Vec::new());
         bp_3mf::write(&mut out, &model).unwrap();

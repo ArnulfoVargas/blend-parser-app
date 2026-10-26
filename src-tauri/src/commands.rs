@@ -547,9 +547,17 @@ pub async fn export_color_zip(
 }
 
 /// The open model as a Bambu Studio 3MF. `objects` picks which printed objects
-/// go in (all when `None`); pieces are named in `lang`.
+/// go in (all when `None`); pieces are named in `lang`. `thumbnails` are the
+/// plate's PNG pictures, large and small, drawn by the preview; without them
+/// the file goes out without pictures.
 #[tauri::command]
-pub async fn export_3mf(app: AppHandle, path: String, lang: String, objects: Option<Vec<u32>>) -> CmdResult<()> {
+pub async fn export_3mf(
+    app: AppHandle,
+    path: String,
+    lang: String,
+    objects: Option<Vec<u32>>,
+    thumbnails: Option<(Vec<u8>, Vec<u8>)>,
+) -> CmdResult<()> {
     with_doc(app, move |d, prefs| {
         let mut parts = d.project.export_parts();
         if let Some(keep) = &objects {
@@ -584,6 +592,7 @@ pub async fn export_3mf(app: AppHandle, path: String, lang: String, objects: Opt
             },
             layer_mm: prefs.waste.layer_mm,
             offset_mm: d.offset_mm,
+            thumbnail: thumbnails.as_ref().map(|(large, small)| bp_3mf::Thumbnail { large, small }),
         };
         let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
         bp_3mf::write(std::io::BufWriter::new(file), &model)

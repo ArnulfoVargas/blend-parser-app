@@ -198,8 +198,9 @@ export const api = {
   paint: (origin: Vec3, dir: Vec3, radiusMm: number, slot: number) => invoke<PaintResult | null>("paint", { origin, dir, radiusMm, slot }),
   endStroke: () => invoke<Summary>("end_stroke"),
   undo: () => invoke<Summary>("undo"),
-  /** `objects` picks the printed objects that go in; null for all. Pieces are named in `lang`. */
-  export3mf: (path: string, lang: string, objects: number[] | null = null) => invoke<void>("export_3mf", { path, lang, objects }),
+  /** `objects` picks the printed objects that go in; null for all. Pieces are named in `lang`. `thumbnails`: large and small PNG of the plate. */
+  export3mf: (path: string, lang: string, objects: number[] | null = null, thumbnails: [Uint8Array, Uint8Array] | null = null) =>
+    invoke<void>("export_3mf", { path, lang, objects, thumbnails: thumbnails && thumbnails.map((b) => Array.from(b)) }),
   exportColorZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
     invoke<number>("export_color_zip", { path, thicknessMm, mainSolid, lang }),
 };

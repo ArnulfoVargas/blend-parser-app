@@ -13,6 +13,8 @@ THREE.ColorManagement.enabled = false;
 export type View = "filament" | "texture";
 export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section";
 export type Axis = 0 | 1 | 2;
+/** Where a thumbnail looks from: the default three-quarter view, the front, or the view as it is now. */
+export type ThumbAngle = "iso" | "front" | "current";
 
 /** A cut across the model: what lies past `t` (0 at the low end of the axis, 1 at the high) is hidden; flipped, what lies before. */
 export interface Section { axis: Axis; t: number; flip: boolean }
@@ -62,6 +64,20 @@ function cssColor(name: string): THREE.Color {
 const FINDING = [0.85, 0.12, 0.06];
 const ENOUGH = [0.05, 0.45, 0.3];
 const UNMEASURED = [0.45, 0.47, 0.46];
+
+/** RGBA rows read bottom-up from WebGL as a PNG file, the right way up. */
+async function toPng(pixels: Uint8Array, size: number): Promise<Uint8Array> {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const img = ctx.createImageData(size, size);
+  const row = size * 4;
+  for (let y = 0; y < size; y++) img.data.set(pixels.subarray((size - 1 - y) * row, (size - y) * row), y * row);
+  ctx.putImageData(img, 0, 0);
+  const blob = await new Promise<Blob | null>((done) => canvas.toBlob(done, "image/png"));
+  if (!blob) throw new Error("PNG");
+  return new Uint8Array(await blob.arrayBuffer());
+}
 
 export class Viewer {
   private renderer: THREE.WebGLRenderer;
@@ -451,6 +467,88 @@ export class Viewer {
     this.camera.updateProjectionMatrix();
     this.controls.update();
     this.requestRender();
+  }
+
+  /**
+   * The painted model as PNG pictures `sizes` pixels square, in the filament
+   * colours whatever the view shows, without the plate, handles or the cut, on
+   * a clear background. Null when there is no model or WebGL cannot read back.
+   */
+  async snapshot(sizes: number[], angle: ThumbAngle): Promise<Uint8Array[] | null> {
+    if (!this.mesh || !this.data) return null;
+    const src = this.mesh.geometry;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", src.getAttribute("position"));
+    geo.setAttribute("normal", src.getAttribute("normal"));
+    const colors = new Uint8Array(this.data.labels.length * 9);
+    this.data.labels.forEach((label, l) => {
+      const [r, g, b] = this.palette[label] ?? [200, 200, 200];
+      for (let k = 0; k < 9; k += 3) colors.set([r, g, b], l * 9 + k);
+    });
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3, true));
+    const scene = new THREE.Scene();
+    scene.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, flatShading: true })));
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f86, 1.6));
+    const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 10000);
+    camera.up.set(0, 0, 1);
+    const key = new THREE.DirectionalLight(0xffffff, 1.6);
+    key.position.set(0.6, -1, 1.4);
+    camera.add(key);
+    scene.add(camera);
+    const sphere = src.boundingSphere!;
+    const dir = angle === "front" ? new THREE.Vector3(0, -1, 0.18)
+      : angle === "current" ? this.camera.position.clone().sub(this.controls.target)
+      : new THREE.Vector3(0.55, -1, 0.62);
+    const dist = sphere.radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.02;
+    camera.position.copy(sphere.center).addScaledVector(dir.normalize(), dist);
+    camera.near = dist / 100;
+    camera.far = dist * 10;
+    camera.lookAt(sphere.center);
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld();
+    // Frame the model's outline rather than its bounding sphere, with a little room round it.
+    const pos = src.getAttribute("position");
+    const p = new THREE.Vector3();
+    let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+    const step = Math.max(1, Math.floor(pos.count / 30000));
+    for (let i = 0; i < pos.count; i += step) {
+      p.fromBufferAttribute(pos, i).project(camera);
+      [x0, y0, x1, y1] = [Math.min(x0, p.x), Math.min(y0, p.y), Math.max(x1, p.x), Math.max(y1, p.y)];
+    }
+    const half = Math.max(x1 - x0, y1 - y0) / 2 * 1.08;
+    if (half > 0 && Number.isFinite(half)) {
+      const full = 1000;
+      const [cx, cy] = [(x0 + x1) / 2, (y0 + y1) / 2];
+      camera.setViewOffset(full, full, ((cx - half + 1) / 2) * full, ((1 - cy - half) / 2) * full, half * full, half * full);
+    }
+
+    const r = this.renderer;
+    const clear = r.getClearColor(new THREE.Color());
+    const alpha = r.getClearAlpha();
+    const out: Uint8Array[] = [];
+    try {
+      r.setClearColor(0x000000, 0);
+      for (const size of sizes) {
+        const target = new THREE.WebGLRenderTarget(size, size, { samples: 4 });
+        try {
+          r.setRenderTarget(target);
+          r.render(scene, camera);
+          const pixels = new Uint8Array(size * size * 4);
+          r.readRenderTargetPixels(target, 0, 0, size, size, pixels);
+          out.push(await toPng(pixels, size));
+        } finally {
+          r.setRenderTarget(null);
+          target.dispose();
+        }
+      }
+    } catch {
+      return null;
+    } finally {
+      r.setClearColor(clear, alpha);
+      geo.dispose();
+      this.requestRender();
+    }
+    return out;
   }
 
   setPalette(hex: string[]) {

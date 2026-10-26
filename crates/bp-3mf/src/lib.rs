@@ -35,7 +35,28 @@ pub struct Model<'a> {
     pub layer_mm: Option<f32>,
     /// Where the model's centre sits from the plate's centre, in millimetres.
     pub offset_mm: [f32; 2],
+    /// Pictures of the plate for Bambu Studio's lists and the file browser.
+    pub thumbnail: Option<Thumbnail<'a>>,
 }
+
+/// The plate as PNG pictures: Bambu Studio shows the large one in its plate
+/// list and recent files, the small one where space is short.
+#[derive(Clone, Copy)]
+pub struct Thumbnail<'a> {
+    pub large: &'a [u8],
+    pub small: &'a [u8],
+}
+
+impl Thumbnail<'_> {
+    /// Both are PNG files; anything else would leave Bambu Studio a broken picture.
+    pub fn is_png(&self) -> bool {
+        const MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+        self.large.starts_with(MAGIC) && self.small.starts_with(MAGIC)
+    }
+}
+
+const THUMB: &str = "Metadata/plate_1.png";
+const THUMB_SMALL: &str = "Metadata/plate_1_small.png";
 
 /// How the slicer flushes between filaments, so it matches the waste estimate.
 #[derive(Clone, Debug, PartialEq)]
@@ -206,6 +227,11 @@ fn main_xml(model: &Model) -> String {
 }
 
 fn settings_xml(model: &Model) -> String {
+    let thumbnail = if model.thumbnail.is_some_and(|t| t.is_png()) {
+        format!("    <metadata key=\"thumbnail_file\" value=\"{THUMB}\"/>\n")
+    } else {
+        String::new()
+    };
     let (mut objects_cfg, mut instances) = (String::new(), String::new());
     for (k, ids) in objects(model).iter().enumerate() {
         let id = object_id(model, k);
@@ -254,7 +280,7 @@ fn settings_xml(model: &Model) -> String {
     <metadata key=\"plater_id\" value=\"1\"/>
     <metadata key=\"plater_name\" value=\"\"/>
     <metadata key=\"locked\" value=\"false\"/>
-{instances}  </plate>
+{thumbnail}{instances}  </plate>
   <assemble>
   </assemble>
 </config>
@@ -337,20 +363,36 @@ fn project_json(model: &Model) -> String {
     serde_json::to_string_pretty(&cfg).unwrap_or_default()
 }
 
-const CONTENT_TYPES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n</Types>\n";
+const CONTENT_TYPES: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n <Default Extension=\"png\" ContentType=\"image/png\"/>\n</Types>\n";
 
 fn rels(target: &str) -> String {
+    rels_with(target, "")
+}
+
+/// Relationships to `target` and, with `extra`, more of them.
+fn rels_with(target: &str, extra: &str) -> String {
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n <Relationship Target=\"{target}\" Id=\"rel-1\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n</Relationships>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n <Relationship Target=\"{target}\" Id=\"rel-1\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n{extra}</Relationships>\n"
+    )
+}
+
+/// The package's pictures as the 3MF core spec and Bambu Studio name them.
+fn thumbnail_rels() -> String {
+    format!(
+        " <Relationship Target=\"/{THUMB}\" Id=\"rel-2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail\"/>\n <Relationship Target=\"/{THUMB}\" Id=\"rel-4\" Type=\"http://schemas.bambulab.com/package/2021/cover-thumbnail-middle\"/>\n <Relationship Target=\"/{THUMB_SMALL}\" Id=\"rel-5\" Type=\"http://schemas.bambulab.com/package/2021/cover-thumbnail-small\"/>\n"
     )
 }
 
 pub fn write<W: Write + Seek>(out: W, model: &Model) -> zip::result::ZipResult<()> {
     let mut z = zip::ZipWriter::new(out);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let thumb = model.thumbnail.filter(Thumbnail::is_png);
     let files: [(&str, String); 7] = [
         ("[Content_Types].xml", CONTENT_TYPES.to_string()),
-        ("_rels/.rels", rels("/3D/3dmodel.model")),
+        (
+            "_rels/.rels",
+            rels_with("/3D/3dmodel.model", &if thumb.is_some() { thumbnail_rels() } else { String::new() }),
+        ),
         ("3D/3dmodel.model", main_xml(model)),
         ("3D/_rels/3dmodel.model.rels", rels("/3D/Objects/object_1.model")),
         ("3D/Objects/object_1.model", objects_xml(model)),
@@ -360,6 +402,14 @@ pub fn write<W: Write + Seek>(out: W, model: &Model) -> zip::result::ZipResult<(
     for (name, body) in files {
         z.start_file(name, opts)?;
         z.write_all(body.as_bytes())?;
+    }
+    if let Some(t) = thumb {
+        // PNG is compressed already.
+        let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, png) in [(THUMB, t.large), (THUMB_SMALL, t.small)] {
+            z.start_file(name, stored)?;
+            z.write_all(png)?;
+        }
     }
     z.finish()?;
     Ok(())
@@ -388,6 +438,7 @@ mod tests {
             },
             layer_mm: Some(0.16),
             offset_mm: [0.0; 2],
+            thumbnail: None,
         };
         let mut buf = Cursor::new(Vec::new());
         write(&mut buf, &model).unwrap();
@@ -432,6 +483,7 @@ mod tests {
             flush: Flush::default(),
             layer_mm: None,
             offset_mm: [0.0; 2],
+            thumbnail: None,
         };
         let main = main_xml(&model);
         assert_eq!(main.matches("<item ").count(), 2);
@@ -463,6 +515,7 @@ mod tests {
             flush: Flush::default(),
             layer_mm: None,
             offset_mm: [2.0, 0.0],
+            thumbnail: None,
         };
         let main = main_xml(&model);
         // The plate's centre, the model's offset and each object's own centre.
@@ -472,6 +525,53 @@ mod tests {
         assert!(objects.contains("<vertex x=\"-10\" y=\"-5\" z=\"0\"/>"), "{objects}");
         assert!(objects.contains("<vertex x=\"10\" y=\"-2\" z=\"0\"/>"), "{objects}");
         assert_eq!(object_name("m", "piece", 1), "m – piece 2");
+    }
+
+    #[test]
+    fn thumbnails_go_in_when_they_are_png() {
+        let positions = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
+        let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
+        let paint = vec!["4".to_string(); 4];
+        let png = b"\x89PNG\r\n\x1a\nlarge".to_vec();
+        let small = b"\x89PNG\r\n\x1a\nsmall".to_vec();
+        let package = |thumbnail| {
+            let model = Model {
+                name: "m",
+                piece: "piece",
+                parts: vec![Part { name: "a", positions: &positions, tris: &tris, paint: &paint, object: 0 }],
+                filaments: vec!["#FFFFFF".into()],
+                printer: Printer::default(),
+                flush: Flush::default(),
+                layer_mm: None,
+                offset_mm: [0.0; 2],
+                thumbnail,
+            };
+            let mut buf = Cursor::new(Vec::new());
+            write(&mut buf, &model).unwrap();
+            zip::ZipArchive::new(Cursor::new(buf.into_inner())).unwrap()
+        };
+        let read = |zip: &mut zip::ZipArchive<Cursor<Vec<u8>>>, name: &str| {
+            let mut out = Vec::new();
+            zip.by_name(name).unwrap().read_to_end(&mut out).unwrap();
+            out
+        };
+        let mut zip = package(Some(Thumbnail { large: &png, small: &small }));
+        assert_eq!(read(&mut zip, "Metadata/plate_1.png"), png);
+        assert_eq!(read(&mut zip, "Metadata/plate_1_small.png"), small);
+        let rels = String::from_utf8(read(&mut zip, "_rels/.rels")).unwrap();
+        assert!(rels.contains("cover-thumbnail-middle") && rels.contains("metadata/thumbnail"), "{rels}");
+        let cfg = String::from_utf8(read(&mut zip, "Metadata/model_settings.config")).unwrap();
+        assert!(cfg.contains("key=\"thumbnail_file\" value=\"Metadata/plate_1.png\""));
+        let types = String::from_utf8(read(&mut zip, "[Content_Types].xml")).unwrap();
+        assert!(types.contains("image/png"));
+
+        // Not a PNG: the file goes out without pictures rather than with broken ones.
+        let mut zip = package(Some(Thumbnail { large: b"nope", small: &small }));
+        assert!(zip.by_name("Metadata/plate_1.png").is_err());
+        let rels = String::from_utf8(read(&mut zip, "_rels/.rels")).unwrap();
+        assert!(!rels.contains("thumbnail"));
+        let cfg = String::from_utf8(read(&mut zip, "Metadata/model_settings.config")).unwrap();
+        assert!(!cfg.contains("thumbnail_file"));
     }
 
     fn config(printer: Printer) -> serde_json::Value {
@@ -484,6 +584,7 @@ mod tests {
             flush: Flush::default(),
             layer_mm: None,
             offset_mm: [0.0; 2],
+            thumbnail: None,
         };
         serde_json::from_str(&project_json(&model)).unwrap()
     }
