@@ -436,7 +436,9 @@ const regionPanel = new RegionPanel({
     });
     return done;
   },
+  cursor: () => syncBrush(),
   picking: (on) => {
+    app.dataset.regionPick = on ? "colour" : "brush";
     viewer.setRegionPicking(on);
     if (app.dataset.tool === "region") setHint(t(on ? "hint.regionColour" : "hint.region"));
   },
@@ -455,7 +457,8 @@ function syncBrush() {
   bind("radiusOut", `${nf(radiusMm(), 1)} mm`);
   const scale = summary && viewer.modelHeight() > 0 ? summary.sizeMm[2] / viewer.modelHeight() : 1;
   viewer.brushRadius = radiusMm() / scale;
-  const hex = summary?.slots[brushSlot]?.hex;
+  // The region brush selects rather than paints: its footprint has the selection's colour.
+  const hex = app.dataset.tool === "region" ? regionPanel.cursorColour() : summary?.slots[brushSlot]?.hex;
   if (hex) {
     app.style.setProperty("--brush", hex);
     viewer.setBrushColor(hex);
@@ -1543,6 +1546,7 @@ function setTool(tool: Tool) {
   viewer.setTool(tool);
   if (tool === "separate") separatePanel.open(); else separatePanel.close();
   if (tool === "region") regionPanel.open(); else regionPanel.close();
+  syncBrush();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
