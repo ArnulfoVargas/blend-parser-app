@@ -262,6 +262,7 @@
         <div class="toolbar" id="toolbar" role="toolbar" aria-orientation="vertical" data-i18n-attr="aria-label:stage.tool" data-expanded="false">
           <button class="toolbar__btn" type="button" data-tool="orbit" aria-pressed="true" data-i18n-attr="title:stage.orbitTitle;aria-label:stage.orbitTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9.5a8 8 0 0 1 13.8-3.2"/><path d="M19.5 14.5a8 8 0 0 1-13.8 3.2"/><path d="M18.6 2.8v3.7h-3.7"/><path d="M5.4 21.2v-3.7h3.7"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg><span class="toolbar__label" data-i18n="stage.orbit"></span><kbd>O</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="brush" aria-pressed="false" data-i18n-attr="title:stage.brushTitle;aria-label:stage.brushTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4.5 19.5 9.5 11 18l-5-5z"/><path d="M6 13c-2 0-3 1.5-3 3.5S2 20 2 20s2.5.5 4.5-.5S10 17 10 15.5"/></svg><span class="toolbar__label" data-i18n="stage.brush"></span><kbd>B</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="bucket" aria-pressed="false" data-i18n-attr="title:stage.bucketTitle;aria-label:stage.bucketTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11.5 11.5 5l7 7-6.5 6.5a2 2 0 0 1-2.8 0L5 14.3a2 2 0 0 1 0-2.8z"/><path d="M8.5 8 6 5.5"/><path d="M5 12.5h13.5"/><path d="M20.5 15.5s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0c0-1 1.5-3 1.5-3z" class="fill"/></svg><span class="toolbar__label" data-i18n="stage.bucket"></span><kbd>K</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="measure" aria-pressed="false" data-i18n-attr="title:stage.measureTitle;aria-label:stage.measureTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5 15.5 3l5.5 5.5L8.5 21z"/><path d="M7.5 11l2 2M10.5 8l1.5 1.5M13.5 5l2 2M5 14l1.5 1.5"/></svg><span class="toolbar__label" data-i18n="stage.measure"></span><kbd>M</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="size" aria-pressed="false" data-i18n-attr="title:stage.sizeTitle;aria-label:stage.sizeTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 15v5h-5"/><path d="M4 4l6 6M20 20l-6-6"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg><span class="toolbar__label" data-i18n="stage.size"></span><kbd>S</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="move" aria-pressed="false" data-i18n-attr="title:stage.moveTitle;aria-label:stage.moveTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5 12 3l2.5 2.5M9.5 18.5 12 21l2.5-2.5M5.5 9.5 3 12l2.5 2.5M18.5 9.5 21 12l-2.5 2.5"/></svg><span class="toolbar__label" data-i18n="stage.move"></span><kbd>G</kbd></button>
@@ -292,6 +293,16 @@
           <label for="radius" data-i18n="stage.radius">Radio</label>
           <input class="range" id="radius" type="range" min="0.5" max="20" step="0.5" value="3">
           <output for="radius" class="num" data-bind="radiusOut">3&nbsp;mm</output>
+        </div>
+        <div class="place" data-for="bucket">
+          <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:bucket.mode">
+            <button type="button" data-bucket-mode="region" aria-pressed="true" data-i18n="bucket.region">Solo esta zona</button>
+            <button type="button" data-bucket-mode="all" aria-pressed="false" data-i18n="bucket.all">Todo el modelo</button>
+          </div>
+          <label class="check" data-i18n-attr="title:bucket.addHelp"><input type="checkbox" id="bucket-add"> <span data-i18n="bucket.add">Como color nuevo</span></label>
+          <p class="bucket__pick" data-bind="bucketPick" aria-live="polite"></p>
+          <button class="btn btn--primary btn--sm" type="button" id="bucket-apply" disabled data-i18n="bucket.apply">Aplicar</button>
+          <button class="btn btn--quiet btn--sm" type="button" id="bucket-cancel" disabled data-i18n="common.cancel">Cancelar</button>
         </div>
         <div class="place" data-for="move">
           <span class="num" data-bind="placeOffset"></span>

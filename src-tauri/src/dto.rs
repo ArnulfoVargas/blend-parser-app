@@ -202,6 +202,36 @@ pub struct HitDto {
     pub normal: [f32; 3],
 }
 
+/// What the bucket would fill, to show before it does.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketPickDto {
+    /// The colour target it found, `#RRGGBB`; the clicked colour itself when it is added.
+    pub target_hex: String,
+    /// Whether that colour is a new target rather than one the palette has.
+    pub added: bool,
+    /// The slot that colour paints now; `None` for an added colour.
+    pub slot: Option<u8>,
+    /// The model's colour under the click and its ΔE to the target.
+    pub sample_hex: String,
+    pub delta_e: f32,
+    /// Global ids of the triangles it reaches.
+    pub tris: Vec<u32>,
+}
+
+impl From<bp_core::project::BucketPick> for BucketPickDto {
+    fn from(p: bp_core::project::BucketPick) -> Self {
+        Self {
+            target_hex: bp_core::color::to_hex(p.target_rgb),
+            added: p.target.is_none(),
+            slot: p.target.map(|_| p.slot),
+            sample_hex: bp_core::color::to_hex(p.sample),
+            delta_e: p.delta_e,
+            tris: p.tris,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaintDto {

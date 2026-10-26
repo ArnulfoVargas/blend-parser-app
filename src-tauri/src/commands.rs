@@ -9,7 +9,7 @@ use serde_json::json;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::dto::{self, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary, TurnDto};
+use crate::dto::{self, BucketPickDto, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary, TurnDto};
 use crate::error::{in_range, AppError, CmdResult};
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::profiles::Store;
@@ -496,6 +496,36 @@ pub async fn paint(
             normal: h.normal,
             tris,
         }))
+    })
+    .await
+}
+
+/// What a bucket click along the ray would fill: in the connected `region`
+/// only or everywhere, and with `add` the clicked colour as a target of its own.
+#[tauri::command]
+pub async fn bucket_pick(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    region: bool,
+    add: bool,
+) -> CmdResult<Option<BucketPickDto>> {
+    with_doc(app, move |d, _| Ok(d.project.bucket_pick(origin, dir, region, add).map(Into::into))).await
+}
+
+/// Sends the model colour under the click to `slot`; one undoable step.
+#[tauri::command]
+pub async fn bucket(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    slot: u8,
+    region: bool,
+    add: bool,
+) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.bucket(origin, dir, slot, region, add).ok_or(AppError::new("error.bucketMisses"))?;
+        Ok(dto::summary(d, prefs))
     })
     .await
 }
