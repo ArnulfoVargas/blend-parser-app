@@ -267,6 +267,7 @@
           <button class="toolbar__btn" type="button" data-tool="move" aria-pressed="false" data-i18n-attr="title:stage.moveTitle;aria-label:stage.moveTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5 12 3l2.5 2.5M9.5 18.5 12 21l2.5-2.5M5.5 9.5 3 12l2.5 2.5M18.5 9.5 21 12l-2.5 2.5"/></svg><span class="toolbar__label" data-i18n="stage.move"></span><kbd>G</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="rotate" aria-pressed="false" data-i18n-attr="title:stage.rotateTitle;aria-label:stage.rotateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.8 3.5v4h-4"/><ellipse cx="12" cy="12" rx="7.5" ry="2.6"/></svg><span class="toolbar__label" data-i18n="stage.rotate"></span><kbd>R</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="section" aria-pressed="false" data-on="false" data-i18n-attr="title:stage.sectionTitle;aria-label:stage.sectionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M2.5 12.5 12 7.5l9.5 5-9.5 5z" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.section"></span><kbd>C</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="connect" aria-pressed="false" data-i18n-attr="title:stage.connectTitle;aria-label:stage.connectTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5h18V20H3z"/><path d="M3 4h18v4.5H3z" class="cut"/><path d="M8.5 8.5v5.5M15.5 8.5v5.5"/></svg><span class="toolbar__label" data-i18n="stage.connect"></span><kbd>J</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="separate" aria-pressed="false" data-i18n-attr="title:stage.separateTitle;aria-label:stage.separateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 11 6.5 9l4 2v5l-4 2-4-2z"/><path d="M13.5 8 17.5 6l4 2v5l-4 2-4-2z" class="cut"/><path d="M10 6.5 12.5 4M11.5 18.5 14 16"/></svg><span class="toolbar__label" data-i18n="stage.separate"></span><kbd>D</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
@@ -328,6 +329,27 @@
             <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Apply cut</button></div>
           </div>
           <p class="cut-review"><span id="cut-extents"></span><span id="cut-status" role="status" aria-live="polite"></span></p>
+        </div>
+        <div class="con-controls" id="con-controls" aria-labelledby="con-title">
+          <div class="con-head">
+            <h3 class="con-title" id="con-title" data-i18n="con.title">Connectors</h3>
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:con.kind"><button type="button" data-con-kind="pin" aria-pressed="true" data-i18n="con.pin" data-i18n-attr="title:con.pinHelp">Pin and socket</button><button type="button" data-con-kind="dowel" aria-pressed="false" data-i18n="con.dowel" data-i18n-attr="title:con.dowelHelp">Loose dowel</button></div>
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:con.shape"><button type="button" data-con-shape="round" aria-pressed="true" data-i18n="con.round">Round</button><button type="button" data-con-shape="square" aria-pressed="false" data-i18n="con.square">Square</button></div>
+            <div class="con-pins" id="con-pins"><span data-i18n="con.pinsOn">Pins on</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:con.pinsOn"><button type="button" data-con-pins="a" aria-pressed="true">A</button><button type="button" data-con-pins="b" aria-pressed="false">B</button></div></div>
+          </div>
+          <div class="con-values">
+            <label class="cut-value con-value"><span id="con-size-label" data-i18n="con.diameter">Diameter</span><input id="con-size" type="number" inputmode="decimal" min="1" max="50" step="0.1" value="5"><i aria-hidden="true">mm</i></label>
+            <label class="cut-value con-value" data-i18n-attr="title:con.depthHelp"><span data-i18n="con.depth">Depth</span><input id="con-depth" type="number" inputmode="decimal" min="1" max="100" step="0.5" value="6"><i aria-hidden="true">mm</i></label>
+            <label class="cut-value con-value" data-i18n-attr="title:con.clearanceHelp"><span data-i18n="con.clearance">Clearance</span><input id="con-clearance" type="number" inputmode="decimal" min="0" max="2" step="0.05" value="0.2"><i aria-hidden="true">mm</i></label>
+            <label class="cut-value con-value" id="con-angle-field" hidden><span data-i18n="con.angle">Turn</span><input id="con-angle" type="number" inputmode="decimal" min="-360" max="360" step="5" value="0"><i aria-hidden="true">&deg;</i></label>
+            <p class="con-socket" id="con-socket"></p>
+          </div>
+          <div class="con-foot">
+            <div class="con-placed"><span class="con-count" id="con-count"></span><div class="con-list" id="con-list" role="group" data-i18n-attr="aria-label:con.placed"></div><button class="btn btn--quiet btn--sm" type="button" id="con-auto" data-i18n="con.auto" data-i18n-attr="title:con.autoHelp">Place automatically</button><button class="link" type="button" id="con-clear" data-i18n="con.clear">Remove all</button></div>
+            <label class="check" id="con-lay-field" hidden data-i18n-attr="title:con.layHelp"><input type="checkbox" id="con-lay"><span data-i18n="cut.lay">Lay on cut</span></label>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="con-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="con-apply" disabled data-i18n="con.apply">Cut with connectors</button></div>
+          </div>
+          <p class="con-status" id="con-status" role="status" aria-live="polite"></p>
         </div>
         <div class="sep-controls" id="sep-controls" aria-labelledby="sep-title">
           <div class="sep-head">

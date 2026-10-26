@@ -9,6 +9,7 @@ import "@fontsource/dm-mono/500.css";
 import "./styles/app.css";
 import "./styles/section-line.css";
 
+import * as THREE from "three";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
@@ -35,6 +36,7 @@ import { Viewer, sectionNormal, type Section, type Tool, type View } from "./vie
 import { CutPanel } from "./cut-panel";
 import { CutReview } from "./cut-review";
 import { SeparatePanel } from "./separate-panel";
+import { ConnectPanel } from "./connect-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -219,6 +221,8 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   toolClick: (tool, triangle, additive) => {
     if (tool === "separate") separatePanel.click(triangle, additive);
   },
+  planeClick: (point) => connectPanel.click(point),
+  halfPicked: (b) => connectPanel.half(b),
 });
 
 /** Points in preview units for the current size. */
@@ -348,6 +352,7 @@ syncCutDrawing();
 /** The cut's controls under the view, and the mark on its tool while it is on. */
 function syncSection(s: Section | null) {
   $<HTMLButtonElement>('button[data-tool="section"]').dataset.on = String(s !== null);
+  connectPanel.planeChanged();
   cutPanel.sync(s);
   if (keepOther.checked) $("#cut-side").textContent = t("cut.bothChoice");
   queueCutReview();
@@ -389,6 +394,43 @@ function undoCut() {
   void apply(() => api.undoCut(), () => toast(t("cut.undone")));
 }
 $("#cut-undo").addEventListener("click", undoCut);
+
+// ---- cutting with connectors ----------------------------------------------------------
+
+const connectPanel = new ConnectPanel({
+  summary: () => summary,
+  section: () => viewer.getSection(),
+  cut: async (at, spec, lay, selected) => {
+    const s = viewer.getSection();
+    if (!s) return false;
+    measured = [];
+    let done = false;
+    await apply(() => api.cutConnected(s.point, sectionNormal(s), lay, selected, { ...spec, at }, t("con.dowelName")), () => {
+      done = true;
+      setSection(null);
+      setTool("orbit");
+      toast(t("con.done", { count: summary?.plate.objects ?? 0, n: summary?.plate.objects ?? 0 }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  close: () => {
+    setSection(null);
+    setTool("orbit");
+  },
+  redraw: () => viewer.requestRender(),
+  error: errText,
+  colours: (() => {
+    const css = (name: string) => {
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "gray";
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+      return new THREE.Color(r / 255, g / 255, b / 255);
+    };
+    return { ok: css("--color-accent"), bad: css("--color-error"), glass: css("--color-ink-2") };
+  })(),
+});
+viewer.addOverlay(connectPanel.preview.group);
 
 // ---- separating pieces -----------------------------------------------------------------
 
@@ -1507,6 +1549,7 @@ function setTool(tool: Tool) {
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
   if (tool === "separate") separatePanel.open(); else separatePanel.close();
+  if (tool === "connect") connectPanel.open(); else connectPanel.close();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
@@ -1585,6 +1628,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "r") setTool("rotate");
   else if (e.key === "c") setTool("section");
   else if (e.key === "d") setTool("separate");
+  else if (e.key === "j") setTool("connect");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
@@ -1722,6 +1766,7 @@ onLangChange(() => {
   bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
   if (summary) render(summary);
   separatePanel.update();
+  connectPanel.update();
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });

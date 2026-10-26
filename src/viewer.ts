@@ -13,7 +13,7 @@ import { CutPreview, type CutExtent } from "./cut-preview";
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
-export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "separate";
+export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "separate" | "connect";
 export type Axis = 0 | 1 | 2;
 
 /** Plane point in preview units; XYZ Euler angles in degrees; negative side kept unless flipped. */
@@ -44,6 +44,10 @@ export interface BrushHandlers {
   cutDimensions(low: Vec3 | null, high: Vec3 | null): void;
   /** A click (not a drag) on the view with a tool that picks pieces: the preview triangle under it, if any. */
   toolClick?(tool: Tool, triangle: number | null, additive: boolean): void;
+  /** A click on the view with the connectors tool: where it meets the cut plane, if it does. */
+  planeClick?(point: Vec3 | null): void;
+  /** Half A or B (`b`) picked on the view with the connectors tool. */
+  halfPicked?(b: boolean): void;
 }
 
 /** A size handle: one axis, or all three from the corner. */
@@ -538,6 +542,22 @@ export class Viewer {
     this.recolorAll();
   }
 
+  /** The tools that show and move the cutting plane. */
+  private planeTool() {
+    return this.tool === "section" || this.tool === "connect";
+  }
+
+  /** Adds something drawn by a tool to the scene; the tool keeps it up to date. */
+  addOverlay(o: THREE.Object3D) {
+    this.scene.add(o);
+    this.requestRender();
+  }
+
+  /** Preview units per screen pixel at `at`, to keep a tool's marks a steady size. */
+  pixelSize(at: Vec3) {
+    return this.unitsPerPixel(new THREE.Vector3(...at));
+  }
+
   setTool(t: Tool) {
     this.sectionLine.cancel();
     this.sectionLine.clear();
@@ -560,7 +580,7 @@ export class Viewer {
     this.hoverSlide = null;
     this.hoverRing = null;
     // The cut starts across the middle the first time its tool is picked; it stays after.
-    if (t === "section" && !this.section) this.setSection(this.defaultSection());
+    if (this.planeTool() && !this.section) this.setSection(this.defaultSection());
     this.showHandles();
     this.cutDirty = true;
     // Moving needs the plate to move against.
@@ -569,7 +589,7 @@ export class Viewer {
 
   private showHandles() {
     const on = this.mesh !== null;
-    this.cut.visible = on && this.tool === "section" && this.section !== null && !this.sectionLine?.active;
+    this.cut.visible = on && this.planeTool() && this.section !== null && !this.sectionLine?.active;
     this.slides.visible = on && (this.tool === "move" || this.cut.visible);
     this.rings.visible = on && (this.tool === "rotate" || this.cut.visible);
     this.placeHandles();
@@ -673,7 +693,7 @@ export class Viewer {
     if (this.moveDrag) return this.slideTo(e);
     if (this.turnDrag) return this.turnTo(e);
     if (this.planeDrag) return this.slidePlaneTo(e);
-    if ((this.tool === "move" || this.tool === "rotate" || this.tool === "section") && e.buttons === 0) {
+    if ((this.tool === "move" || this.tool === "rotate" || this.planeTool()) && e.buttons === 0) {
       this.rayFrom(e);
       let over = false;
       if (this.tool === "move") {
@@ -805,7 +825,7 @@ export class Viewer {
     }
     // While the last move, turn or resize is still being applied, the pointer orbits.
     if (e.button !== 0 || !this.mesh || this.settling || this.drag || this.moveDrag || this.turnDrag || this.planeDrag) return;
-    if (this.tool === "move" || this.tool === "rotate" || this.tool === "section") {
+    if (this.tool === "move" || this.tool === "rotate" || this.planeTool()) {
       this.rayFrom(e);
       const started = this.tool === "move" ? this.grabSlide() : this.tool === "rotate" ? this.grabRing(e) : this.grabPlaneSlide() || this.grabRing(e);
       if (!started) return;
@@ -995,7 +1015,7 @@ export class Viewer {
 
   private grabRing(e: PointerEvent): boolean {
     const axis = this.ringAt();
-    const section = this.tool === "section" ? this.getSection() : null;
+    const section = this.planeTool() ? this.getSection() : null;
     const centre = section ? new THREE.Vector3(...section.point) : this.mesh?.geometry.boundingBox?.getCenter(new THREE.Vector3());
     if (axis === null || !centre) return false;
     // Counter-clockwise on screen is a positive turn when the axis points at the camera.
@@ -1085,7 +1105,7 @@ export class Viewer {
   private updateCutPreview() {
     this.cutDirty = false;
     const section = this.section;
-    if (!section || !this.data || this.tool !== "section") {
+    if (!section || !this.data || !this.planeTool()) {
       this.cutExtent = null;
       this.cutPreview.show(null, false, null, false);
       this.halfLabels.forEach((button) => button.hidden = true);
@@ -1093,11 +1113,13 @@ export class Viewer {
     }
     const ranges = this.cutParts.length ? this.cutParts.filter((_, i) => !section.selected.length || section.selected.includes(i))
       : [{ previewStart: 0, previewEnd: this.data.labels.length }];
-    this.cutPreview.show(this.clip, this.keepBoth, null, false);
+    // Connectors keep both halves: the far one shows as a solid ghost.
+    const both = this.keepBoth || this.tool === "connect";
+    this.cutPreview.show(this.clip, both, null, false);
     this.cutExtent = null;
     this.cutPreview.calculate(this.data.positions, ranges, section.point, sectionNormal(section), (extent) => {
       this.cutExtent = extent;
-      this.cutPreview.show(this.clip, this.keepBoth, extent, section.selected.length > 0);
+      this.cutPreview.show(this.clip, both, extent, section.selected.length > 0);
       const size = (box: THREE.Box3) => box.isEmpty() ? null : box.getSize(new THREE.Vector3()).toArray() as Vec3;
       this.handlers.cutDimensions(size(extent.low), size(extent.high));
       this.requestRender();
@@ -1112,6 +1134,7 @@ export class Viewer {
   }
 
   chooseCutSide(flip: boolean) {
+    if (this.tool === "connect") return this.handlers.halfPicked?.(flip);
     if (!this.section || this.sectionLine.active) return;
     this.setCutBoth(false);
     this.handlers.cutChoice(false);
@@ -1313,7 +1336,7 @@ export class Viewer {
     const box = this.mesh?.geometry.boundingBox;
     if (!box) return;
     const c = box.getCenter(new THREE.Vector3());
-    const isCut = this.tool === "section" && this.section !== null;
+    const isCut = this.planeTool() && this.section !== null;
     const centre = isCut ? new THREE.Vector3(...this.section!.point) : c;
     if (this.slides.visible) {
       const base = isCut ? centre : c.clone().setZ(box.min.z);
@@ -1501,13 +1524,13 @@ export class Viewer {
       el.hidden = at === null;
       if (at) el.style.transform = `translate(${at.x}px, ${at.y}px) translate(-50%, -50%)`;
     };
-    const labelPoints = this.cutExtent && this.tool === "section" && !this.sectionLine.active && !this.pickingPart
+    const labelPoints = this.cutExtent && this.planeTool() && !this.sectionLine.active && !this.pickingPart
       ? [this.cutExtent.low, this.cutExtent.high].map((box) => box.isEmpty() ? null : screen(box.getCenter(new THREE.Vector3()))) : [null, null];
     if (labelPoints[0] && labelPoints[1] && Math.hypot(labelPoints[0].x - labelPoints[1].x, labelPoints[0].y - labelPoints[1].y) < 70) {
       labelPoints[0].x -= 38; labelPoints[1].x += 38;
     }
     this.halfLabels.forEach((button, i) => {
-      button.setAttribute("aria-pressed", String(this.keepBoth || this.section?.flip === Boolean(i)));
+      button.setAttribute("aria-pressed", String(this.keepBoth || this.tool === "connect" || this.section?.flip === Boolean(i)));
       put(button, labelPoints[i]);
     });
 
@@ -1619,7 +1642,7 @@ export class Viewer {
   }
 
   private onDown(e: PointerEvent) {
-    if ((this.tool === "measure" || this.tool === "separate") && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
+    if ((this.tool === "measure" || this.tool === "separate" || this.tool === "connect") && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
     if (this.drag || this.moveDrag || this.turnDrag || this.planeDrag) return;
     if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
     this.painting = true;
@@ -1652,6 +1675,12 @@ export class Viewer {
       }
       if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
       return;
+    }
+    if (this.tool === "connect" && d && this.section && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+      this.rayFrom(e);
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(...sectionNormal(this.section)), new THREE.Vector3(...this.section.point));
+      const hit = this.ray.ray.intersectPlane(plane, new THREE.Vector3());
+      this.handlers.planeClick?.(hit ? (hit.toArray() as Vec3) : null);
     }
     if (this.tool === "separate" && d && this.mesh && this.data && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
       this.rayFrom(e);
