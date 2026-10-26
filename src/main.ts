@@ -1487,7 +1487,7 @@ $("#export-zip").addEventListener("click", async () => {
   if (!path) return;
   step = { key: "kitSplit", name: "" };
   await work(async () => {
-    const r = await api.exportColorZip(path, options);
+    const r = await api.exportColorZip(path, options, currentLang());
     const done = t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path });
     // Anything to look at is said, never left for the user to find.
     const notes = [

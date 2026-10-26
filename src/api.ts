@@ -225,7 +225,7 @@ export const api = {
   export3mf: (path: string, lang: string, objects: number[] | null = null, thumbnails: [Uint8Array, Uint8Array] | null = null) =>
     invoke<void>("export_3mf", { path, lang, objects, thumbnails: thumbnails && thumbnails.map((b) => Array.from(b)) }),
   /** The colour kit: solid pieces on single-colour plates, STLs and an assembly guide, in one ZIP. */
-  exportColorZip: (path: string, o: KitOptions) => invoke<KitResult>("export_color_zip", { path, ...o }),
+  exportColorZip: (path: string, o: KitOptions, lang: string) => invoke<KitResult>("export_color_zip", { path, options: o, lang }),
 };
 
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */
