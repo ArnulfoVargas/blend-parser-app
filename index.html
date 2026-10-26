@@ -272,6 +272,7 @@
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn toolbar__expand" type="button" id="toolbar-expand" aria-expanded="false"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg><span class="toolbar__label" data-bind="toolbarExpand"></span></button>
         </div>
+        <label class="turn-step" data-i18n-attr="title:place.stepTitle"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7M20 3v5h-5"/></svg><span data-i18n="place.step">Paso</span><select id="turn-step"><option value="1">1&deg;</option><option value="5">5&deg;</option><option value="15" selected>15&deg;</option><option value="45">45&deg;</option></select></label>
         <div class="banner" id="fit-banner" hidden>
           <p data-bind="fitBanner"></p>
           <button class="btn btn--quiet btn--sm" type="button" id="fit" data-i18n="size.fit">Ajustar a la placa</button>
@@ -302,7 +303,6 @@
           <button class="btn btn--quiet btn--sm" type="button" data-turn="1">Y</button>
           <button class="btn btn--quiet btn--sm" type="button" data-turn="2">Z</button>
           <button class="btn btn--quiet btn--sm" type="button" id="rotate-reset" data-i18n="place.resetRotation">Orientación original</button>
-          <label class="place__step"><span data-i18n="place.step">Paso</span><select class="select" id="turn-step" data-i18n-attr="title:place.stepTitle"><option value="1">1&deg;</option><option value="5">5&deg;</option><option value="15" selected>15&deg;</option><option value="45">45&deg;</option></select></label>
         </div>
         <div class="place" data-for="section">
           <div class="place__group">
