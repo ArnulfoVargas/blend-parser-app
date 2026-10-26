@@ -695,6 +695,7 @@ fn piece(part: &Part, positions: &[Vec3], loops: &Loops, (tris, caps): (Vec<Tri>
         uv_layers: loops.uv.clone(),
         color_layers: loops.color.clone(),
         object: part.object,
+        plate: part.plate,
         ..Default::default()
     };
     for (t, l, src) in tris.into_iter().chain(caps) {

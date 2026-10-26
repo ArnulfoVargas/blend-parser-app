@@ -37,6 +37,7 @@ import { CutPanel } from "./cut-panel";
 import { CutReview } from "./cut-review";
 import { SeparatePanel } from "./separate-panel";
 import { ConnectPanel } from "./connect-panel";
+import { SplitPanel } from "./split-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -432,6 +433,42 @@ const connectPanel = new ConnectPanel({
 });
 viewer.addOverlay(connectPanel.preview.group);
 
+// ---- splitting to fit the printer -------------------------------------------------------
+
+const splitPanel = new SplitPanel({
+  summary: () => summary,
+  box: () => viewer.modelBox(),
+  split: async (plan) => {
+    measured = [];
+    let done = false;
+    await apply(() => api.splitForPrinter(plan, t("con.dowelName")), () => {
+      done = true;
+      setTool("orbit");
+      setBed(true);
+      viewer.frameAll();
+      const plates = Math.max(1, summary?.plate.plates.length ?? 1);
+      toast(t("spl.done", { count: summary?.plate.objects ?? 0, n: summary?.plate.objects ?? 0, plates }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  // Shrinking is the user's call, never the split's.
+  shrink: () => void apply(() => api.fitToPlate(), () => toast(t("spl.shrunk"))),
+  close: () => setTool("orbit"),
+  redraw: () => viewer.requestRender(),
+  error: errText,
+  colours: (() => {
+    const css = (name: string) => {
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "gray";
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+      return new THREE.Color(r / 255, g / 255, b / 255);
+    };
+    return [css("--axis-x"), css("--axis-y"), css("--axis-z")];
+  })(),
+});
+viewer.addOverlay(splitPanel.planes.group);
+
 // ---- separating pieces -----------------------------------------------------------------
 
 const separatePanel = new SeparatePanel({
@@ -477,12 +514,20 @@ async function reloadMesh(frame = false) {
   syncBrush();
   syncMeasure();
   separatePanel.meshChanged();
+  splitPanel.meshChanged();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
 
 /** Why the model does not fit, the first problem first; null when it fits. */
 function fitProblem(s: Summary): string | null {
+  // Split across plates, the first plate that does not fit speaks, with its number.
+  const bad = s.plate.plates.findIndex((g) => !g.fits || !g.fitsHeight);
+  if (bad >= 0) {
+    const g = s.plate.plates[bad];
+    const one = fitProblem({ ...s, sizeMm: g.sizeMm, fitsHeight: g.fitsHeight, plate: { ...s.plate, ...g, plates: [] } });
+    return one && t("fit.onPlate", { n: bad + 1, problem: one });
+  }
   const [x, y, z] = s.sizeMm;
   const p = s.plate;
   const plate = dims([p.area.x1 - p.area.x0, p.area.y1 - p.area.y0], 0);
@@ -683,7 +728,9 @@ function renderSize(s: Summary) {
   $<HTMLButtonElement>("#size-reset").disabled = reset;
 
   const problem = fitProblem(s);
-  bind("bedFit", problem ?? t("fit.ok", { plate: dims([s.bedMm[0], s.bedMm[1]], 0), max: nf(s.maxHeightMm) }));
+  bind("bedFit", problem ?? (s.plate.plates.length > 1
+    ? t("fit.okPlates", { count: s.plate.plates.length, n: s.plate.plates.length })
+    : t("fit.ok", { plate: dims([s.bedMm[0], s.bedMm[1]], 0), max: nf(s.maxHeightMm) })));
   bind("fitBanner", problem ?? "");
   $<HTMLDivElement>("#fit-banner").hidden = problem === null;
   app.classList.toggle("is-oversize", problem !== null);
@@ -1546,10 +1593,13 @@ function setView(v: View) {
 function setTool(tool: Tool) {
   app.dataset.tool = tool;
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
+  // A short view scrolls the shelf: the tool in use stays in sight.
+  document.querySelector<HTMLButtonElement>(`#toolbar button[data-tool="${tool}"]`)?.scrollIntoView({ block: "nearest" });
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
   if (tool === "separate") separatePanel.open(); else separatePanel.close();
   if (tool === "connect") connectPanel.open(); else connectPanel.close();
+  if (tool === "split") splitPanel.open(); else splitPanel.close();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
@@ -1629,6 +1679,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "c") setTool("section");
   else if (e.key === "d") setTool("separate");
   else if (e.key === "j") setTool("connect");
+  else if (e.key === "k") setTool("split");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
@@ -1636,7 +1687,7 @@ window.addEventListener("keydown", (e) => {
     setSection(null);
     setTool("orbit");
   }
-  else if (e.key === "Escape" && app.dataset.tool === "separate") setTool("orbit");
+  else if (e.key === "Escape" && (app.dataset.tool === "separate" || app.dataset.tool === "split")) setTool("orbit");
   else if (e.key === "Escape" && measured.length) {
     measured = [];
     syncMeasure();
@@ -1767,6 +1818,7 @@ onLangChange(() => {
   if (summary) render(summary);
   separatePanel.update();
   connectPanel.update();
+  splitPanel.update();
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });

@@ -79,6 +79,7 @@ fn real_multicolor_imports_and_missing_resources() {
                     tris: &p.tris,
                     paint: &p.paint,
                     object: p.object,
+                    plate: p.plate,
                 })
                 .collect(),
             filaments: project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect(),

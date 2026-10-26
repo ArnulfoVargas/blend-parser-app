@@ -112,22 +112,32 @@ pub fn min_wall(nozzle_mm: f32) -> f32 {
     (2.0 * nozzle_mm).max(0.8)
 }
 
-/// A part's section on the cut plane, in plane coordinates (millimetres), and
-/// its surface in preview coordinates for distance and ray queries.
+/// A part's section on the cut plane, as the edges of its outline and holes in
+/// plane coordinates (millimetres), and its surface in preview coordinates for
+/// distance and ray queries.
 pub struct Section {
-    pub loops: Vec<Vec<[f32; 2]>>,
+    pub edges: Vec<([f32; 2], [f32; 2])>,
     pub surface: (Bvh, TriSoup),
 }
 
 impl Section {
-    fn inside(&self, p: [f32; 2]) -> bool {
+    /// From closed loops of points.
+    pub fn from_loops(loops: &[Vec<[f32; 2]>], surface: (Bvh, TriSoup)) -> Self {
+        let edges =
+            loops.iter().flat_map(|ring| (0..ring.len()).map(move |k| (ring[k], ring[(k + 1) % ring.len()]))).collect();
+        Self { edges, surface }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    /// Inside an odd number of loops: crossings are counted edge by edge, in any order.
+    pub fn inside(&self, p: [f32; 2]) -> bool {
         let mut odd = false;
-        for ring in &self.loops {
-            for k in 0..ring.len() {
-                let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
-                if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
-                    odd = !odd;
-                }
+        for &(a, b) in &self.edges {
+            if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
+                odd = !odd;
             }
         }
         odd
@@ -136,18 +146,12 @@ impl Section {
     /// Distance from `p` to the nearest edge of the section.
     fn edge_distance(&self, p: [f32; 2]) -> f32 {
         let mut best = f32::MAX;
-        for ring in &self.loops {
-            for k in 0..ring.len() {
-                let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
-                let ab = [b[0] - a[0], b[1] - a[1]];
-                let len2 = ab[0] * ab[0] + ab[1] * ab[1];
-                let t = if len2 > 0.0 {
-                    (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / len2).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                best = best.min(((p[0] - a[0] - ab[0] * t).powi(2) + (p[1] - a[1] - ab[1] * t).powi(2)).sqrt());
-            }
+        for &(a, b) in &self.edges {
+            let ab = [b[0] - a[0], b[1] - a[1]];
+            let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+            let t =
+                if len2 > 0.0 { (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            best = best.min(((p[0] - a[0] - ab[0] * t).powi(2) + (p[1] - a[1] - ab[1] * t).powi(2)).sqrt());
         }
         best
     }
@@ -249,9 +253,10 @@ pub fn suggest(c: &Connectors, sections: &[Section], wall_mm: f32) -> Vec<[f32; 
     let need = c.reach(c.clearance_mm) + wall_mm;
     let mut out: Vec<[f32; 2]> = vec![];
     for section in sections {
-        let (lo, hi) = section.loops.iter().flatten().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| {
-            ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])])
-        });
+        let (lo, hi) =
+            section.edges.iter().flat_map(|e| [&e.0, &e.1]).fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| {
+                ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])])
+            });
         if lo[0] > hi[0] {
             continue;
         }
@@ -336,7 +341,7 @@ mod tests {
         let frame =
             Frame { point: [0.0, 0.0, z], normal: [0.0, 0.0, 1.0], u: [1.0, 0.0, 0.0], v: [0.0, 1.0, 0.0], scale: 1.0 };
         let outline = vec![[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]];
-        (frame, Section { loops: vec![outline], surface: (Bvh::build(&soup), soup) })
+        (frame, Section::from_loops(&[outline], (Bvh::build(&soup), soup)))
     }
 
     #[test]

@@ -43,6 +43,7 @@ fn painted_free_cut_exports_both_objects_and_can_be_undone() {
                     tris: &p.tris,
                     paint: &p.paint,
                     object: p.object,
+                    plate: p.plate,
                 })
                 .collect(),
             filaments: project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect(),

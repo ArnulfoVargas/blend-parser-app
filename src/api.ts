@@ -81,6 +81,13 @@ export interface Plate {
   rotated: boolean; // turned from the file's orientation
   canUndoCut: boolean;
   objects: number; // the model and the pieces cut off it that were kept
+  /** Split across plates, each plate's own check; empty on one plate. */
+  plates: (PlateCheck & { objects: number; sizeMm: Vec3; centre: Vec3; fits: boolean; fitsHeight: boolean })[];
+}
+/** Where one plate's pieces land and what is wrong with them. */
+export interface PlateCheck {
+  area: Rect; excluded: Rect[]; model: Rect; tower: Rect | null; usable: Rect;
+  offPlate: boolean; inMargin: boolean; onExcluded: boolean; onTower: boolean; towerOffPlate: boolean; fitFactor: number;
 }
 
 /** A turn; `rigid` says how the preview moved when it could follow as it is: p' = matrix · p + shift. */
@@ -121,7 +128,7 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | "fix" | "cut" | "separate" | "connect" | null;
+  undoLabel: "stroke" | "merge" | "fix" | "cut" | "separate" | "connect" | "split" | null;
   paintedTriangles: number;
 }
 
@@ -134,6 +141,16 @@ export interface Connectors {
 }
 /** Per connector what is wrong with it (null when fine) and, when all are fine, the objects the cut leaves. */
 export interface ConnectReview { issues: ("outside" | "overlap" | "thinWall" | "tooDeep" | null)[]; objects: number | null }
+
+/** Cuts that make every piece fit the printer, and the room each plate has. */
+export interface SplitProposal { cuts: [number[], number[], number[]]; roomMm: [number, number]; heightMm: number; sizeMm: Vec3 }
+export interface SplitPlan {
+  cuts: [number[], number[], number[]]; // preview coordinates
+  layOnCut: boolean; gapMm: number;
+  dowels: { shape: "round" | "square"; sizeMm: number; depthMm: number; clearanceMm: number } | null;
+}
+export interface SplitPiece { name: string; sizeMm: Vec3; plate: number | null; laid: boolean; small: boolean; dowel: boolean }
+export interface SplitReport { pieces: SplitPiece[]; plates: number; cuts: number; joints: number; jointsMissing: number; fits: boolean }
 
 /** A disconnected piece of the model. */
 export interface Piece { part: number; partName: string; object: number; triangles: number; sizeMm: Vec3; centre: Vec3; closed: boolean }
@@ -201,6 +218,9 @@ export const api = {
   /** Same group: one object; null: the piece stays in the object it is in. */
   separatePieces: (weldMm: number, groups: (number | null)[], layFlat: boolean) => invoke<Summary>("separate_pieces", { weldMm, groups, layFlat }),
   proposeCuts: (selected: number[]) => invoke<CutProposal[]>("propose_cuts", { selected }),
+  proposeSplit: (gapMm: number) => invoke<SplitProposal>("propose_split", { gapMm }),
+  previewSplit: (plan: SplitPlan) => invoke<SplitReport>("preview_split", { plan }),
+  splitForPrinter: (plan: SplitPlan, dowelLabel: string) => invoke<Summary>("split_for_printer", { plan, dowelLabel }),
   suggestConnectors: (point: Vec3, normal: Vec3, selected: number[], connectors: Connectors) =>
     invoke<Vec3[]>("suggest_connectors", { point, normal, selected, connectors }),
   /** Checks every connector on a copy and, when all are fine, makes the cut there. */

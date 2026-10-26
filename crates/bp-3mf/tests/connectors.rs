@@ -49,6 +49,7 @@ fn a_cut_with_dowels_exports_halves_and_dowels_as_named_objects() {
                 tris: &p.tris,
                 paint: &p.paint,
                 object: p.object,
+                plate: p.plate,
             })
             .collect(),
         filaments: project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect(),

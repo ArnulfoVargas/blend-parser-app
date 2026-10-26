@@ -13,7 +13,7 @@ import { CutPreview, type CutExtent } from "./cut-preview";
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
-export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "separate" | "connect";
+export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "separate" | "connect" | "split";
 export type Axis = 0 | 1 | 2;
 
 /** Plane point in preview units; XYZ Euler angles in degrees; negative side kept unless flipped. */
@@ -1441,11 +1441,19 @@ export class Viewer {
     this.plate.visible = !on && this.mesh !== null;
     if (!on) return this.requestRender();
     const { plate, scale } = this.bedPlate!;
-    // The model's centre sits on the plate's centre, as the 3MF places it.
-    const c = box.getCenter(new THREE.Vector3());
+    // Each plate's pieces have their centre on the plate's centre, as the 3MF places them.
+    const groups = plate.plates.length
+      ? plate.plates.map((g) => ({ check: g, c: new THREE.Vector3(...g.centre) }))
+      : [{ check: plate as Plate | Plate["plates"][number], c: box.getCenter(new THREE.Vector3()) }];
+    const z = box.min.z - 0.02 / scale;
+    for (const { check, c } of groups) this.buildPlate(check, c, z, scale, plate.prefs.towerGapMm);
+    this.requestRender();
+  }
+
+  /** One plate under the pieces whose centre is `c`. */
+  private buildPlate(plate: Pick<Plate, "area" | "excluded" | "tower" | "model">, c: THREE.Vector3, z: number, scale: number, towerGap: number) {
     const mx = (plate.model.x0 + plate.model.x1) / 2;
     const my = (plate.model.y0 + plate.model.y1) / 2;
-    const z = box.min.z - 0.02 / scale;
     const flat = (r: { x0: number; y0: number; x1: number; y1: number }, color: string, opacity: number, lift: number) => {
       const w = (r.x1 - r.x0) / scale;
       const d = (r.y1 - r.y0) / scale;
@@ -1466,12 +1474,17 @@ export class Viewer {
     flat(plate.area, "--color-paper-3", 0.9, 0);
     plate.excluded.forEach((e) => flat(e, "--color-ink-2", 0.35, 0.01));
     if (plate.tower) {
-      const g = plate.prefs.towerGapMm;
+      const g = towerGap;
       const t = plate.tower;
       flat({ x0: t.x0 - g, y0: t.y0 - g, x1: t.x1 + g, y1: t.y1 + g }, "--color-warn", 0.25, 0.02);
       flat(t, "--color-warn", 0.85, 0.03);
     }
-    this.requestRender();
+  }
+
+  /** The shown mesh's box in preview units, or null before a model is loaded. */
+  modelBox(): { min: Vec3; max: Vec3 } | null {
+    const b = this.mesh?.geometry.boundingBox;
+    return b ? { min: b.min.toArray() as Vec3, max: b.max.toArray() as Vec3 } : null;
   }
 
   private markerSize() {
