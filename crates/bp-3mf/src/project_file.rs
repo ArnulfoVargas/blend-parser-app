@@ -3,7 +3,57 @@
 
 use std::io::{Read, Seek, Write};
 
+use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
+
+use crate::PrinterProfile;
+
+/// The layout this build writes; a newer one is refused.
+pub const FORMAT: u32 = 1;
+
+/// A notice from the import, kept with the project: a key and the name it is about.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Warning {
+    pub code: String,
+    pub detail: String,
+}
+
+/// The document's own settings, next to the model.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    pub format: u32,
+    /// The BlendParser that saved it, for reference.
+    pub app_version: String,
+    /// The model the project came from.
+    pub file_name: String,
+    pub file_size: u64,
+    pub import_warnings: Vec<Warning>,
+    /// The whole profile, so a custom printer that has since gone still opens.
+    pub printer: PrinterProfile,
+    pub nozzle_mm: f32,
+    /// Flush the user typed per swap: old colour, new colour, mm³.
+    pub flush: Vec<(String, String, f32)>,
+    /// Where the model's centre sits from the plate's centre.
+    pub offset_mm: [f32; 2],
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProjectError {
+    /// Not a project, or damaged.
+    Corrupt,
+    /// Saved by a newer BlendParser.
+    Version,
+}
+
+/// The settings in `json`, refusing a newer format before reading the rest.
+pub fn parse_settings(json: &str) -> Result<Settings, ProjectError> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|_| ProjectError::Corrupt)?;
+    if value["format"].as_u64().is_some_and(|f| f > FORMAT as u64) {
+        return Err(ProjectError::Version);
+    }
+    serde_json::from_value(value).map_err(|_| ProjectError::Corrupt)
+}
 
 const SETTINGS: &str = "project.json";
 const MODEL: &str = "model.bin";
