@@ -24,14 +24,59 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check:i18n
-      - run: node --test scripts/auto-release.test.mjs scripts/publish-signed-windows.test.mjs
+      - run: node --test scripts/auto-release.test.mjs scripts/publish-signed-windows.test.mjs scripts/validate-updater.test.mjs
       - run: npm run build
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: python3 -m unittest discover -s crates/bp-blend/tests -p 'test_*.py'
+
+  macos-build:
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            target: aarch64-apple-darwin
+            arch: Apple Silicon
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: Intel
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: cargo test --workspace --locked --target ${{ matrix.target }}
+      # PR builds need no updater secret and never upload to a GitHub Release.
+      - name: Compilar app y DMG con firma ad hoc
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Comprobar la firma y arquitectura de la app
+        env:
+          APP_PATH: target/${{ matrix.target }}/release/bundle/macos/BlendParser.app
+          EXPECTED_ARCH: ${{ matrix.target == 'aarch64-apple-darwin' && 'arm64' || 'x86_64' }}
+        run: |
+          codesign --verify --deep --strict "$APP_PATH"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")
+          lipo "$APP_PATH/Contents/MacOS/$executable" -verify_arch "$EXPECTED_ARCH"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
 
   prepare-release:
-    needs: check
+    needs: [check, macos-build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     permissions:

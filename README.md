@@ -105,9 +105,17 @@ Para añadir un idioma:
 
 ## Descarga
 
-Los instaladores de Windows (`.exe`, `.msi`) y Linux (`.AppImage`, `.deb`) están en
+Los instaladores de Windows (`.exe`, `.msi`), Linux (`.AppImage`, `.deb`, `.rpm`) y
+macOS (`.dmg` para Intel `x64` o Apple Silicon `aarch64`) se publican en
 [Releases](https://github.com/ArnulfoVargas/blend-parser-app/releases). Hace falta tener
 **Blender 3.6 o posterior** instalado.
+
+En macOS, abre el `.dmg` de tu arquitectura y arrastra BlendParser a Aplicaciones.
+Las builds usan firma **ad hoc**, sin certificado Developer ID ni notarización de Apple;
+macOS puede pedir que autorices su apertura en **Ajustes del Sistema → Privacidad y seguridad**.
+Esta firma es independiente de la firma del actualizador. No hacen falta secretos de Apple
+para generar estas builds. Consulta la [guía de firma de Tauri](https://v2.tauri.app/distribute/sign/macos/)
+para configurar Developer ID y notarización si se habilitan más adelante.
 
 Los instaladores de Windows se firman con un certificado de
 [SignPath Foundation](https://signpath.org) en cuanto el proyecto queda aprobado; hasta entonces
@@ -140,6 +148,7 @@ aprobación en SignPath, vuelve a firmarlos para el actualizador y los publica.
   `BLENDER_PATH` o desde la app.
 - Rust estable (1.88+), Node 20, y en Windows WebView2 (viene con Windows 11).
 - Linux: `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`.
+- macOS: Xcode Command Line Tools (`xcode-select --install`).
 
 ## Desarrollo
 
@@ -149,6 +158,13 @@ npm run tauri dev                    # desarrollo con recarga
 npm run tauri build -- --no-bundle   # solo el ejecutable, en target/release
 npm run tauri build                  # instaladores de la plataforma actual
 ```
+
+CI compila y ejecuta los tests de Rust en runners macOS nativos: `macos-14` para
+Apple Silicon y `macos-15-intel` para Intel. Además genera los `.dmg`, verifica la firma
+ad hoc y la arquitectura del ejecutable, y guarda los instaladores como artefactos de cada
+ejecución. Las builds de PR desactivan los artefactos del actualizador para no necesitar
+secretos; no crean releases. Todavía hace falta probar manualmente la interfaz y una
+conversión con Blender en un Mac.
 
 Antes de cada commit (lo mismo que comprueba CI):
 
@@ -170,7 +186,8 @@ BP_SAMPLE_BLEND=ruta/al/modelo.blend cargo test --release -p bp-blend -- --ignor
 Desde la 0.0.2, BlendParser busca una versión nueva al arrancar (y al pulsar la versión en
 la barra superior). Lee `latest.json` del último Release de GitHub, comprueba la firma con la
 clave pública de `tauri.conf.json`, instala y se reinicia. En Linux se actualiza el AppImage;
-`.deb` y `.rpm` se actualizan a mano.
+`.deb` y `.rpm` se actualizan a mano. En macOS se distribuye un `.app.tar.gz` firmado para
+el actualizador de cada arquitectura; el `.dmg` sirve para la instalación inicial.
 
 La clave privada de firma está fuera del repositorio, en `~/.tauri/blendparser.key` (con su
 contraseña en `~/.tauri/blendparser.key.password`), y en los secretos del repositorio
@@ -192,8 +209,12 @@ en su tag `alpha-X.Y.Z`. El tag `release-source-<sha>` permite reintentar el mis
 sin crear otra versión. Las reservas de tags son atómicas para evitar colisiones.
 
 El workflow reutilizable de Release se invoca directamente desde CI, porque los tags
-creados con `GITHUB_TOKEN` no disparan otro workflow. Compila y firma Windows y Linux,
-valida que `latest.json` contenga ambas plataformas y entonces publica el borrador.
+creados con `GITHUB_TOKEN` no disparan otro workflow. Compila Windows, Linux y macOS
+(Intel y Apple Silicon), firma los paquetes para el actualizador y valida que `latest.json`
+contenga las cuatro entradas: `windows-x86_64`, `linux-x86_64`, `darwin-x86_64` y
+`darwin-aarch64`. Solo entonces publica el borrador. Las subidas se ejecutan en serie
+para no sobrescribir entradas del manifiesto. El soporte macOS se aplica a tags que
+incluyan estos cambios.
 Si falla una build, el release queda como borrador y la versión anterior sigue disponible.
 Reintenta con **Re-run all jobs** en CI o con **Actions → Release → Run workflow**, indicando
 el tag existente. Un release ya publicado se omite. No borres los tags de seguimiento.
@@ -210,7 +231,7 @@ npm run release -- 0.0.3 --push
 
 El script sube la versión en `package.json`, `Cargo.toml` y `tauri.conf.json`, hace commit,
 crea el tag `alpha-0.0.3` y lo sube. El tag lanza `.github/workflows/release.yml`, que comprueba
-que tag y versión coinciden, compila y firma Windows y Linux y publica el Release con
+que tag y versión coinciden, compila Windows, Linux y macOS, firma los paquetes del actualizador y publica el Release con
 `latest.json`. Las versiones usan tres números (`mayor.menor.parche`). Usa `--channel beta` o
 `--channel v` para otros prefijos de tag.
 
