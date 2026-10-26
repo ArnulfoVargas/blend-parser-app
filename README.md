@@ -32,6 +32,11 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   simplificar la malla y aplanar la base, con estimación de cambios de filamento y purga.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
+- Separar piezas (`D`): detecta la geometría desconectada de cada objeto (uniendo antes los
+  vértices a menos de una tolerancia explícita, para no partir mallas sin soldar), la colorea
+  por objeto de destino y permite agrupar piezas, dejarlas en el modelo y elegir si quedan en
+  su posición de ensamblaje o sobre la placa. En mallas continuas sólo propone cortes
+  (estrechamientos y cambios de color), que se revisan y confirman en Sección.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 
@@ -232,6 +237,7 @@ crates/
     waste       Desperdicio: purga por par de colores, purga inicial y torre
     split       Una pieza cerrada por color (cáscara o sólido completo)
     bvh         Picking del pincel, consulta por esfera, punto más cercano
+    separate    Piezas desconectadas con tolerancia de soldadura y propuestas de corte
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
   bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa
@@ -261,6 +267,22 @@ con Blender unos 2,5 s.
   detectados a 5 bajó los cambios estimados de 1 472 a 641.
 - **Aplanar base**: corta la base en un plano (la malla sigue cerrada) para dar más
   contacto con la placa y evitar soportes o despegues.
+
+### Separar piezas (#36, primera etapa y propuestas)
+
+- **Piezas desconectadas.** Dos triángulos son de la misma pieza si comparten un vértice después
+  de unir los vértices a menos de la tolerancia elegida (0,01 mm por defecto, de 0 a 5 mm).
+  Las posiciones idénticas siempre se unen; piezas que sólo se tocan cara con cara sin compartir
+  vértices siguen separadas. Cada pieza informa si su superficie es cerrada y coherente; una
+  pieza abierta se puede separar, pero se marca para revisarla.
+- **Separar** no cambia la geometría de ninguna pieza: sus triángulos, colores y pintura a mano
+  pasan tal cual a su objeto nuevo, y todo se deshace con `Ctrl+Z` en un solo paso.
+- **Mallas continuas.** Nunca se presentan como ya separadas. Las propuestas se leen de perfiles
+  de sección a lo largo de X, Y y Z: un estrechamiento con secciones al menos el doble de anchas a
+  ambos lados (sólo en superficies cerradas, donde el área tiene sentido) o un cambio del
+  filamento dominante que se mantiene varias secciones. Cada propuesta dice qué señal la origina
+  y se abre en Sección para ajustar el plano y confirmar; no hay porcentajes de confianza.
+  El reconocimiento semántico (IA) queda para una etapa posterior.
 
 ### Diagnóstico local de viabilidad FDM (alcance inicial de #7)
 

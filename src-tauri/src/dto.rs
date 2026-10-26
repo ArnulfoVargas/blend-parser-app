@@ -441,6 +441,80 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PieceDto {
+    pub part: usize,
+    pub part_name: String,
+    pub object: u32,
+    pub triangles: usize,
+    pub size_mm: [f32; 3],
+    /// Box centre in preview coordinates.
+    pub centre: [f32; 3],
+    pub closed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiecesDto {
+    pub pieces: Vec<PieceDto>,
+    /// For each preview triangle, the index of its piece (`u32::MAX` for none).
+    pub tri_piece: Vec<u32>,
+}
+
+pub fn pieces(p: &Project, weld_mm: f32) -> PiecesDto {
+    let (found, tri_piece) = p.detect_pieces(weld_mm);
+    let parts = &p.scene().parts;
+    PiecesDto {
+        pieces: found
+            .into_iter()
+            .map(|x| PieceDto {
+                part_name: parts[x.part].name.clone(),
+                object: parts[x.part].object,
+                part: x.part,
+                triangles: x.triangles,
+                size_mm: x.size_mm,
+                centre: x.centre,
+                closed: x.closed,
+            })
+            .collect(),
+        tri_piece,
+    }
+}
+
+/// Why a cut is proposed, in final millimetres.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum SignalDto {
+    Neck { area_mm2: f32, before_mm2: f32, after_mm2: f32 },
+    Colour { from: u8, to: u8 },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposalDto {
+    pub part: usize,
+    pub axis: usize,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub signal: SignalDto,
+}
+
+pub fn proposal(p: bp_core::CutProposal) -> ProposalDto {
+    ProposalDto {
+        part: p.part,
+        axis: p.axis,
+        point: p.point,
+        normal: p.normal,
+        signal: match p.signal {
+            bp_core::separate::Signal::Neck { area, before, after } => {
+                SignalDto::Neck { area_mm2: area, before_mm2: before, after_mm2: after }
+            }
+            bp_core::separate::Signal::Colour { from, to } => SignalDto::Colour { from, to },
+        },
+    }
+}
+
 /// The saved print settings and the defaults "Restablecer" goes back to.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

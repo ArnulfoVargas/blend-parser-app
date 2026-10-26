@@ -34,6 +34,7 @@ import { setupPrintability } from "./printability";
 import { Viewer, sectionNormal, type Section, type Tool, type View } from "./viewer";
 import { CutPanel } from "./cut-panel";
 import { CutReview } from "./cut-review";
+import { SeparatePanel } from "./separate-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -215,6 +216,9 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     cutDimensions = [low, high];
     showCutDimensions();
   },
+  toolClick: (tool, triangle, additive) => {
+    if (tool === "separate") separatePanel.click(triangle, additive);
+  },
 });
 
 /** Points in preview units for the current size. */
@@ -386,6 +390,31 @@ function undoCut() {
 }
 $("#cut-undo").addEventListener("click", undoCut);
 
+// ---- separating pieces -----------------------------------------------------------------
+
+const separatePanel = new SeparatePanel({
+  summary: () => summary,
+  tint: (colors) => viewer.setTriangleTint(colors),
+  separate: async (weldMm, groups, layFlat) => {
+    measured = [];
+    let done = false;
+    await apply(() => api.separatePieces(weldMm, groups, layFlat), () => {
+      done = true;
+      toast(t("sep.done", { count: summary?.plate.objects ?? 0, n: summary?.plate.objects ?? 0 }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  // A proposal is only a plane: the Section tool shows it, and cuts once the user confirms.
+  review: (p) => {
+    const rotation: Vec3 = p.axis === 0 ? [0, 90, 0] : p.axis === 1 ? [-90, 0, 0] : [0, 0, 0];
+    setTool("section");
+    setSection({ point: p.point, rotation, flip: false, selected: (summary?.parts.length ?? 0) > 1 ? [p.part] : [] });
+    setHint(t("sep.reviewHint"));
+  },
+  close: () => setTool("orbit"),
+  error: errText,
+});
+
 const radiusInput = $<HTMLInputElement>("#radius");
 const radiusMm = () => Number(radiusInput.value);
 function syncBrush() {
@@ -405,6 +434,7 @@ async function reloadMesh(frame = false) {
   viewer.load(await api.previewMesh(), frame);
   syncBrush();
   syncMeasure();
+  separatePanel.meshChanged();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
@@ -1476,6 +1506,7 @@ function setTool(tool: Tool) {
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
+  if (tool === "separate") separatePanel.open(); else separatePanel.close();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
@@ -1553,6 +1584,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "g") setTool("move");
   else if (e.key === "r") setTool("rotate");
   else if (e.key === "c") setTool("section");
+  else if (e.key === "d") setTool("separate");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
@@ -1560,6 +1592,7 @@ window.addEventListener("keydown", (e) => {
     setSection(null);
     setTool("orbit");
   }
+  else if (e.key === "Escape" && app.dataset.tool === "separate") setTool("orbit");
   else if (e.key === "Escape" && measured.length) {
     measured = [];
     syncMeasure();
@@ -1688,6 +1721,7 @@ onLangChange(() => {
   syncOutputs();
   bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
   if (summary) render(summary);
+  separatePanel.update();
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });

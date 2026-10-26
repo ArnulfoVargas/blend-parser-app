@@ -332,6 +332,43 @@ pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
     .await
 }
 
+/// Tolerance for welding corners when looking for pieces, in millimetres.
+const WELD_RANGE: std::ops::RangeInclusive<f32> = 0.0..=5.0;
+
+/// The model's disconnected pieces and, per preview triangle, the piece it is in.
+#[tauri::command]
+pub async fn detect_pieces(app: AppHandle, weld_mm: f32) -> CmdResult<dto::PiecesDto> {
+    in_range(weld_mm, WELD_RANGE, "error.weldRange")?;
+    with_doc(app, move |d, _| Ok(dto::pieces(&d.project, weld_mm))).await
+}
+
+/// Pieces with the same group become one object; `None` leaves a piece where it is.
+#[tauri::command]
+pub async fn separate_pieces(
+    app: AppHandle,
+    weld_mm: f32,
+    groups: Vec<Option<u32>>,
+    lay_flat: bool,
+) -> CmdResult<Summary> {
+    in_range(weld_mm, WELD_RANGE, "error.weldRange")?;
+    with_doc(app, move |d, prefs| {
+        d.project.separate_pieces(weld_mm, &groups, lay_flat).map_err(|e| {
+            AppError::new(match e {
+                bp_core::SeparateError::Stale => "error.separateStale",
+                bp_core::SeparateError::NothingToSeparate => "error.separateNothing",
+            })
+        })?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Planes to review for splitting a continuous mesh; nothing is cut here.
+#[tauri::command]
+pub async fn propose_cuts(app: AppHandle, selected: Vec<usize>) -> CmdResult<Vec<dto::ProposalDto>> {
+    with_doc(app, move |d, _| Ok(d.project.propose_cuts(&selected).into_iter().map(dto::proposal).collect())).await
+}
+
 #[tauri::command]
 pub async fn reduce_palette(app: AppHandle, target: usize) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {

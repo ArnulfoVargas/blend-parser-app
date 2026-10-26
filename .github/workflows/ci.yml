@@ -27,6 +27,7 @@ jobs:
       - run: npm run test:section-line
       - run: npm run test:cut-preview
       - run: npm run test:viewer-handles
+      - run: npm run test:separate
       - run: node --test scripts/auto-release.test.mjs scripts/publish-signed-windows.test.mjs
       - run: npm run build
       - run: cargo fmt --all --check
