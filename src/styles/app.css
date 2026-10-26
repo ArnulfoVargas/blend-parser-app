@@ -103,6 +103,12 @@ h2 { font-size: var(--text-lg); }
 .progress { height: 6px; border-radius: var(--radius-pill); background: var(--color-paper-3); overflow: hidden; }
 .progress > span { display: block; width: 40%; height: 100%; border-radius: inherit; background: var(--color-accent); animation: slide 1.4s var(--ease-in-out) infinite; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+.meter { height: 8px; border-radius: var(--radius-pill); background: var(--color-paper-3); overflow: hidden; }
+.meter > span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--color-accent); transition: width var(--dur-short) var(--ease-out); }
+.meter[data-indeterminate] > span { width: 40%; animation: slide 1.4s var(--ease-in-out) infinite; }
+.zip-contents { display: flex; flex-direction: column; gap: var(--space-xs); margin: 0; padding: 0; border: 0; }
+.zip-contents legend { margin-bottom: var(--space-xs); font-weight: 500; }
+.zip-mix { display: flex; flex-direction: column; gap: var(--space-2xs); }
 
 /* Ajustes */
 .settings { display: flex; flex-direction: column; gap: var(--space-lg); transition: opacity var(--dur-short) var(--ease-out); }
@@ -301,6 +307,7 @@ details.group[open] .group__sum { visibility: hidden; }
 }
 @media (prefers-reduced-motion: reduce) {
   .progress > span { animation: none; width: 100%; opacity: 0.5; }
+  .meter[data-indeterminate] > span { animation: none; width: 100%; opacity: 0.5; }
   .version, .btn, .keys label, .seg button, .link, .slot__edit, .slot__pick, .drop-veil, .settings, .busybar, #viewport, details.group > summary::after, .tray__empty { transition: none; }
   .busybar::before { animation: none; width: 100%; opacity: 0.6; }
 }

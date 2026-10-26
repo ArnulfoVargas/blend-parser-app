@@ -55,6 +55,64 @@ pub struct KitSettings {
     /// Let colours share a plate (see `bp_core::kit::Bed::mix`).
     #[serde(default)]
     pub mix: bool,
+    /// What the ZIP holds.
+    #[serde(default)]
+    pub contents: KitContents,
+}
+
+/// What goes in the kit's ZIP besides its summary, and how sharp its pictures are.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KitContents {
+    pub three_mf: bool,
+    pub stl: StlFiles,
+    /// The assembly guide with pictures.
+    pub guide: bool,
+    /// The same steps as plain text.
+    pub text: bool,
+    pub quality: Quality,
+}
+
+impl Default for KitContents {
+    fn default() -> Self {
+        Self { three_mf: true, stl: StlFiles::Piece, guide: true, text: true, quality: Quality::Medium }
+    }
+}
+
+impl KitContents {
+    /// Anything besides the summary.
+    pub fn any(&self) -> bool {
+        self.three_mf || self.stl != StlFiles::None || self.guide || self.text
+    }
+}
+
+/// STL files: none, one per piece, or one per colour with its pieces assembled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StlFiles {
+    None,
+    Piece,
+    Colour,
+}
+
+/// How large and smooth the guide's pictures are, and so the ZIP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Quality {
+    Low,
+    Medium,
+    High,
+}
+
+impl Quality {
+    /// Picture size against medium, and supersampling.
+    pub fn scale(self) -> (f32, usize) {
+        match self {
+            Self::Low => (0.7, 1),
+            Self::Medium => (1.0, 2),
+            Self::High => (1.5, 2),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

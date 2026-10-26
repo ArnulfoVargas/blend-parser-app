@@ -18,6 +18,8 @@ import {
   type BucketPick,
   type Filament,
   type Filaments,
+  type KitContents,
+  type KitProgress,
   type PlatePrefs,
   type PrinterProfile,
   type Printers,
@@ -1437,6 +1439,34 @@ const syncCore = () => {
   $<HTMLElement>("#core-field").hidden = !(Number($<HTMLInputElement>("#depth").value) > 0);
 };
 $("#depth").addEventListener("input", syncCore);
+
+/** The last kit this session wrote: what a new one is estimated from. */
+let lastKit: { pieces: number; bytes: number; quality: KitContents["quality"] } | null = null;
+/** Picture weight against medium quality, and per piece at medium (pictures of its card and step). */
+const QUALITY_WEIGHT = { low: 0.6, medium: 1, high: 1.5 } as const;
+const PICTURES_PER_PIECE = 20_000;
+const size = (bytes: number) => (bytes >= 1e6 ? `${num(bytes / 1e6, 1)} MB` : `${num(Math.max(1, bytes / 1e3))} KB`);
+
+const zipContents = (): KitContents => ({
+  threeMf: $<HTMLInputElement>("#zip-3mf").checked,
+  stl: $<HTMLSelectElement>("#zip-stl").value as KitContents["stl"],
+  guide: $<HTMLInputElement>("#zip-guide").checked,
+  text: $<HTMLInputElement>("#zip-text").checked,
+  quality: $<HTMLSelectElement>("#zip-quality").value as KitContents["quality"],
+});
+/** Pictures only matter with the guide; the estimate follows the last kit when there is one. */
+const syncZipContents = () => {
+  const c = zipContents();
+  $<HTMLElement>("#zip-quality-field").hidden = !c.guide;
+  const nothing = !(c.threeMf || c.guide || c.text || c.stl !== "none");
+  $<HTMLElement>("#zip-error").hidden = !nothing;
+  const w = QUALITY_WEIGHT[c.quality];
+  $("#zip-estimate").textContent = lastKit
+    ? t("zip.estimateLast", { size: size((lastKit.bytes * w) / QUALITY_WEIGHT[lastKit.quality]), n: lastKit.pieces, count: lastKit.pieces })
+    : t("zip.estimate", { size: size(PICTURES_PER_PIECE * w) });
+};
+for (const id of ["#zip-3mf", "#zip-guide", "#zip-text", "#zip-stl", "#zip-quality"]) $(id).addEventListener("change", syncZipContents);
+
 $("#open-zip").addEventListener("click", () => {
   if (app.dataset.state !== "ready" || !summary) return;
   const core = $<HTMLSelectElement>("#core");
@@ -1452,12 +1482,46 @@ $("#open-zip").addEventListener("click", () => {
     $<HTMLInputElement>("#depth").value = String(last.depthMm);
     $<HTMLInputElement>("#min-piece").value = String(last.minPieceMm3);
     $<HTMLInputElement>("#zip-mix").checked = last.mix ?? false;
+    if (last.contents) {
+      $<HTMLInputElement>("#zip-3mf").checked = last.contents.threeMf;
+      $<HTMLSelectElement>("#zip-stl").value = last.contents.stl;
+      $<HTMLInputElement>("#zip-guide").checked = last.contents.guide;
+      $<HTMLInputElement>("#zip-text").checked = last.contents.text;
+      $<HTMLSelectElement>("#zip-quality").value = last.contents.quality;
+    }
   }
   const wanted = last ? (last.coreSlot === null ? "" : String(last.coreSlot)) : keep;
   core.value = [...core.options].some((o) => o.value === wanted) ? wanted : "";
   syncCore();
+  syncZipContents();
   zipDialog.showModal();
 });
+
+const kitProgress = $<HTMLDialogElement>("#kit-progress");
+const meter = $<HTMLElement>("#kit-meter");
+/** Shows how far the kit has got: a stage, and a bar when it can count. */
+const showKitProgress = (p: KitProgress) => {
+  const counted = p.total > 0;
+  const pct = counted ? Math.round((100 * p.done) / p.total) : 0;
+  $("#kit-stage").textContent = counted
+    ? t(`zip.stage.${p.stage}Of` as Key, { done: p.done, total: p.total })
+    : t(`zip.stage.${p.stage}` as Key);
+  meter.toggleAttribute("data-indeterminate", !counted);
+  if (counted) meter.setAttribute("aria-valuenow", String(pct));
+  else meter.removeAttribute("aria-valuenow");
+  meter.querySelector("span")!.style.width = counted ? `${pct}%` : "";
+};
+$("#kit-cancel").addEventListener("click", () => {
+  $<HTMLButtonElement>("#kit-cancel").disabled = true;
+  $("#kit-stage").textContent = t("zip.cancelling");
+  void api.cancelColorZip();
+});
+// Escape cancels the export, it does not just hide the dialog.
+kitProgress.addEventListener("cancel", (e) => {
+  e.preventDefault();
+  $<HTMLButtonElement>("#kit-cancel").click();
+});
+
 $("#export-zip").addEventListener("click", async () => {
   if (!summary) return;
   const depth = $<HTMLInputElement>("#depth");
@@ -1472,6 +1536,12 @@ $("#export-zip").addEventListener("click", async () => {
     (depthOk ? minPiece : depth).focus();
     return;
   }
+  const contents = zipContents();
+  if (!(contents.threeMf || contents.guide || contents.text || contents.stl !== "none")) {
+    syncZipContents();
+    $<HTMLInputElement>("#zip-3mf").focus();
+    return;
+  }
   const core = $<HTMLSelectElement>("#core").value;
   const options = {
     voxelMm: Number($<HTMLSelectElement>("#voxel").value),
@@ -1479,16 +1549,22 @@ $("#export-zip").addEventListener("click", async () => {
     coreSlot: depthMm > 0 && core !== "" ? Number(core) : null,
     minPieceMm3,
     mix: $<HTMLInputElement>("#zip-mix").checked,
+    contents,
   };
   zipDialog.close();
   if (!(await confirmOversize())) return;
   const suffix = currentLang() === "en" ? "_pieces.zip" : "_piezas.zip";
   const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
-  step = { key: "kitSplit", name: "" };
-  await work(async () => {
+  $<HTMLButtonElement>("#kit-cancel").disabled = false;
+  showKitProgress({ stage: "split", done: 0, total: 0 });
+  kitProgress.showModal();
+  const unlisten = await listen<KitProgress>("kitProgress", (e) => showKitProgress(e.payload));
+  app.classList.add("is-working");
+  try {
     const r = await api.exportColorZip(path, options, currentLang());
-    const done = t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path });
+    lastKit = { pieces: r.pieces, bytes: r.bytes, quality: contents.quality };
+    const done = t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path, size: size(r.bytes) });
     // Anything to look at is said, never left for the user to find.
     const notes = [
       r.oversize ? t("zip.oversize", { count: r.oversize, n: r.oversize }) : "",
@@ -1496,7 +1572,15 @@ $("#export-zip").addEventListener("click", async () => {
       r.dropped ? t("zip.dropped", { count: r.dropped, n: r.dropped }) : "",
     ].filter(Boolean);
     toast([done, ...notes].join(" "), notes.length ? "error" : "ok");
-  });
+  } catch (e) {
+    // Cancelling is the user's choice, not an error; nothing was written.
+    if (isAppError(e) && e.key === "error.kitCancelled") toast(t("zip.cancelled"), "ok");
+    else toast(errText(e), "error");
+  } finally {
+    unlisten();
+    app.classList.remove("is-working");
+    kitProgress.close();
+  }
 });
 
 // ---- settings ----------------------------------------------------------------------------

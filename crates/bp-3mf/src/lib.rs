@@ -13,7 +13,7 @@ pub mod kit;
 pub mod plate;
 mod printer;
 pub mod project_file;
-pub use kit::{kit_bed, write_kit_zip, KitInfo, KitSummary, Lang as KitLang};
+pub use kit::{kit_bed, write_kit_zip, write_kit_zip_with, KitInfo, KitSummary, Lang as KitLang, Stage as KitStage};
 pub use plate::{PlateCheck, Rect, Reserve};
 pub use printer::{canonical_id, catalog, Printer, PrinterProfile, NOZZLES};
 

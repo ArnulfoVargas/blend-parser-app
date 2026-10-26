@@ -124,6 +124,11 @@ mod tests {
                 core_slot: Some(1),
                 min_piece_mm3: 12.0,
                 mix: true,
+                contents: bp_3mf::project_file::KitContents {
+                    stl: bp_3mf::project_file::StlFiles::Colour,
+                    quality: bp_3mf::project_file::Quality::High,
+                    ..Default::default()
+                },
             }),
         }
     }

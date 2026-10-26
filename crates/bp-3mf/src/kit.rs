@@ -24,7 +24,7 @@ use rayon::prelude::*;
 use zip::write::SimpleFileOptions;
 
 use crate::plate::Reserve;
-use crate::project_file::KitSettings;
+use crate::project_file::{KitSettings, Quality, StlFiles};
 use crate::{escape, write_plates, write_stl, Flush, PlateObject, PlateProject, Printer};
 
 /// The printer's plate as the kit packs it: its printable area and excluded
@@ -265,6 +265,40 @@ const VIEWS: [(f32, f32); 6] =
 /// Id the view search gives glue, to count how much of it shows.
 const GLUE_ID: u32 = u32::MAX - 1;
 
+/// How large and smooth the guide's pictures are.
+#[derive(Clone, Copy)]
+struct Look {
+    scale: f32,
+    ssaa: usize,
+}
+
+impl Look {
+    fn new(q: Quality) -> Self {
+        let (scale, ssaa) = q.scale();
+        Self { scale, ssaa }
+    }
+
+    fn px(&self, medium: usize) -> usize {
+        ((medium as f32 * self.scale).round() as usize).max(16)
+    }
+
+    /// `items` seen from `view` (azimuth, elevation), framing `lo..hi`, `size` at medium quality.
+    fn render(&self, view: (f32, f32), (lo, hi): ([f32; 3], [f32; 3]), size: (usize, usize), items: &[Item]) -> Frame {
+        render::render(&Camera::new(view.0, view.1, lo, hi, self.px(size.0), self.px(size.1)), items, self.ssaa)
+    }
+}
+
+/// Counts a picture done; stops the export when the user cancelled.
+type Tick<'a> = &'a (dyn Fn() -> bool + Sync);
+
+fn tick(t: Tick) -> std::io::Result<()> {
+    if t() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"))
+    }
+}
+
 struct Pictures {
     overview: Vec<Shot>,
     thumbs: Vec<Shot>,
@@ -405,31 +439,30 @@ impl<'a> Gluing<'a> {
 
     /// The picture, the fixed pieces glued to labelled, the moving ones ringed
     /// as `label`; and a close-up when they come out small.
-    fn shots(&self, labels: &[String], label: &str) -> std::io::Result<(Shot, Option<Shot>)> {
+    fn shots(&self, look: Look, labels: &[String], label: &str) -> std::io::Result<(Shot, Option<Shot>)> {
         let (az, el) = self.view();
         let items = self.items(false);
-        let frame = render::render(&Camera::new(az, el, self.lo, self.hi, 640, 460), &items, 2);
+        let frame = look.render((az, el), (self.lo, self.hi), (640, 460), &items);
         let tags = declutter(
             self.glue.iter().filter_map(|(f, _)| frame.anchor(*f as u32).map(|a| (labels[*f].clone(), a, false))),
         );
         let shot = Shot::new(&frame, tags)?.focus(&frame, &self.moving, label);
         let boxes: Vec<[f32; 4]> = self.moving.iter().filter_map(|&i| frame.bbox(i as u32)).collect();
         let small = boxes.is_empty() || boxes.iter().all(|b| b[2] - b[0] < 0.3 && b[3] - b[1] < 0.3);
-        let detail = if small {
-            // The moving pieces and the glue, with room around them.
-            let (a, b) =
-                bounds(self.moved.iter().flatten().chain(
-                    self.glue.iter().flat_map(|(f, t)| {
+        let detail =
+            if small {
+                // The moving pieces and the glue, with room around them.
+                let (a, b) =
+                    bounds(self.moved.iter().flatten().chain(self.glue.iter().flat_map(|(f, t)| {
                         t.iter().flatten().map(move |&v| &self.kit.pieces[*f].positions[v as usize])
-                    }),
-                ));
-            let c: [f32; 3] = std::array::from_fn(|k| (a[k] + b[k]) / 2.0);
-            let r = (0..3).map(|k| b[k] - a[k]).fold(0.0f32, f32::max) * 0.6 + 4.0;
-            let frame = render::render(&Camera::new(az, el, c.map(|x| x - r), c.map(|x| x + r), 320, 240), &items, 2);
-            Some(Shot::new(&frame, vec![])?.focus(&frame, &self.moving, label))
-        } else {
-            None
-        };
+                    })));
+                let c: [f32; 3] = std::array::from_fn(|k| (a[k] + b[k]) / 2.0);
+                let r = (0..3).map(|k| b[k] - a[k]).fold(0.0f32, f32::max) * 0.6 + 4.0;
+                let frame = look.render((az, el), (c.map(|x| x - r), c.map(|x| x + r)), (320, 240), &items);
+                Some(Shot::new(&frame, vec![])?.focus(&frame, &self.moving, label))
+            } else {
+                None
+            };
         Ok((shot, detail))
     }
 }
@@ -450,7 +483,24 @@ fn plate_items<'a>(kit: &'a Kit, colours: &[[u8; 3]], k: usize, moved: &'a [Vec<
         .collect()
 }
 
-fn pictures(kit: &Kit, colours: &[[u8; 3]], labels: &[String], groups: &[String]) -> std::io::Result<Pictures> {
+/// How many pictures [`pictures`] draws, for the progress.
+fn picture_count(kit: &Kit, covers: bool, guide: bool) -> usize {
+    let covers = if covers { kit.plates.len() } else { 0 };
+    covers + if guide { 2 + kit.pieces.len() + kit.plates.len() + kit.steps.len() + kit.groups.len() - 1 } else { 0 }
+}
+
+/// With `covers`, the plates' pictures for the 3MF; with `guide`, every picture of the guide.
+#[allow(clippy::too_many_arguments)]
+fn pictures(
+    kit: &Kit,
+    colours: &[[u8; 3]],
+    labels: &[String],
+    groups: &[String],
+    look: Look,
+    covers: bool,
+    guide: bool,
+    done: Tick,
+) -> std::io::Result<Pictures> {
     let (lo, hi) = bounds(kit.pieces.iter().flat_map(|p| p.positions.iter()));
     let item = |i: usize, style: Style| Item {
         positions: &kit.pieces[i].positions,
@@ -460,19 +510,24 @@ fn pictures(kit: &Kit, colours: &[[u8; 3]], labels: &[String], groups: &[String]
         style,
     };
 
-    let overview = [(35.0, 28.0), (215.0, 28.0)]
+    let views: &[(f32, f32)] = if guide { &[(35.0, 28.0), (215.0, 28.0)] } else { &[] };
+    let overview = views
         .par_iter()
         .map(|&(az, el)| {
             let items: Vec<Item> = (0..kit.pieces.len()).map(|i| item(i, Style::Normal)).collect();
-            Shot::new(&render::render(&Camera::new(az, el, lo, hi, 560, 420), &items, 2), vec![])
+            let shot = Shot::new(&look.render((az, el), (lo, hi), (560, 420), &items), vec![]);
+            tick(done)?;
+            shot
         })
         .collect::<std::io::Result<Vec<_>>>()?;
 
-    let thumbs = (0..kit.pieces.len())
+    let thumbs = (0..if guide { kit.pieces.len() } else { 0 })
         .into_par_iter()
         .map(|i| {
             let (a, b) = bounds(kit.pieces[i].positions.iter());
-            Shot::new(&render::render(&Camera::new(35.0, 28.0, a, b, 200, 150), &[item(i, Style::Normal)], 2), vec![])
+            let shot = Shot::new(&look.render((35.0, 28.0), (a, b), (200, 150), &[item(i, Style::Normal)]), vec![]);
+            tick(done)?;
+            shot
         })
         .collect::<std::io::Result<Vec<_>>>()?;
 
@@ -487,18 +542,20 @@ fn pictures(kit: &Kit, colours: &[[u8; 3]], labels: &[String], groups: &[String]
             })
             .collect()
     };
-    let covers = (0..kit.plates.len())
+    let covers = (0..if covers { kit.plates.len() } else { 0 })
         .into_par_iter()
         .map(|k| {
             let moved = on_plate(k);
             let items = plate_items(kit, colours, k, &moved);
             let (a, b) = bounds(moved.iter().flatten());
             let shot = |size: usize| png(&render::render(&Camera::new(35.0, 28.0, a, b, size, size), &items, 2));
-            Ok((shot(512)?, shot(128)?))
+            let both = (shot(512)?, shot(128)?);
+            tick(done)?;
+            Ok(both)
         })
         .collect::<std::io::Result<Vec<_>>>()?;
 
-    let plates = (0..kit.plates.len())
+    let plates = (0..if guide { kit.plates.len() } else { 0 })
         .into_par_iter()
         .map(|k| {
             let moved = on_plate(k);
@@ -509,18 +566,19 @@ fn pictures(kit: &Kit, colours: &[[u8; 3]], labels: &[String], groups: &[String]
                 a[k] = (a[k] - 6.0).max(kit.bed.area[k]);
                 b[k] = (b[k] + 6.0).min(kit.bed.area[k + 2]);
             }
-            let cam = Camera::new(0.0, 89.0, [a[0], a[1], 0.0], [b[0], b[1], b[2].max(1.0)], 520, 360);
-            let frame = render::render(&cam, &items, 2);
+            let frame = look.render((0.0, 89.0), ([a[0], a[1], 0.0], [b[0], b[1], b[2].max(1.0)]), (520, 360), &items);
             let ids = &kit.plates[k].pieces;
-            Shot::new(
+            let shot = Shot::new(
                 &frame,
                 declutter(ids.iter().filter_map(|&i| frame.anchor(i as u32).map(|a| (labels[i].clone(), a, false)))),
-            )
+            );
+            tick(done)?;
+            shot
         })
         .collect::<std::io::Result<Vec<_>>>()?;
 
     // A step shows its sub-assembly so far, framed on it and the new piece.
-    let steps = (0..kit.steps.len())
+    let steps = (0..if guide { kit.steps.len() } else { 0 })
         .into_par_iter()
         .map(|k| {
             let step = &kit.steps[k];
@@ -528,19 +586,28 @@ fn pictures(kit: &Kit, colours: &[[u8; 3]], labels: &[String], groups: &[String]
             let fixed: Vec<usize> = kit.steps[range.start..k].iter().map(|s| s.piece).collect();
             let pairs: Vec<(usize, usize)> = step.joins.iter().map(|&j| (step.piece, j)).collect();
             let frame = [fixed.as_slice(), &[step.piece]].concat();
-            Gluing::new(kit, colours, fixed, vec![step.piece], &pairs, &frame).shots(labels, &labels[step.piece])
+            let shots = Gluing::new(kit, colours, fixed, vec![step.piece], &pairs, &frame).shots(
+                look,
+                labels,
+                &labels[step.piece],
+            );
+            tick(done)?;
+            shots
         })
         .collect::<std::io::Result<Vec<_>>>()?;
     let (steps, details) = steps.into_iter().unzip();
 
     // A sub-assembly comes to the groups before it, glued where they touch.
-    let joins = (1..kit.groups.len())
+    let joins = (1..if guide { kit.groups.len() } else { 1 })
         .into_par_iter()
         .map(|g| {
             let before: Vec<usize> = kit.steps[..kit.groups[g].steps.start].iter().map(|s| s.piece).collect();
             let mine: Vec<usize> = kit.steps[kit.groups[g].steps.clone()].iter().map(|s| s.piece).collect();
             let all: Vec<usize> = (0..kit.pieces.len()).collect();
-            Ok(Gluing::new(kit, colours, before, mine, &kit.groups[g].joins, &all).shots(labels, &groups[g])?.0)
+            let shot =
+                Gluing::new(kit, colours, before, mine, &kit.groups[g].joins, &all).shots(look, labels, &groups[g])?.0;
+            tick(done)?;
+            Ok(shot)
         })
         .collect::<std::io::Result<Vec<_>>>()?;
     Ok(Pictures { overview, thumbs, plates, covers, steps, details, joins })
@@ -807,7 +874,8 @@ struct Names<'a> {
     f: Files,
     labels: Vec<String>,
     groups: Vec<String>,
-    files: Vec<String>,
+    /// Each piece's STL in the ZIP, when there is one.
+    files: Vec<Option<String>>,
     three_mf: String,
     issues: Vec<Vec<Issue>>,
 }
@@ -833,7 +901,12 @@ impl<'a> Names<'a> {
         names.files = (0..kit.pieces.len())
             .map(|i| {
                 let s = kit.pieces[i].slot;
-                format!("stl/{}-{}/{}.stl", s + 1, slug(names.colour(s)), names.labels[i])
+                let dir = format!("stl/{}-{}", s + 1, slug(names.colour(s)));
+                match info.params.contents.stl {
+                    StlFiles::None => None,
+                    StlFiles::Piece => Some(format!("{dir}/{}.stl", names.labels[i])),
+                    StlFiles::Colour => Some(format!("{dir}.stl")),
+                }
             })
             .collect();
         names.issues = bp_core::kit::check(kit, info.printer.nozzle_mm);
@@ -842,6 +915,41 @@ impl<'a> Names<'a> {
 
     fn t(&self, es: &'static str, en: &'static str) -> &'static str {
         self.lang.t(es, en)
+    }
+
+    fn has(&self) -> crate::project_file::KitContents {
+        self.info.params.contents
+    }
+
+    /// How to print the kit with what the ZIP holds, as HTML when `html`.
+    fn how_to_print(&self, html: bool) -> String {
+        let c = self.has();
+        let file = if html {
+            format!("<a class=\"mono\" href=\"{0}\">{0}</a>", escape(&self.three_mf))
+        } else {
+            self.three_mf.clone()
+        };
+        match (self.lang, c.three_mf, c.stl != StlFiles::None) {
+            (Lang::Es, true, _) => {
+                format!("Abre {file} en Bambu Studio e imprime cada placa con el filamento que indica su nombre")
+            }
+            (Lang::En, true, _) => {
+                format!("Open {file} in Bambu Studio and print each plate with the filament its name gives")
+            }
+            (Lang::Es, false, true) => "Lamina los STL de stl/, cada carpeta con su filamento".into(),
+            (Lang::En, false, true) => "Slice the STLs in stl/, each folder with its filament".into(),
+            (Lang::Es, false, false) => "Imprime cada pieza con su filamento".into(),
+            (Lang::En, false, false) => "Print each piece with its filament".into(),
+        }
+    }
+
+    /// A link into the guide, or just the text when the ZIP has no guide.
+    fn guide_link(&self, anchor: &str, text: &str, class: &str) -> String {
+        if self.has().guide {
+            format!("<a{class} href=\"{}#{anchor}\">{text}</a>", self.f.guide)
+        } else {
+            text.to_string()
+        }
     }
 
     fn hex(&self, slot: u8) -> String {
@@ -1024,20 +1132,30 @@ fn guide_html(n: &Names, pics: &Pictures, paths: &Paths) -> String {
         );
     }
 
-    let three_mf = escape(&n.three_mf);
     let _ = write!(h, "<h2 id=\"prep\">{}</h2><ol class=\"prep\">", n.t("Antes de empezar", "Before you start"));
+    let stl = match (l, n.has().stl) {
+        (_, StlFiles::None) => "",
+        (Lang::Es, StlFiles::Piece) => " Su STL, en <span class=\"mono\">stl/</span>, lleva el mismo número.",
+        (Lang::En, StlFiles::Piece) => " Its STL, in <span class=\"mono\">stl/</span>, has the same number.",
+        (Lang::Es, StlFiles::Colour) => {
+            " En <span class=\"mono\">stl/</span> hay un STL por color con sus piezas ya armadas."
+        }
+        (Lang::En, StlFiles::Colour) => {
+            " <span class=\"mono\">stl/</span> holds one STL per colour with its pieces assembled."
+        }
+    };
     let prep: [String; 5] = match l {
         Lang::Es => [
-            format!("Abre <span class=\"mono\">{three_mf}</span> en Bambu Studio e imprime cada placa con el filamento que indica su nombre."),
+            format!("{}.", n.how_to_print(true)),
             "Las piezas ya están giradas sobre su cara más plana. Si Bambu avisa de voladizos, activa soportes en árbol solo sobre la placa.".into(),
-            "Al despegar cada placa, separa las piezas por número usando la sección <a href=\"#pieces\">Piezas</a>: cada una aparece con su forma y su color, y puedes filtrarlas por color. Su STL, en <span class=\"mono\">stl/</span>, lleva el mismo número.".into(),
+            format!("Al despegar cada placa, separa las piezas por número usando la sección <a href=\"#pieces\">Piezas</a>: cada una aparece con su forma y su color, y puedes filtrarlas por color.{stl}"),
             "Prueba cada unión en seco antes de pegar. Lija un poco las caras de contacto para que el pegamento agarre.".into(),
             "Pon pegamento solo en las zonas rayadas <span class=\"glue\" aria-hidden=\"true\"></span> de cada imagen: son las caras que tocan la pieza nueva. Para PLA usa cianoacrilato en gel; para uniones grandes, epoxi de 5 minutos.".into(),
         ],
         Lang::En => [
-            format!("Open <span class=\"mono\">{three_mf}</span> in Bambu Studio and print each plate with the filament its name gives."),
+            format!("{}.", n.how_to_print(true)),
             "Pieces are already turned onto their flattest face. If Bambu warns about overhangs, turn on tree supports on the plate only.".into(),
-            "As each plate comes off, sort the pieces by number with the <a href=\"#pieces\">Pieces</a> section: each one shows its shape and colour, and you can filter them by colour. Its STL, in <span class=\"mono\">stl/</span>, has the same number.".into(),
+            format!("As each plate comes off, sort the pieces by number with the <a href=\"#pieces\">Pieces</a> section: each one shows its shape and colour, and you can filter them by colour.{stl}"),
             "Dry-fit every joint before gluing. Sand the contact faces lightly so the glue grips.".into(),
             "Put glue only on the striped areas <span class=\"glue\" aria-hidden=\"true\"></span> in each picture: the faces the new piece touches. For PLA use gel superglue; for large joints, 5-minute epoxy.".into(),
         ],
@@ -1132,7 +1250,7 @@ fn guide_html(n: &Names, pics: &Pictures, paths: &Paths) -> String {
         let _ = write!(
             h,
             "<div class=\"card{flag}\" id=\"{label}\" data-slot=\"{slot}\" data-review=\"{rev}\">{shot}<div><b>{label}</b> · {sw}{name}<small>{x:.0} × {y:.0} × {z:.0} mm · {vol:.1} cm³</small>\
-<small><a href=\"#{plate_anchor}\">{plate_word} {plate}</a> · <a href=\"#{step_anchor}\">{step_word} {step}</a>{group}</small><small><a class=\"mono\" href=\"{file}\">{file}</a></small>{warn}</div></div>",
+<small><a href=\"#{plate_anchor}\">{plate_word} {plate}</a> · <a href=\"#{step_anchor}\">{step_word} {step}</a>{group}</small>{file}{warn}</div></div>",
             flag = if n.issues[i].is_empty() { "" } else { " card--warn" },
             slot = p.slot,
             rev = u8::from(!n.issues[i].is_empty()),
@@ -1151,7 +1269,7 @@ fn guide_html(n: &Names, pics: &Pictures, paths: &Paths) -> String {
             step_word = n.t("paso", "step"),
             step = step_of[i] + 1,
             group = if grouped { format!(" · {} {}", n.t("subconjunto", "group"), n.groups[kit.steps[step_of[i]].group]) } else { String::new() },
-            file = escape(&n.files[i]),
+            file = n.files[i].as_deref().map_or(String::new(), |f| format!("<small><a class=\"mono\" href=\"{0}\">{0}</a></small>", escape(f))),
         );
     }
     h.push_str("</div>");
@@ -1344,26 +1462,26 @@ fn join_text(n: &Names, g: usize) -> (String, String) {
 
 fn guide_text(n: &Names) -> String {
     let (kit, info, labels, l) = (n.kit, n.info, &n.labels, n.lang);
-    let mut t =
-        match l {
-            Lang::Es => format!(
-                "Guía de armado · {}\n\n{} en {}. Abre {} en Bambu Studio e imprime cada placa con su filamento.\n\
-La guía con imágenes está en {} y el resumen del kit en {}.\n\nPLACAS\n",
-                info.name,
-                l.pieces(kit.pieces.len()),
-                l.plates(kit.plates.len()),
-                n.three_mf,
-                n.f.guide,
-                n.f.summary
-            ),
-            Lang::En => {
-                format!(
-            "Assembly guide · {}\n\n{} on {}. Open {} in Bambu Studio and print each plate with its filament.\n\
-The guide with pictures is {} and the kit summary {}.\n\nPLATES\n",
-            info.name, l.pieces(kit.pieces.len()), l.plates(kit.plates.len()), n.three_mf, n.f.guide, n.f.summary
-        )
-            }
-        };
+    let mut t = match l {
+        Lang::Es => format!(
+            "Guía de armado · {}\n\n{} en {}. {}.\n{}El resumen del kit está en {}.\n\nPLACAS\n",
+            info.name,
+            l.pieces(kit.pieces.len()),
+            l.plates(kit.plates.len()),
+            n.how_to_print(false),
+            if n.has().guide { format!("La guía con imágenes está en {}. ", n.f.guide) } else { String::new() },
+            n.f.summary
+        ),
+        Lang::En => format!(
+            "Assembly guide · {}\n\n{} on {}. {}.\n{}The kit summary is {}.\n\nPLATES\n",
+            info.name,
+            l.pieces(kit.pieces.len()),
+            l.plates(kit.plates.len()),
+            n.how_to_print(false),
+            if n.has().guide { format!("The guide with pictures is {}. ", n.f.guide) } else { String::new() },
+            n.f.summary
+        ),
+    };
     for (k, plate) in kit.plates.iter().enumerate() {
         let _ = writeln!(
             t,
@@ -1386,7 +1504,7 @@ The guide with pictures is {} and the kit summary {}.\n\nPLATES\n",
             p.volume_mm3 / 1000.0,
             n.t("placa", "plate"),
             kit.placed[i].plate + 1,
-            n.files[i],
+            n.files[i].as_deref().unwrap_or(""),
         );
         for issue in &n.issues[i] {
             let _ = writeln!(t, "        ! {}", issue_text(l, issue));
@@ -1516,9 +1634,12 @@ fn summary_html(n: &Names) -> String {
         pl = l.plates(kit.plates.len()),
         g = n.grams(total),
         grams = n.t("g de filamento", "g of filament"),
-        lead = match l {
-            Lang::Es => format!("Abre <a class=\"mono\" href=\"{three_mf}\">{three_mf}</a> en Bambu Studio e imprime cada placa con su filamento; luego sigue la <a href=\"{}\">guía de armado</a>.", n.f.guide),
-            Lang::En => format!("Open <a class=\"mono\" href=\"{three_mf}\">{three_mf}</a> in Bambu Studio and print each plate with its filament; then follow the <a href=\"{}\">assembly guide</a>.", n.f.guide),
+        lead = match (l, n.has().guide, n.has().text) {
+            (Lang::Es, true, _) => format!("{}; luego sigue la <a href=\"{}\">guía de armado</a>.", n.how_to_print(true), n.f.guide),
+            (Lang::En, true, _) => format!("{}; then follow the <a href=\"{}\">assembly guide</a>.", n.how_to_print(true), n.f.guide),
+            (Lang::Es, false, true) => format!("{}; luego sigue los pasos de <a href=\"{}\">{}</a>.", n.how_to_print(true), n.f.guide_txt, n.f.guide_txt),
+            (Lang::En, false, true) => format!("{}; then follow the steps in <a href=\"{}\">{}</a>.", n.how_to_print(true), n.f.guide_txt, n.f.guide_txt),
+            (_, false, false) => format!("{}.", n.how_to_print(true)),
         },
     );
 
@@ -1547,9 +1668,8 @@ fn summary_html(n: &Names) -> String {
             let why: Vec<String> = issues.iter().map(|x| escape(&issue_text(l, x))).collect();
             let _ = write!(
                 h,
-                "<tr><td><a class=\"mono\" href=\"{g}#{p}\">{p}</a></td><td>{c}</td><td>{w}</td></tr>",
-                g = n.f.guide,
-                p = labels[*i],
+                "<tr><td>{p}</td><td>{c}</td><td>{w}</td></tr>",
+                p = n.guide_link(&labels[*i], &labels[*i], " class=\"mono\""),
                 c = n.piece_colour(*i),
                 w = why.join("; ")
             );
@@ -1604,10 +1724,8 @@ fn summary_html(n: &Names) -> String {
         let list: Vec<&str> = plate.pieces.iter().map(|&i| labels[i].as_str()).collect();
         let _ = write!(
             h,
-            "<tr><td><a href=\"{}#{}\">{}</a></td><td>{:.0} %</td><td class=\"mono\">{}</td></tr>",
-            n.f.guide,
-            n.plate_anchor(k),
-            escape(&n.plate_name(k)),
+            "<tr><td>{}</td><td>{:.0} %</td><td class=\"mono\">{}</td></tr>",
+            n.guide_link(&n.plate_anchor(k), &escape(&n.plate_name(k)), ""),
             plate.occupancy * 100.0,
             list.join(" ")
         );
@@ -1620,22 +1738,46 @@ fn summary_html(n: &Names) -> String {
     }
     h.push_str("</tbody></table>");
 
-    let items: [String; 5] = match l {
-        Lang::Es => [
-            format!("<a href=\"{0}\">{0}</a>: imágenes de cada pieza, placa y paso, con casillas para marcar lo hecho.", n.f.guide),
-            format!("<a href=\"{0}\">{0}</a>: los mismos pasos en texto.", n.f.guide_txt),
-            format!("<a class=\"mono\" href=\"{three_mf}\">{three_mf}</a>: todas las piezas en sus placas, con su filamento."),
-            "<span class=\"mono\">stl/</span>: un STL por pieza, en una carpeta por color, con el nombre de la pieza.".into(),
-            "<span class=\"mono\">img/</span>: las imágenes de la guía.".into(),
-        ],
-        Lang::En => [
-            format!("<a href=\"{0}\">{0}</a>: pictures of every piece, plate and step, with boxes to tick what is done.", n.f.guide),
-            format!("<a href=\"{0}\">{0}</a>: the same steps as text.", n.f.guide_txt),
-            format!("<a class=\"mono\" href=\"{three_mf}\">{three_mf}</a>: every piece on its plate, with its filament."),
-            "<span class=\"mono\">stl/</span>: one STL per piece, in a folder per colour, named after the piece.".into(),
-            "<span class=\"mono\">img/</span>: the guide's pictures.".into(),
-        ],
-    };
+    let c = n.has();
+    let mut items: Vec<String> = vec![];
+    if c.guide {
+        items.push(match l {
+            Lang::Es => format!(
+                "<a href=\"{0}\">{0}</a>: imágenes de cada pieza, placa y paso, con casillas para marcar lo hecho.",
+                n.f.guide
+            ),
+            Lang::En => format!(
+                "<a href=\"{0}\">{0}</a>: pictures of every piece, plate and step, with boxes to tick what is done.",
+                n.f.guide
+            ),
+        });
+    }
+    if c.text {
+        items.push(match l {
+            Lang::Es => format!("<a href=\"{0}\">{0}</a>: los pasos en texto.", n.f.guide_txt),
+            Lang::En => format!("<a href=\"{0}\">{0}</a>: the steps as text.", n.f.guide_txt),
+        });
+    }
+    if c.three_mf {
+        items.push(match l {
+            Lang::Es => format!("<a class=\"mono\" href=\"{three_mf}\">{three_mf}</a>: todas las piezas en sus placas, con su filamento."),
+            Lang::En => format!("<a class=\"mono\" href=\"{three_mf}\">{three_mf}</a>: every piece on its plate, with its filament."),
+        });
+    }
+    match c.stl {
+        StlFiles::None => {}
+        StlFiles::Piece => items.push(n.t("<span class=\"mono\">stl/</span>: un STL por pieza, en una carpeta por color, con el nombre de la pieza.", "<span class=\"mono\">stl/</span>: one STL per piece, in a folder per colour, named after the piece.").into()),
+        StlFiles::Colour => items.push(n.t("<span class=\"mono\">stl/</span>: un STL por color, con sus piezas en su sitio.", "<span class=\"mono\">stl/</span>: one STL per colour, its pieces in place.").into()),
+    }
+    if c.guide {
+        items.push(
+            n.t(
+                "<span class=\"mono\">img/</span>: las imágenes de la guía.",
+                "<span class=\"mono\">img/</span>: the guide's pictures.",
+            )
+            .into(),
+        );
+    }
     let _ = write!(h, "<h2>{}</h2><ul class=\"files\">", n.t("Contenido", "Contents"));
     for li in items {
         let _ = write!(h, "<li>{li}</li>");
@@ -1647,33 +1789,33 @@ fn summary_html(n: &Names) -> String {
 fn readme_text(n: &Names) -> String {
     let (kit, info, labels, l) = (n.kit, n.info, &n.labels, n.lang);
     let total: f32 = kit.pieces.iter().map(|p| p.volume_mm3).sum();
+    let follow = match (n.has().guide, n.has().text) {
+        (true, true) => format!("{} ({} {})", n.f.guide, n.t("o", "or"), n.f.guide_txt),
+        (true, false) => n.f.guide.to_string(),
+        (false, true) => n.f.guide_txt.to_string(),
+        (false, false) => n.f.summary.to_string(),
+    };
     let mut t = match l {
         Lang::Es => format!(
             "Kit por colores · {}\n\n{}, {}, {}, {:.0} g de filamento.\n\n\
-1. Abre {} en Bambu Studio e imprime cada placa con su filamento.\n\
-2. Separa las piezas por número y arma el modelo con {} (o {}).\n   {} tiene todo esto con enlaces.\n\n",
+1. {}.\n2. Separa las piezas por número y arma el modelo con {follow}.\n   {} tiene todo esto con enlaces.\n\n",
             info.name,
             l.pieces(kit.pieces.len()),
             l.colours(n.slots().len()),
             l.plates(kit.plates.len()),
             n.grams(total),
-            n.three_mf,
-            n.f.guide,
-            n.f.guide_txt,
+            n.how_to_print(false),
             n.f.summary
         ),
         Lang::En => format!(
             "Colour kit · {}\n\n{}, {}, {}, {:.0} g of filament.\n\n\
-1. Open {} in Bambu Studio and print each plate with its filament.\n\
-2. Sort the pieces by number and build the model with {} (or {}).\n   {} has all of this with links.\n\n",
+1. {}.\n2. Sort the pieces by number and build the model with {follow}.\n   {} has all of this with links.\n\n",
             info.name,
             l.pieces(kit.pieces.len()),
             l.colours(n.slots().len()),
             l.plates(kit.plates.len()),
             n.grams(total),
-            n.three_mf,
-            n.f.guide,
-            n.f.guide_txt,
+            n.how_to_print(false),
             n.f.summary
         ),
     };
@@ -1717,75 +1859,142 @@ fn readme_text(n: &Names) -> String {
         let _ = writeln!(t, "  {k}: {v}");
     }
     let _ = writeln!(t, "\n{}", n.t("CONTENIDO", "CONTENTS"));
-    let rows: [(&str, &str); 6] = [
-        (n.f.summary, n.t("este resumen, con enlaces", "this summary, with links")),
-        (n.f.guide, n.t("imágenes de cada pieza, placa y paso", "pictures of every piece, plate and step")),
-        (n.f.guide_txt, n.t("los mismos pasos en texto", "the same steps as text")),
-        (&n.three_mf, n.t("todas las piezas en sus placas", "every piece on its plate")),
-        ("stl/", n.t("un STL por pieza, en una carpeta por color", "one STL per piece, in a folder per colour")),
-        ("img/", n.t("las imágenes de la guía", "the guide's pictures")),
+    let c = n.has();
+    let rows: [(bool, &str, &str); 6] = [
+        (true, n.f.summary, n.t("este resumen, con enlaces", "this summary, with links")),
+        (c.guide, n.f.guide, n.t("imágenes de cada pieza, placa y paso", "pictures of every piece, plate and step")),
+        (c.text, n.f.guide_txt, n.t("los pasos en texto", "the steps as text")),
+        (c.three_mf, &n.three_mf, n.t("todas las piezas en sus placas", "every piece on its plate")),
+        (
+            c.stl != StlFiles::None,
+            "stl/",
+            if c.stl == StlFiles::Colour {
+                n.t("un STL por color, con sus piezas en su sitio", "one STL per colour, its pieces in place")
+            } else {
+                n.t("un STL por pieza, en una carpeta por color", "one STL per piece, in a folder per colour")
+            },
+        ),
+        (c.guide, "img/", n.t("las imágenes de la guía", "the guide's pictures")),
     ];
-    for (file, what) in rows {
+    for (_, file, what) in rows.iter().filter(|r| r.0) {
         let _ = writeln!(t, "  {file:<22}{what}");
     }
     t
 }
 
 pub fn write_kit_zip<W: Write + Seek>(out: W, kit: &Kit, info: &KitInfo) -> zip::result::ZipResult<KitSummary> {
+    write_kit_zip_with(out, kit, info, &|_: Stage, _, _| true)
+}
+
+/// What the kit is busy with, for its progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// Drawing the pictures.
+    Pictures,
+    /// Writing the files into the ZIP.
+    Files,
+}
+
+/// [`write_kit_zip`], telling `progress` how far it has got (stage, done,
+/// total); when `progress` answers false it stops with an `Interrupted` error.
+pub fn write_kit_zip_with<W: Write + Seek>(
+    out: W,
+    kit: &Kit,
+    info: &KitInfo,
+    progress: &(dyn Fn(Stage, usize, usize) -> bool + Sync),
+) -> zip::result::ZipResult<KitSummary> {
     let n = Names::new(kit, info);
+    let c = n.has();
     let colours: Vec<[u8; 3]> = kit.pieces.iter().map(|p| rgb(&n.hex(p.slot))).collect();
-    let pics = pictures(kit, &colours, &n.labels, &n.groups)?;
+    let total = picture_count(kit, c.three_mf, c.guide);
+    let drawn = std::sync::atomic::AtomicUsize::new(0);
+    let done = || progress(Stage::Pictures, drawn.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1, total);
+    let pics = pictures(kit, &colours, &n.labels, &n.groups, Look::new(c.quality), c.three_mf, c.guide, &done)?;
     let paths = Paths::new(&n, &pics);
 
     let mut z = zip::ZipWriter::new(out);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-
-    z.start_file(n.f.readme, opts)?;
-    z.write_all(readme_text(&n).as_bytes())?;
-    z.start_file(n.f.summary, opts)?;
-    z.write_all(summary_html(&n).as_bytes())?;
-    z.start_file(n.f.guide, opts)?;
-    z.write_all(guide_html(&n, &pics, &paths).as_bytes())?;
-    z.start_file(n.f.guide_txt, opts)?;
-    z.write_all(guide_text(&n).as_bytes())?;
-
-    let objects: Vec<PlateObject> = (0..kit.pieces.len())
-        .map(|i| PlateObject {
-            name: &n.labels[i],
-            positions: &kit.placed[i].positions,
-            tris: &kit.pieces[i].tris,
-            filament: kit.pieces[i].slot as usize + 1,
-            plate: kit.placed[i].plate,
-            at: kit.placed[i].at,
-        })
-        .collect();
-    let project = PlateProject {
-        name: info.name,
-        flush: info.flush.clone(),
-        objects,
-        plates: (0..kit.plates.len()).map(|k| n.plate_name(k)).collect(),
-        filaments: info.palette.to_vec(),
-        slots: info.slots.to_vec(),
-        printer: info.printer.clone(),
-        thumbnails: pics.covers.clone(),
+    let stls: Vec<(String, Vec<usize>)> = {
+        let mut by_file: Vec<(String, Vec<usize>)> = vec![];
+        for (i, f) in n.files.iter().enumerate() {
+            let Some(f) = f else { continue };
+            match by_file.iter_mut().find(|b| &b.0 == f) {
+                Some(b) => b.1.push(i),
+                None => by_file.push((f.clone(), vec![i])),
+            }
+        }
+        by_file
     };
-    let mut buf = std::io::Cursor::new(Vec::new());
-    write_plates(&mut buf, &project)?;
-    z.start_file(&n.three_mf, stored)?;
-    z.write_all(&buf.into_inner())?;
+    let images = paths.files(&pics).count();
+    let files = 2 + usize::from(c.guide) + usize::from(c.text) + usize::from(c.three_mf) + stls.len() + images;
+    let mut written = 0;
+    let mut next =
+        |z: &mut zip::ZipWriter<W>, name: &str, how: SimpleFileOptions, bytes: &[u8]| -> zip::result::ZipResult<()> {
+            if !progress(Stage::Files, written, files) {
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled").into());
+            }
+            z.start_file(name, how)?;
+            z.write_all(bytes)?;
+            written += 1;
+            Ok(())
+        };
 
-    for (i, file) in n.files.iter().enumerate() {
+    next(&mut z, n.f.readme, opts, readme_text(&n).as_bytes())?;
+    next(&mut z, n.f.summary, opts, summary_html(&n).as_bytes())?;
+    if c.guide {
+        next(&mut z, n.f.guide, opts, guide_html(&n, &pics, &paths).as_bytes())?;
+    }
+    if c.text {
+        next(&mut z, n.f.guide_txt, opts, guide_text(&n).as_bytes())?;
+    }
+    if c.three_mf {
+        let objects: Vec<PlateObject> = (0..kit.pieces.len())
+            .map(|i| PlateObject {
+                name: &n.labels[i],
+                positions: &kit.placed[i].positions,
+                tris: &kit.pieces[i].tris,
+                filament: kit.pieces[i].slot as usize + 1,
+                plate: kit.placed[i].plate,
+                at: kit.placed[i].at,
+            })
+            .collect();
+        let project = PlateProject {
+            name: info.name,
+            flush: info.flush.clone(),
+            objects,
+            plates: (0..kit.plates.len()).map(|k| n.plate_name(k)).collect(),
+            filaments: info.palette.to_vec(),
+            slots: info.slots.to_vec(),
+            printer: info.printer.clone(),
+            thumbnails: pics.covers.clone(),
+        };
+        let mut buf = std::io::Cursor::new(Vec::new());
+        write_plates(&mut buf, &project)?;
+        next(&mut z, &n.three_mf, stored, &buf.into_inner())?;
+    }
+    for (file, ids) in &stls {
         let mut stl = Vec::new();
-        write_stl(&mut stl, &n.labels[i], &kit.placed[i].positions, &kit.pieces[i].tris)?;
-        z.start_file(file, opts)?;
-        z.write_all(&stl)?;
+        if c.stl == StlFiles::Piece {
+            // One piece, as it prints.
+            write_stl(&mut stl, &n.labels[ids[0]], &kit.placed[ids[0]].positions, &kit.pieces[ids[0]].tris)?;
+        } else {
+            // A colour: its pieces where they sit in the model.
+            let (mut positions, mut tris) = (vec![], vec![]);
+            for &i in ids {
+                let base = positions.len() as u32;
+                positions.extend_from_slice(&kit.pieces[i].positions);
+                tris.extend(kit.pieces[i].tris.iter().map(|t| t.map(|v| v + base)));
+            }
+            write_stl(&mut stl, n.colour(kit.pieces[ids[0]].slot), &positions, &tris)?;
+        }
+        next(&mut z, file, opts, &stl)?;
     }
     // PNG is compressed already.
     for (path, png) in paths.files(&pics) {
-        z.start_file(path, stored)?;
-        z.write_all(png)?;
+        next(&mut z, path, stored, png)?;
     }
+    progress(Stage::Files, files, files);
     z.finish()?;
     Ok(KitSummary {
         pieces: kit.pieces.len(),
@@ -1801,6 +2010,7 @@ pub fn write_kit_zip<W: Write + Seek>(out: W, kit: &Kit, info: &KitInfo) -> zip:
 mod tests {
     use super::*;
     use bp_core::split::{Piece, Split};
+    use std::collections::HashMap;
     use std::io::{Cursor, Read};
 
     #[test]
@@ -1906,7 +2116,14 @@ mod tests {
             slots: &[],
             filament_names: &names,
             printer: &Printer::default(),
-            params: KitSettings { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 30.0, mix: false },
+            params: KitSettings {
+                voxel_mm: 0.5,
+                depth_mm: 0.0,
+                core_slot: None,
+                min_piece_mm3: 30.0,
+                mix: false,
+                contents: Default::default(),
+            },
             density_g_cm3: 1.24,
             flush: Default::default(),
             lang: Lang::Es,
@@ -1996,7 +2213,14 @@ mod tests {
             slots: &[],
             filament_names: &[],
             printer: Box::leak(Box::new(Printer::default())),
-            params: KitSettings { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 30.0, mix: false },
+            params: KitSettings {
+                voxel_mm: 0.5,
+                depth_mm: 0.0,
+                core_slot: None,
+                min_piece_mm3: 30.0,
+                mix: false,
+                contents: Default::default(),
+            },
             density_g_cm3: 1.24,
             flush: Default::default(),
             lang,
@@ -2034,6 +2258,104 @@ mod tests {
         assert!(magenta > 100, "{magenta} glue pixels");
         let txt = String::from_utf8(read(&mut zip, "guia-de-armado.txt")).unwrap();
         assert!(txt.contains("SUBCONJUNTO B") && txt.contains("UNIÓN FINAL") && txt.contains("[ ]"), "{txt}");
+        // Read back, every STL is a closed surface.
+        let stls: Vec<String> = names.iter().filter(|n| n.ends_with(".stl")).cloned().collect();
+        assert_eq!(stls.len(), 30);
+        for name in stls {
+            let stl = read(&mut zip, &name);
+            let count = u32::from_le_bytes(stl[80..84].try_into().unwrap()) as usize;
+            assert_eq!(stl.len(), 84 + 50 * count, "{name}");
+            let mut index: HashMap<[u32; 3], u32> = HashMap::new();
+            let tris: Vec<[u32; 3]> = (0..count)
+                .map(|t| {
+                    std::array::from_fn(|v| {
+                        let at = 84 + 50 * t + 12 + 12 * v;
+                        let key = std::array::from_fn(|k| {
+                            u32::from_le_bytes(stl[at + 4 * k..at + 4 * k + 4].try_into().unwrap())
+                        });
+                        let next = index.len() as u32;
+                        *index.entry(key).or_insert(next)
+                    })
+                })
+                .collect();
+            assert!(bp_core::split::watertight(&tris), "{name} is not closed");
+        }
+    }
+
+    fn zip_of(kit: &Kit, info: &KitInfo) -> (zip::ZipArchive<Cursor<Vec<u8>>>, Vec<String>) {
+        let mut buf = Cursor::new(Vec::new());
+        write_kit_zip(&mut buf, kit, info).unwrap();
+        let zip = zip::ZipArchive::new(Cursor::new(buf.into_inner())).unwrap();
+        let names = zip.file_names().map(String::from).collect();
+        (zip, names)
+    }
+
+    #[test]
+    fn the_zip_holds_only_what_was_asked() {
+        use crate::project_file::KitContents;
+        let kit = row(6);
+        let palette = vec!["#D02020".to_string(), "#2050D0".to_string()];
+        let mut info = info(&palette, Lang::Es);
+        info.params.contents =
+            KitContents { three_mf: false, stl: StlFiles::Colour, guide: false, text: true, ..Default::default() };
+        let (mut zip, names) = zip_of(&kit, &info);
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(sorted, ["LEEME.txt", "guia-de-armado.txt", "resumen.html", "stl/1-rojo.stl", "stl/2-azul.stl"]);
+        let summary = String::from_utf8(read(&mut zip, "resumen.html")).unwrap();
+        for link in links(&summary) {
+            assert!(names.contains(&link), "the summary points at {link}, which is not in the ZIP");
+        }
+        // A colour's STL holds its three pieces, where they sit in the model: 3 × 12 triangles.
+        let stl = read(&mut zip, "stl/1-rojo.stl");
+        assert_eq!(u32::from_le_bytes(stl[80..84].try_into().unwrap()), 36);
+        let readme = String::from_utf8(read(&mut zip, "LEEME.txt")).unwrap();
+        assert!(
+            readme.contains("Lamina los STL de stl/")
+                && !readme.contains(".3mf")
+                && !readme.contains("guia-de-armado.html"),
+            "{readme}"
+        );
+    }
+
+    #[test]
+    fn sharper_pictures_weigh_more() {
+        use crate::project_file::{KitContents, Quality};
+        let kit = row(3);
+        let palette = vec!["#D02020".to_string(), "#2050D0".to_string()];
+        let size = |quality| {
+            let mut info = info(&palette, Lang::Es);
+            info.params.contents = KitContents { quality, ..Default::default() };
+            let (mut zip, names) = zip_of(&kit, &info);
+            names.iter().filter(|n| n.ends_with(".png")).map(|n| read(&mut zip, n).len()).sum::<usize>()
+        };
+        let (low, medium, high) = (size(Quality::Low), size(Quality::Medium), size(Quality::High));
+        assert!(low < medium && medium < high, "{low} {medium} {high}");
+    }
+
+    #[test]
+    fn progress_counts_up_and_cancel_stops_the_export() {
+        let kit = row(5);
+        let palette = vec!["#D02020".to_string(), "#2050D0".to_string()];
+        let info = info(&palette, Lang::Es);
+        let seen = std::sync::Mutex::new(vec![]);
+        write_kit_zip_with(Cursor::new(Vec::new()), &kit, &info, &|stage, done, total| {
+            assert!(done <= total);
+            seen.lock().unwrap().push((stage, done, total));
+            true
+        })
+        .unwrap();
+        let seen = seen.into_inner().unwrap();
+        let pictures = seen.iter().filter(|s| s.0 == Stage::Pictures).count();
+        assert_eq!(pictures, picture_count(&kit, true, true));
+        assert_eq!(seen.last().map(|s| (s.0, s.1 == s.2)), Some((Stage::Files, true)));
+        // Cancelled halfway through the pictures: an Interrupted error, nothing written.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let err = write_kit_zip_with(Cursor::new(Vec::new()), &kit, &info, &|_, _, _| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4
+        })
+        .unwrap_err();
+        assert!(matches!(&err, zip::result::ZipError::Io(e) if e.kind() == std::io::ErrorKind::Interrupted), "{err}");
     }
 
     #[test]
