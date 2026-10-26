@@ -10,6 +10,16 @@ use crate::state::Document;
 /// Prime tower brim the 3MF asks Bambu Studio for.
 pub const TOWER_BRIM_MM: f32 = 3.0;
 
+/// What the colour kit export produced.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitDto {
+    pub pieces: usize,
+    pub plates: usize,
+    /// Pieces larger than the plate.
+    pub oversize: usize,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartDto {
@@ -178,6 +188,8 @@ pub struct Summary {
     pub undo_label: Option<String>,
     /// Triangles painted by hand; a new colour detection discards them.
     pub painted_triangles: usize,
+    /// How the colour kit was last cut, to fill its dialog.
+    pub kit: Option<bp_3mf::project_file::KitSettings>,
 }
 
 /// A turn: the new summary and, when the preview could follow as it is,
@@ -496,6 +508,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         can_undo: p.can_undo(),
         undo_label: p.undo_label().map(str::to_string),
         painted_triangles: p.painted_count(),
+        kit: doc.kit,
     }
 }
 

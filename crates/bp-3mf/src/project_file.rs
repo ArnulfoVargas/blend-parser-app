@@ -39,6 +39,19 @@ pub struct Settings {
     /// The filament on each slot that has one, by the slot's colour (`#RRGGBB`).
     #[serde(default)]
     pub filaments: Vec<(String, crate::filament::Filament)>,
+    /// How the colour kit was last cut, if it was.
+    #[serde(default)]
+    pub kit: Option<KitSettings>,
+}
+
+/// How the colour kit is cut (see `bp_core::SplitParams`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitSettings {
+    pub voxel_mm: f32,
+    pub depth_mm: f32,
+    pub core_slot: Option<u8>,
+    pub min_piece_mm3: f32,
 }
 
 #[derive(Debug, PartialEq, Eq)]

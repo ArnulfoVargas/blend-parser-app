@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bp-core.workspace = true
+png = "0.18"
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }

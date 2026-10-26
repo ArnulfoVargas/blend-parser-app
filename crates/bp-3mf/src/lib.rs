@@ -1,6 +1,7 @@
 //! Writes a 3MF that Bambu Studio opens already painted: one object per printed
 //! piece, one part per mesh, millimetre vertices and a `paint_color` per
-//! triangle, plus a project config with one filament per colour.
+//! triangle, plus a project config with one filament per colour. Also writes the
+//! colour kit: loose pieces on single-colour plates, STLs and an assembly guide.
 
 use std::fmt::Write as _;
 use std::io::{Seek, Write};
@@ -8,9 +9,11 @@ use std::io::{Seek, Write};
 use zip::write::SimpleFileOptions;
 
 pub mod filament;
+pub mod kit;
 pub mod plate;
 mod printer;
 pub mod project_file;
+pub use kit::{write_kit_zip, KitInfo, KitSummary};
 pub use plate::{PlateCheck, Rect, Reserve};
 pub use printer::{canonical_id, catalog, Printer, PrinterProfile, NOZZLES};
 
@@ -641,16 +644,6 @@ mod tests {
     }
 }
 
-/// One colour of a model, as a closed mesh in millimetres.
-pub struct ColorFile<'a> {
-    /// `#RRGGBB`.
-    pub hex: &'a str,
-    pub positions: &'a [[f32; 3]],
-    pub tris: &'a [[u32; 3]],
-    /// Whole part rather than a shell.
-    pub solid: bool,
-}
-
 /// Binary STL with facet normals.
 pub fn write_stl<W: Write>(out: &mut W, name: &str, positions: &[[f32; 3]], tris: &[[u32; 3]]) -> std::io::Result<()> {
     let mut header = [b' '; 80];
@@ -713,57 +706,233 @@ impl ZipText {
     }
 }
 
-/// A ZIP with one STL per colour plus a list of slot, colour and kind.
-pub fn write_color_zip<W: Write + Seek>(
-    out: W,
-    model_name: &str,
-    files: &[ColorFile],
-    text: &ZipText,
-) -> zip::result::ZipResult<()> {
+/// One object of a multi-plate project, already turned for printing.
+pub struct PlateObject<'a> {
+    pub name: &'a str,
+    /// Millimetres, centred on XY with the base on Z = 0.
+    pub positions: &'a [[f32; 3]],
+    pub tris: &'a [[u32; 3]],
+    /// 1-based filament.
+    pub filament: usize,
+    /// 0-based plate.
+    pub plate: usize,
+    /// Centre on the plate, in plate millimetres.
+    pub at: [f32; 2],
+}
+
+pub struct PlateProject<'a> {
+    pub name: &'a str,
+    pub objects: Vec<PlateObject<'a>>,
+    /// Name shown on each plate.
+    pub plates: Vec<String>,
+    pub filaments: Vec<String>,
+    /// The filament on each slot, where the user picked one (see [`Model::slots`]).
+    pub slots: Vec<Option<filament::SlotFilament>>,
+    pub printer: Printer,
+    /// Each plate's picture, large and small PNG, in plate order; may be empty.
+    pub thumbnails: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Where Bambu Studio puts plate `i` of `count`: a grid `ceil(sqrt(count))`
+/// wide, a fifth of a plate apart, later rows toward -Y.
+pub fn plate_origin(printer: &Printer, i: usize, count: usize) -> (f32, f32) {
+    let cols = (count.max(1) as f32).sqrt().ceil() as usize;
+    let (w, d) = printer.bed_mm();
+    ((i % cols) as f32 * w * 1.2, -((i / cols) as f32) * d * 1.2)
+}
+
+/// The project config of a plates 3MF: its filaments and printer, Bambu's
+/// defaults for the rest. Each plate holds one filament, so nothing flushes.
+fn plates_model<'a>(project: &'a PlateProject) -> Model<'a> {
+    Model {
+        name: project.name,
+        piece: "",
+        parts: vec![],
+        filaments: project.filaments.clone(),
+        slots: project.slots.clone(),
+        printer: project.printer.clone(),
+        flush: Flush::default(),
+        layer_mm: None,
+        offset_mm: [0.0; 2],
+        thumbnail: None,
+    }
+}
+
+/// A 3MF with every object on its plate and its filament, nothing painted.
+pub fn write_plates<W: Write + Seek>(out: W, project: &PlateProject) -> zip::result::ZipResult<()> {
+    let n = project.objects.len();
+    let tris: usize = project.objects.iter().map(|o| o.tris.len()).sum();
+
+    let mut meshes = String::with_capacity(tris * 48);
+    let _ = write!(
+        meshes,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" {NS}>\n <metadata name=\"BambuStudio:3mfVersion\">2</metadata>\n <resources>\n"
+    );
+    for (i, o) in project.objects.iter().enumerate() {
+        let id = i + 1;
+        let _ = write!(
+            meshes,
+            "  <object id=\"{id}\" p:UUID=\"{id:08x}-81cb-4c03-9d28-80fed5dfa1dc\" type=\"model\">\n   <mesh>\n    <vertices>\n"
+        );
+        for v in o.positions {
+            meshes.push_str("     <vertex x=\"");
+            num(&mut meshes, v[0]);
+            meshes.push_str("\" y=\"");
+            num(&mut meshes, v[1]);
+            meshes.push_str("\" z=\"");
+            num(&mut meshes, v[2]);
+            meshes.push_str("\"/>\n");
+        }
+        meshes.push_str("    </vertices>\n    <triangles>\n");
+        for t in o.tris {
+            let _ = writeln!(meshes, "     <triangle v1=\"{}\" v2=\"{}\" v3=\"{}\"/>", t[0], t[1], t[2]);
+        }
+        meshes.push_str("    </triangles>\n   </mesh>\n  </object>\n");
+    }
+    meshes.push_str(" </resources>\n <build/>\n</model>\n");
+
+    let (mut objects, mut items) = (String::new(), String::new());
+    for (i, o) in project.objects.iter().enumerate() {
+        let (mesh, wrapper) = (i + 1, n + i + 1);
+        let (ox, oy) = plate_origin(&project.printer, o.plate, project.plates.len());
+        let _ = write!(
+            objects,
+            "  <object id=\"{wrapper}\" p:UUID=\"{wrapper:08x}-61cb-4c03-9d28-80fed5dfa1dc\" type=\"model\">\n   <components>\n    \
+<component p:path=\"/3D/Objects/object_1.model\" objectid=\"{mesh}\" p:UUID=\"{mesh:08x}-b206-40ff-9872-83e8017abed1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>\n   </components>\n  </object>\n"
+        );
+        let mut t = String::new();
+        num(&mut t, ox + o.at[0]);
+        t.push(' ');
+        num(&mut t, oy + o.at[1]);
+        let _ = writeln!(
+            items,
+            "  <item objectid=\"{wrapper}\" p:UUID=\"{wrapper:08x}-b1ec-4553-aec9-835e5b724bb4\" transform=\"1 0 0 0 1 0 0 0 1 {t} 0\" printable=\"1\"/>"
+        );
+    }
+    let main = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" {NS}>\n \
+<metadata name=\"Application\">BambuStudio-02.03.01.00</metadata>\n \
+<metadata name=\"BambuStudio:3mfVersion\">2</metadata>\n \
+<metadata name=\"Title\">{title}</metadata>\n <resources>\n{objects} </resources>\n \
+<build p:UUID=\"2c7c17d8-22b5-4d84-8835-1976022ea369\">\n{items} </build>\n</model>\n",
+        title = escape(project.name)
+    );
+
+    // Pictures that are PNG files; a plate without one has none.
+    let thumbs: Vec<&(Vec<u8>, Vec<u8>)> =
+        project.thumbnails.iter().take_while(|t| Thumbnail { large: &t.0, small: &t.1 }.is_png()).collect();
+    let mut settings = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n");
+    for (i, o) in project.objects.iter().enumerate() {
+        let (mesh, wrapper) = (i + 1, n + i + 1);
+        let _ = write!(
+            settings,
+            "  <object id=\"{wrapper}\">\n    <metadata key=\"name\" value=\"{name}\"/>\n    \
+<metadata key=\"extruder\" value=\"{f}\"/>\n    <metadata face_count=\"{faces}\"/>\n    \
+<part id=\"{mesh}\" subtype=\"normal_part\">\n      <metadata key=\"name\" value=\"{name}\"/>\n      \
+<metadata key=\"matrix\" value=\"1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\"/>\n      \
+<metadata key=\"extruder\" value=\"{f}\"/>\n      \
+<mesh_stat face_count=\"{faces}\" edges_fixed=\"0\" degenerate_facets=\"0\" facets_removed=\"0\" facets_reversed=\"0\" backwards_edges=\"0\"/>\n    </part>\n  </object>\n",
+            name = escape(o.name),
+            f = o.filament,
+            faces = o.tris.len()
+        );
+    }
+    for (k, plate_name) in project.plates.iter().enumerate() {
+        let _ = write!(
+            settings,
+            "  <plate>\n    <metadata key=\"plater_id\" value=\"{}\"/>\n    <metadata key=\"plater_name\" value=\"{}\"/>\n    \
+<metadata key=\"locked\" value=\"false\"/>\n",
+            k + 1,
+            escape(plate_name)
+        );
+        if thumbs.get(k).is_some() {
+            let _ = writeln!(settings, "    <metadata key=\"thumbnail_file\" value=\"Metadata/plate_{}.png\"/>", k + 1);
+        }
+        for (i, _) in project.objects.iter().enumerate().filter(|(_, o)| o.plate == k) {
+            let _ = write!(
+                settings,
+                "    <model_instance>\n      <metadata key=\"object_id\" value=\"{}\"/>\n      \
+<metadata key=\"instance_id\" value=\"0\"/>\n      <metadata key=\"identify_id\" value=\"{}\"/>\n    </model_instance>\n",
+                n + i + 1,
+                i + 1
+            );
+        }
+        settings.push_str("  </plate>\n");
+    }
+    settings.push_str("  <assemble>\n  </assemble>\n</config>\n");
+
     let mut z = zip::ZipWriter::new(out);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let [slot, colour, file_head] = text.columns;
-    let mut index = format!("{model_name}\n\n{slot:<7} {colour:<8} {file_head}\n");
-    for (i, f) in files.iter().enumerate() {
-        let file = format!("{:02}_{}_{}.stl", i + 1, model_name, f.hex.trim_start_matches('#'));
-        let solid = if f.solid { format!("  {}", text.solid) } else { String::new() };
-        let _ = writeln!(index, "{:<7} {}  {}{}", i + 1, f.hex, file, solid);
-        z.start_file(&file, opts)?;
-        let mut stl = Vec::new();
-        write_stl(&mut stl, &file, f.positions, f.tris)?;
-        z.write_all(&stl)?;
+    let files: [(&str, String); 7] = [
+        ("[Content_Types].xml", CONTENT_TYPES.to_string()),
+        (
+            "_rels/.rels",
+            rels_with("/3D/3dmodel.model", &if thumbs.is_empty() { String::new() } else { thumbnail_rels() }),
+        ),
+        ("3D/3dmodel.model", main),
+        ("3D/_rels/3dmodel.model.rels", rels("/3D/Objects/object_1.model")),
+        ("3D/Objects/object_1.model", meshes),
+        ("Metadata/model_settings.config", settings),
+        ("Metadata/project_settings.config", project_json(&plates_model(project))),
+    ];
+    for (name, body) in files {
+        z.start_file(name, opts)?;
+        z.write_all(body.as_bytes())?;
     }
-    index.push('\n');
-    index.push_str(text.footer);
-    z.start_file(text.index_file, opts)?;
-    z.write_all(index.as_bytes())?;
+    // Plate 1's picture is the package's cover, as in a painted 3MF.
+    let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (k, t) in thumbs.iter().enumerate() {
+        for (name, png) in
+            [(format!("Metadata/plate_{}.png", k + 1), &t.0), (format!("Metadata/plate_{}_small.png", k + 1), &t.1)]
+        {
+            z.start_file(name, stored)?;
+            z.write_all(png)?;
+        }
+    }
     z.finish()?;
     Ok(())
 }
 
 #[cfg(test)]
-mod color_zip_tests {
+mod plate_tests {
     use super::*;
     use std::io::{Cursor, Read};
 
     #[test]
-    fn zip_has_one_stl_per_colour() {
-        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    fn objects_land_on_their_plates_with_their_filament() {
+        let positions = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
         let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
-        let files = [
-            ColorFile { hex: "#4D2720", positions: &positions, tris: &tris, solid: true },
-            ColorFile { hex: "#E9A462", positions: &positions, tris: &tris[..2], solid: false },
-        ];
+        let object = |name, filament, plate| PlateObject {
+            name,
+            positions: &positions,
+            tris: &tris,
+            filament,
+            plate,
+            at: [50.0, 60.0],
+        };
+        let project = PlateProject {
+            name: "kit",
+            objects: vec![object("P01", 1, 0), object("P02", 2, 1)],
+            plates: vec!["Negro".into(), "Blanco".into()],
+            filaments: vec!["#202020".into(), "#F5F4F0".into()],
+            slots: vec![],
+            printer: Printer::default(),
+            thumbnails: vec![(b"\x89PNG\r\n\x1a\n1".to_vec(), b"\x89PNG\r\n\x1a\n1s".to_vec())],
+        };
         let mut buf = Cursor::new(Vec::new());
-        write_color_zip(&mut buf, "spider", &files, ZipText::for_lang("en-GB")).unwrap();
+        write_plates(&mut buf, &project).unwrap();
         let mut zip = zip::ZipArchive::new(Cursor::new(buf.into_inner())).unwrap();
-        assert_eq!(zip.len(), 3);
-        let mut index = String::new();
-        zip.by_name("colors.txt").unwrap().read_to_string(&mut index).unwrap();
-        assert!(index.contains("Slot") && index.contains("(full solid)"), "{index}");
-        let mut stl = Vec::new();
-        zip.by_name("02_spider_E9A462.stl").unwrap().read_to_end(&mut stl).unwrap();
-        assert_eq!(stl.len(), 84 + 2 * 50);
-        assert_eq!(u32::from_le_bytes(stl[80..84].try_into().unwrap()), 2);
+        let mut main = String::new();
+        zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut main).unwrap();
+        // Plate 2 of 2 sits one plate width and a fifth to the right.
+        assert!(main.contains("transform=\"1 0 0 0 1 0 0 0 1 50 60 0\""));
+        assert!(main.contains("transform=\"1 0 0 0 1 0 0 0 1 357.2 60 0\""), "{main}");
+        let mut cfg = String::new();
+        zip.by_name("Metadata/model_settings.config").unwrap().read_to_string(&mut cfg).unwrap();
+        assert!(cfg.contains("<metadata key=\"plater_id\" value=\"2\"/>"));
+        assert!(cfg.contains("<metadata key=\"extruder\" value=\"2\"/>"));
+        // Plate 1 has its picture, plate 2 none.
+        assert_eq!(cfg.matches("thumbnail_file").count(), 1);
+        assert!(zip.by_name("Metadata/plate_1.png").is_ok() && zip.by_name("Metadata/plate_2.png").is_err());
     }
 }

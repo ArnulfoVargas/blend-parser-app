@@ -128,8 +128,12 @@ export interface Summary {
   canUndo: boolean;
   undoLabel: "stroke" | "merge" | "bucket" | "fix" | null;
   paintedTriangles: number;
+  kit: KitOptions | null; // how the colour kit was last cut
 }
 
+/** How the kit is cut: joint detail, colour depth over a one-colour core, and the least piece kept apart. */
+export interface KitOptions { voxelMm: number; depthMm: number; coreSlot: number | null; minPieceMm3: number }
+export interface KitResult { pieces: number; plates: number; oversize: number }
 export interface Hit { point: Vec3; normal: Vec3 }
 /** What the bucket would fill: the colour found (or added), its slot now, and the triangles it reaches. */
 export interface BucketPick { targetHex: string; added: boolean; slot: number | null; sampleHex: string; deltaE: number; tris: number[] }
@@ -219,8 +223,8 @@ export const api = {
   /** `objects` picks the printed objects that go in; null for all. Pieces are named in `lang`. `thumbnails`: large and small PNG of the plate. */
   export3mf: (path: string, lang: string, objects: number[] | null = null, thumbnails: [Uint8Array, Uint8Array] | null = null) =>
     invoke<void>("export_3mf", { path, lang, objects, thumbnails: thumbnails && thumbnails.map((b) => Array.from(b)) }),
-  exportColorZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
-    invoke<number>("export_color_zip", { path, thicknessMm, mainSolid, lang }),
+  /** The colour kit: solid pieces on single-colour plates, STLs and an assembly guide, in one ZIP. */
+  exportColorZip: (path: string, o: KitOptions) => invoke<KitResult>("export_color_zip", { path, ...o }),
 };
 
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */

@@ -440,13 +440,29 @@
   <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>
-      <p class="help" data-i18n="zip.help">Un STL cerrado por color en un .zip, para imprimir cada color como pieza aparte.</p>
+      <p class="help" data-i18n="zip.help"></p>
       <div class="field">
-        <label for="shell" data-i18n="zip.thickness">Grosor de cada color</label>
-        <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2" aria-describedby="shell-help"><span>mm</span></div>
-        <p class="help" id="shell-help" data-bind="shellHelp"></p>
+        <label for="voxel" data-i18n="zip.detail">Detalle de las uniones</label>
+        <select class="select" id="voxel">
+          <option value="0.3" data-i18n="zip.detailFine">Fino, 0,3 mm (más lento)</option>
+          <option value="0.5" selected data-i18n="zip.detailNormal">Normal, 0,5 mm</option>
+          <option value="0.8" data-i18n="zip.detailFast">Rápido, 0,8 mm</option>
+        </select>
       </div>
-      <label class="check"><input type="checkbox" id="main-solid" checked> <span data-i18n="zip.mainSolid">Color principal como sólido completo</span></label>
+      <div class="field">
+        <label for="depth" data-i18n="zip.depth">Profundidad de cada color</label>
+        <div class="field__unit"><input class="input" id="depth" type="number" inputmode="decimal" min="0" max="50" step="0.5" value="0" aria-describedby="depth-help"><span>mm</span></div>
+        <p class="help" id="depth-help" data-i18n="zip.depthHelp"></p>
+      </div>
+      <div class="field" id="core-field">
+        <label for="core" data-i18n="zip.core">Color del núcleo</label>
+        <select class="select" id="core"></select>
+      </div>
+      <div class="field">
+        <label for="min-piece" data-i18n="zip.minPiece">Unir piezas menores de</label>
+        <div class="field__unit"><input class="input" id="min-piece" type="number" inputmode="decimal" min="0" max="10000" step="5" value="30" aria-describedby="min-piece-help"><span>mm³</span></div>
+        <p class="help" id="min-piece-help" data-i18n="zip.minPieceHelp"></p>
+      </div>
       <div class="dialog__actions">
         <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
         <button class="btn btn--primary" type="button" id="export-zip" data-i18n="zip.export">Exportar .zip</button>

@@ -1432,27 +1432,62 @@ $("#export-pieces").addEventListener("click", () => {
 });
 
 const zipDialog = $<HTMLDialogElement>("#zip-dialog");
+/** The core's colour only matters when colours stop short of the centre. */
+const syncCore = () => {
+  $<HTMLElement>("#core-field").hidden = !(Number($<HTMLInputElement>("#depth").value) > 0);
+};
+$("#depth").addEventListener("input", syncCore);
 $("#open-zip").addEventListener("click", () => {
-  if (app.dataset.state === "ready") zipDialog.showModal();
+  if (app.dataset.state !== "ready" || !summary) return;
+  const core = $<HTMLSelectElement>("#core");
+  const keep = core.value;
+  core.replaceChildren(
+    new Option(t("zip.coreMost"), ""),
+    ...summary.slots.map((s, i) => new Option(`${t("slot.name", { n: i + 1 })} · ${s.hex}`, String(i))),
+  );
+  // The document remembers how its kit was last cut, project files included.
+  const last = summary.kit;
+  if (last) {
+    $<HTMLSelectElement>("#voxel").value = String(last.voxelMm);
+    $<HTMLInputElement>("#depth").value = String(last.depthMm);
+    $<HTMLInputElement>("#min-piece").value = String(last.minPieceMm3);
+  }
+  const wanted = last ? (last.coreSlot === null ? "" : String(last.coreSlot)) : keep;
+  core.value = [...core.options].some((o) => o.value === wanted) ? wanted : "";
+  syncCore();
+  zipDialog.showModal();
 });
 $("#export-zip").addEventListener("click", async () => {
   if (!summary) return;
-  const shell = $<HTMLInputElement>("#shell");
-  const thickness = Number(shell.value);
-  const ok = thickness >= 0.2 && thickness <= 20;
-  shell.setAttribute("aria-invalid", String(!ok));
-  if (!ok) {
-    shell.focus();
+  const depth = $<HTMLInputElement>("#depth");
+  const minPiece = $<HTMLInputElement>("#min-piece");
+  const depthMm = Number(depth.value);
+  const minPieceMm3 = Number(minPiece.value);
+  const depthOk = depth.value !== "" && depthMm >= 0 && depthMm <= 50;
+  const minOk = minPiece.value !== "" && minPieceMm3 >= 0 && minPieceMm3 <= 10000;
+  depth.setAttribute("aria-invalid", String(!depthOk));
+  minPiece.setAttribute("aria-invalid", String(!minOk));
+  if (!depthOk || !minOk) {
+    (depthOk ? minPiece : depth).focus();
     return;
   }
+  const core = $<HTMLSelectElement>("#core").value;
+  const options = {
+    voxelMm: Number($<HTMLSelectElement>("#voxel").value),
+    depthMm,
+    coreSlot: depthMm > 0 && core !== "" ? Number(core) : null,
+    minPieceMm3,
+  };
   zipDialog.close();
   if (!(await confirmOversize())) return;
-  const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
+  const suffix = currentLang() === "en" ? "_pieces.zip" : "_piezas.zip";
   const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
+  step = { key: "kitSplit", name: "" };
   await work(async () => {
-    const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());
-    toast(t("zip.saved", { count: n, n, path }));
+    const r = await api.exportColorZip(path, options);
+    const done = t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path });
+    toast(r.oversize ? `${done} ${t("zip.oversize", { count: r.oversize, n: r.oversize })}` : done, r.oversize ? "error" : "ok");
   });
 });
 
@@ -2042,7 +2077,6 @@ onLangChange(() => {
   setExpanded(toolbar.dataset.expanded === "true");
   syncLock();
   syncOutputs();
-  bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
   renderRecents();
   if (summary) render(summary);
   syncBrush();
@@ -2087,7 +2121,6 @@ const printability = setupPrintability({
 // ---- start -------------------------------------------------------------------------------
 
 applyStatic();
-bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
 syncLock();
 setState("empty");
 setTool("orbit");
