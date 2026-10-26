@@ -7,8 +7,7 @@ use serde::Serialize;
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::state::Document;
 
-/// Prime tower width and brim the 3MF asks Bambu Studio for.
-pub const TOWER_WIDTH_MM: f32 = 20.0;
+/// Prime tower brim the 3MF asks Bambu Studio for.
 pub const TOWER_BRIM_MM: f32 = 3.0;
 
 #[derive(Serialize)]
@@ -293,16 +292,23 @@ pub fn layer_mm(printer: &bp_3mf::Printer, prefs: &WastePrefs) -> f32 {
 /// Flush per swap between every pair of slots, the user's values first.
 pub fn flush_matrix(doc: &Document) -> (Vec<f32>, Vec<bool>) {
     let pal = doc.project.palette();
-    // Typed flush follows the slots' colours; the estimate, the colours they print.
+    // Typed flush follows the slots' colours; the estimate, the colours and
+    // materials they print, as Bambu Studio's flush table works it out.
     let shown = doc.slot_colors();
+    let kinds: Vec<Option<&str>> = doc.slot_filaments().iter().map(|f| f.map(|f| f.kind.as_str())).collect();
+    let least = doc.printer.flush_min_mm3();
     let n = pal.len();
     let mut volumes = Vec::with_capacity(n * n);
     let mut set = Vec::with_capacity(n * n);
-    for (&a, &sa) in pal.iter().zip(&shown) {
-        for (&b, &sb) in pal.iter().zip(&shown) {
+    for ((&a, &sa), &ka) in pal.iter().zip(&shown).zip(&kinds) {
+        for ((&b, &sb), &kb) in pal.iter().zip(&shown).zip(&kinds) {
             let key = (bp_core::color::to_hex(a), bp_core::color::to_hex(b));
             let typed = doc.flush.get(&key).copied().filter(|_| a != b);
-            volumes.push(typed.unwrap_or_else(|| bp_core::waste::default_flush(sa, sb)));
+            let estimate = || match bp_core::waste::default_flush(sa, sb, least) {
+                0.0 => 0.0,
+                v => bp_3mf::filament::flush(ka, kb, v),
+            };
+            volumes.push(typed.unwrap_or_else(estimate));
             set.push(typed.is_some());
         }
     }
@@ -321,7 +327,6 @@ pub fn waste_params(doc: &Document, prefs: &Prefs) -> WasteParams {
         prime_mm3: w.prime_mm3,
         flush_reuse: w.flush_reuse,
         tower: doc.project.palette().len() > 1,
-        tower_width_mm: TOWER_WIDTH_MM,
         tower_depth_mm: prefs.plate.tower_depth_mm,
         tower_brim_mm: TOWER_BRIM_MM,
         purge_chute: doc.printer.purges_into_chute(),
@@ -340,11 +345,12 @@ pub fn waste_and_plate(
     let params = waste_params(doc, prefs);
     let waste = bp_core::waste::waste(swaps, &params, |a, b| matrix[a as usize * n + b as usize]);
     let needs_tower = params.tower;
-    // With no swap yet the tower still has to be planned: as deep as it is wide.
+    // Square, as Bambu Studio 2 prints it. With no swap yet it is still planned:
+    // as for one swap on the model's height.
     let tower_mm = match (prefs.plate.tower_depth_mm, waste.tower_footprint_mm) {
-        (Some(d), _) => [TOWER_WIDTH_MM + 2.0 * TOWER_BRIM_MM, d + 2.0 * TOWER_BRIM_MM],
+        (Some(d), _) => [d + 2.0 * TOWER_BRIM_MM; 2],
         (None, f) if f[1] > 0.0 => f,
-        _ => [TOWER_WIDTH_MM + 2.0 * TOWER_BRIM_MM; 2],
+        _ => [bp_core::waste::tower_side(params.prime_mm3, params.layer_mm, size[2]) + 2.0 * TOWER_BRIM_MM; 2],
     };
     let reserve = bp_3mf::Reserve {
         tower: prefs.plate.tower && needs_tower,

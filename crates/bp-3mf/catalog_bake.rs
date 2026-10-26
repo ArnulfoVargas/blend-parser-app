@@ -29,6 +29,9 @@ struct Nozzle {
     process: Option<String>,
     layer: Option<f32>,
     filament: Option<String>,
+    /// Nozzle volume below the cutter, mm³: the least Bambu Studio flushes at a swap.
+    #[serde(default)]
+    flush_min: Option<f32>,
 }
 
 pub fn bake(input: &str) -> Result<String, String> {
@@ -76,14 +79,15 @@ pub fn bake(input: &str) -> Result<String, String> {
                 || n.layer.is_some_and(|v| !v.is_finite() || v <= 0.0 || v > n.diameter)
                 || n.process.as_ref().is_some_and(|s| s.trim().is_empty())
                 || n.filament.as_ref().is_some_and(|s| s.trim().is_empty())
+                || n.flush_min.is_some_and(|v| !v.is_finite() || v <= 0.0 || v > 1000.0)
             {
                 return Err(format!("{}: invalid nozzle or preset", p.id));
             }
             // Rust's Debug escapes strings and emits valid Rust float/Option literals.
             writeln!(
                 output,
-                "CatalogNozzle {{ diameter: {:?}, printer: {:?}, process: {:?}, layer: {:?}, filament: {:?} }},",
-                n.diameter, n.printer, n.process, n.layer, n.filament
+                "CatalogNozzle {{ diameter: {:?}, printer: {:?}, process: {:?}, layer: {:?}, filament: {:?}, flush_min: {:?} }},",
+                n.diameter, n.printer, n.process, n.layer, n.filament, n.flush_min
             )
             .unwrap();
         }

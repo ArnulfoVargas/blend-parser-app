@@ -52,6 +52,7 @@ struct CatalogNozzle {
     process: Option<&'static str>,
     layer: Option<f32>,
     filament: Option<&'static str>,
+    flush_min: Option<f32>,
 }
 
 include!(concat!(env!("OUT_DIR"), "/printer_catalog.rs"));
@@ -190,6 +191,13 @@ impl Printer {
         })
     }
 
+    /// The least Bambu Studio flushes at a swap on this printer and nozzle:
+    /// the nozzle's volume below the cutter (92 mm³ on the A1, 107 on the
+    /// X1 and P1). Printers without one in their profile take 0, as there.
+    pub fn flush_min_mm3(&self) -> f32 {
+        self.nozzle().and_then(|(_, n)| n.flush_min).unwrap_or(0.0)
+    }
+
     /// Layer height of the process the 3MF names (half the nozzle when there is none).
     pub fn layer_mm(&self) -> f32 {
         self.nozzle().and_then(|(_, n)| n.layer).unwrap_or(self.nozzle_mm / 2.0)
@@ -229,8 +237,18 @@ mod tests {
                 assert_eq!(n.process, expected["process"].as_str());
                 assert_eq!(n.layer, expected["layer"].as_f64().map(|v| v as f32));
                 assert_eq!(n.filament, expected["filament"].as_str());
+                assert_eq!(n.flush_min, expected["flush_min"].as_f64().map(|v| v as f32));
             }
         }
+    }
+
+    #[test]
+    fn the_least_flush_is_the_nozzle_volume() {
+        let by = |id: &str| Printer::new(catalog().into_iter().find(|p| p.id == id).unwrap(), 0.4);
+        assert_eq!(by("Bambu Lab A1").flush_min_mm3(), 92.0);
+        assert_eq!(by("Bambu Lab X1 Carbon").flush_min_mm3(), 107.0);
+        assert_eq!(by("Bambu Lab P2S").flush_min_mm3(), 110.0);
+        assert_eq!(by("Voron 2.4 350").flush_min_mm3(), 0.0);
     }
 
     #[test]
