@@ -447,6 +447,121 @@ pub async fn cut_connected(
     .await
 }
 
+/// What a split for the printer asks for, as the UI sends it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitPlanDto {
+    /// Cut positions along X, Y and Z in preview coordinates.
+    cuts: [Vec<f32>; 3],
+    lay_on_cut: bool,
+    gap_mm: f32,
+    /// Dowels across the joints: "round" or "square", and their sizes.
+    dowels: Option<SplitDowelsDto>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitDowelsDto {
+    shape: String,
+    size_mm: f32,
+    depth_mm: f32,
+    clearance_mm: f32,
+}
+
+impl SplitPlanDto {
+    fn core(self) -> CmdResult<(bp_core::SplitPlan, f32)> {
+        let dowels = match self.dowels {
+            None => None,
+            Some(d) => Some(
+                ConnectorsDto {
+                    kind: "dowel".into(),
+                    pins_on_a: true,
+                    shape: d.shape,
+                    size_mm: d.size_mm,
+                    depth_mm: d.depth_mm,
+                    clearance_mm: d.clearance_mm,
+                    angle_deg: 0.0,
+                    at: vec![],
+                }
+                .core()?,
+            ),
+        };
+        in_range(self.gap_mm, 0.0..=50.0, "error.splitGap")?;
+        Ok((bp_core::SplitPlan { cuts: self.cuts, lay_on_cut: self.lay_on_cut, dowels }, self.gap_mm))
+    }
+}
+
+/// The room every plate has for pieces: centred, clear of the margin, the
+/// excluded zones and the tower, and as tall as the printer prints.
+fn split_room(d: &Document, prefs: &Prefs, gap_mm: f32) -> bp_core::fit::Room {
+    let stats = d.project.stats();
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
+    let reserve = bp_3mf::Reserve {
+        tower: prefs.plate.tower && plate.needs_tower,
+        tower_mm: plate.tower_mm,
+        tower_gap_mm: prefs.plate.tower_gap_mm,
+        margin_mm: prefs.plate.margin_mm,
+    };
+    bp_core::fit::Room {
+        area_mm: bp_3mf::centred_room(&d.printer, &reserve),
+        height_mm: d.printer.max_height_mm(),
+        gap_mm,
+    }
+}
+
+fn split_error(e: bp_core::SplitError) -> AppError {
+    match e {
+        bp_core::SplitError::NoCuts => AppError::new("error.splitNoCuts"),
+        bp_core::SplitError::Params => AppError::new("error.splitParams"),
+        bp_core::SplitError::Cut(e) => cut_error(e),
+        bp_core::SplitError::DoesNotFit(_) => AppError::new("error.splitDoesNotFit"),
+    }
+}
+
+/// Where to cut so every piece fits the printer, and the room it was worked out for.
+#[tauri::command]
+pub async fn propose_split(app: AppHandle, gap_mm: f32) -> CmdResult<dto::SplitProposalDto> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    with_doc(app, move |d, prefs| {
+        let room = split_room(d, prefs, gap_mm);
+        let stats = d.project.stats();
+        Ok(dto::SplitProposalDto {
+            cuts: d.project.propose_split(&room),
+            room_mm: room.area_mm,
+            height_mm: room.height_mm,
+            size_mm: stats.size_mm,
+        })
+    })
+    .await
+}
+
+/// What a split would make, without changing the document.
+#[tauri::command]
+pub async fn preview_split(app: AppHandle, plan: SplitPlanDto) -> CmdResult<dto::SplitReportDto> {
+    let (plan, gap) = plan.core()?;
+    let (project, room) = with_doc(app, move |d, prefs| Ok((d.project.clone(), split_room(d, prefs, gap)))).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        project.preview_split(&plan, &room).map(dto::split_report).map_err(split_error)
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Splits the model into pieces that fit and shares them out across plates; one undoable step.
+#[tauri::command]
+pub async fn split_for_printer(app: AppHandle, plan: SplitPlanDto, dowel_label: String) -> CmdResult<Summary> {
+    let (plan, gap) = plan.core()?;
+    let label: String = dowel_label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let room = split_room(d, prefs, gap);
+        d.project.split_for_printer(&plan, &room, &label).map_err(split_error)?;
+        // Each plate's pieces go on its centre.
+        d.offset_mm = [0.0; 2];
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {
@@ -759,6 +874,7 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
                     tris: &p.tris,
                     paint: &p.paint,
                     object: p.object,
+                    plate: p.plate,
                 })
                 .collect(),
             filaments,
@@ -788,8 +904,9 @@ fn printability_for_doc(
     let mut report = project.printability(params);
     report.printer = Some(d.printer.profile.id.clone());
     let stats = project.stats();
-    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
-    let fits = plate.fits && stats.size_mm[2] <= d.printer.max_height_mm();
+    let size = dto::printed_size(project, &stats);
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, size);
+    let fits = plate.fits && size[2] <= d.printer.max_height_mm();
     report.checks.push(bp_core::printability::Check::new(
         "buildVolume",
         "checked",

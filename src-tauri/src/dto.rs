@@ -118,6 +118,22 @@ pub struct PlateDto {
     pub can_undo_cut: bool,
     /// Printed objects: the model and the pieces cut off it that were kept.
     pub objects: usize,
+    /// Split across plates, each plate's check; empty on one plate (the fields above say it all).
+    pub plates: Vec<PlateGroupDto>,
+}
+
+/// One plate of a model split across several.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlateGroupDto {
+    pub objects: usize,
+    pub size_mm: [f32; 3],
+    /// Centre of what is on it, in preview coordinates: the plate's centre (with the offset) goes there.
+    pub centre: [f32; 3],
+    pub fits: bool,
+    pub fits_height: bool,
+    #[serde(flatten)]
+    pub check: bp_3mf::PlateCheck,
 }
 
 #[derive(Serialize)]
@@ -298,9 +314,35 @@ pub fn waste_and_plate(
         tower_gap_mm: prefs.plate.tower_gap_mm,
         margin_mm: prefs.plate.margin_mm,
     };
-    let check = bp_3mf::plate::check_at(&doc.printer, [size[0], size[1]], doc.offset_mm, &reserve);
+    // Split across plates, every plate is checked on its own and the tightest speaks for all.
+    let groups = doc.project.plate_groups();
+    let plates: Vec<PlateGroupDto> = if groups.len() > 1 {
+        groups
+            .iter()
+            .map(|g| {
+                let check =
+                    bp_3mf::plate::check_at(&doc.printer, [g.size_mm[0], g.size_mm[1]], doc.offset_mm, &reserve);
+                PlateGroupDto {
+                    objects: g.objects,
+                    size_mm: g.size_mm,
+                    centre: g.centre,
+                    fits: check.fits(),
+                    fits_height: g.size_mm[2] <= doc.printer.max_height_mm(),
+                    check,
+                }
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    let check = plates
+        .iter()
+        .min_by(|a, b| a.check.fit_factor.total_cmp(&b.check.fit_factor))
+        .map(|p| p.check.clone())
+        .unwrap_or_else(|| bp_3mf::plate::check_at(&doc.printer, [size[0], size[1]], doc.offset_mm, &reserve));
     let plate = PlateDto {
-        fits: check.fits(),
+        fits: if plates.is_empty() { check.fits() } else { plates.iter().all(|p| p.fits) },
+        plates,
         check,
         prefs: prefs.plate,
         needs_tower,
@@ -314,9 +356,20 @@ pub fn waste_and_plate(
     (waste, plate)
 }
 
+/// Width, depth and height to check against the printer: the model's, or split
+/// across plates, the largest of any plate's.
+pub fn printed_size(p: &Project, stats: &bp_core::Stats) -> [f32; 3] {
+    let groups = p.plate_groups();
+    if groups.len() < 2 {
+        return stats.size_mm;
+    }
+    groups.iter().fold([0.0; 3], |m, g| std::array::from_fn(|i| m[i].max(g.size_mm[i])))
+}
+
 pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     let p: &Project = &doc.project;
-    let stats = p.stats();
+    let mut stats = p.stats();
+    stats.size_mm = printed_size(p, &stats);
     let MeshOps {
         keep_ratio,
         flatten_mm,
@@ -523,6 +576,64 @@ pub struct ConnectReviewDto {
     pub issues: Vec<Option<&'static str>>,
     /// Objects after the cut, when every connector is fine and the cut closes.
     pub objects: Option<usize>,
+}
+
+/// Cuts that make every piece fit, and what they were worked out for.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitProposalDto {
+    /// Positions along X, Y and Z in preview coordinates.
+    pub cuts: [Vec<f32>; 3],
+    /// Room on each plate for pieces: width and depth.
+    pub room_mm: [f32; 2],
+    pub height_mm: f32,
+    /// The model as it prints now.
+    pub size_mm: [f32; 3],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitPieceDto {
+    pub name: String,
+    pub size_mm: [f32; 3],
+    /// 0-based; null when it fits no plate.
+    pub plate: Option<usize>,
+    pub laid: bool,
+    pub small: bool,
+    pub dowel: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitReportDto {
+    pub pieces: Vec<SplitPieceDto>,
+    pub plates: usize,
+    pub cuts: usize,
+    pub joints: usize,
+    pub joints_missing: usize,
+    pub fits: bool,
+}
+
+pub fn split_report(r: bp_core::SplitReport) -> SplitReportDto {
+    SplitReportDto {
+        fits: r.fits(),
+        plates: r.plates,
+        cuts: r.cuts,
+        joints: r.joints,
+        joints_missing: r.joints_missing,
+        pieces: r
+            .pieces
+            .into_iter()
+            .map(|p| SplitPieceDto {
+                name: p.name,
+                size_mm: p.size_mm,
+                plate: p.plate,
+                laid: p.laid,
+                small: p.small,
+                dowel: p.dowel,
+            })
+            .collect(),
+    }
 }
 
 /// The saved print settings and the defaults "Restablecer" goes back to.

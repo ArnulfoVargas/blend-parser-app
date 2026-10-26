@@ -328,6 +328,7 @@ fn read_dump(dir: &Path) -> Result<ImportResult, BlendError> {
             uv_layers,
             color_layers,
             object: 0,
+            plate: 0,
         });
     }
     if parts.is_empty() {
@@ -432,6 +433,7 @@ mod tests {
                     tris: &p.tris,
                     paint: &p.paint,
                     object: p.object,
+                    plate: p.plate,
                 })
                 .collect(),
             filaments,

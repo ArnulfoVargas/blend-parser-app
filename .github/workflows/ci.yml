@@ -29,6 +29,7 @@ jobs:
       - run: npm run test:viewer-handles
       - run: npm run test:separate
       - run: npm run test:connect
+      - run: npm run test:split
       - run: node --test scripts/auto-release.test.mjs scripts/publish-signed-windows.test.mjs
       - run: npm run build
       - run: cargo fmt --all --check

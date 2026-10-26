@@ -41,6 +41,10 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   sueltas, redondos o cuadrados, con diámetro, profundidad, giro y holgura en mm. Cada conector
   se comprueba antes de cortar (dentro de la sección, separado de los demás, con pared alrededor
   y sin atravesar el modelo) y se ve en la vista antes de confirmar.
+- Dividir para la impresora (`K`): cuando el modelo no cabe a su escala, propone el menor
+  número de cortes iguales por eje para que cada pieza quepa en el espacio útil de la placa
+  (margen, zonas excluidas y torre), permite ajustarlos, apoyar las piezas sobre su corte y
+  añadir espigas en las uniones, y reparte las piezas en varias placas del 3MF.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 
@@ -241,6 +245,7 @@ crates/
     waste       Desperdicio: purga por par de colores, purga inicial y torre
     split       Una pieza cerrada por color (cáscara o sólido completo)
     bvh         Picking del pincel, consulta por esfera, punto más cercano
+    fit         Cortes necesarios para caber en la placa y reparto de piezas en placas
     connect     Conectores de un corte: geometría, holgura, validación y colocación automática
     separate    Piezas desconectadas con tolerancia de soldadura y propuestas de corte
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
@@ -310,6 +315,30 @@ con Blender unos 2,5 s.
   coinciden al volver a su posición de ensamblaje. Las mitades se llaman `… A` y `… B` y las
   espigas `… espiga N`; cortar con conectores se deshace en un solo paso con `Ctrl+Z`.
 - La unión de cola de milano queda para una etapa posterior.
+
+### Dividir para caber en la impresora (#35)
+
+- **Espacio útil por placa.** El rectángulo centrado en la placa que respeta el margen, las zonas
+  que la impresora excluye y la reserva de la torre (con su separación), y la altura máxima de la
+  impresora. Cada placa recibe sus piezas centradas, igual que un modelo entero.
+- **Propuesta.** Por eje, el menor número de cortes iguales para que cada celda quepa de pie
+  (X e Y pueden intercambiarse, porque las piezas se giran 90° en la placa). Cada corte se ve
+  como un plano del color de su eje y se puede mover, añadir o quitar; *Proponer de nuevo*
+  vuelve a la propuesta. **Nunca se reduce la escala**: sólo con *Prefiero reducir la escala*,
+  que aplica *Ajustar a la placa*.
+- **Comprobación.** Antes de aplicar se corta una copia y se informa de piezas, placas, cortes y
+  espigas; las piezas que no caben (por ejemplo, tras mover un corte), las uniones sin sitio
+  para una espiga y las piezas de menos de 3 mm se muestran y, si alguna no cabe, no se divide.
+- **Orientación.** *Como está el modelo* (siempre cabe en la altura propuesta) o *Sobre un corte*:
+  cada pieza se apoya en su mayor cara de corte cuando así sigue cabiendo.
+- **Placas.** Las piezas se reparten en filas, con la separación elegida, en el menor número de
+  placas. El 3MF lleva una placa de Bambu Studio por grupo, colocada en la rejilla que usa
+  Bambu Studio (columnas ≈ √n, una quinta parte de placa entre placas) y una torre por placa.
+- **Identificadores estables.** Cada pieza es un objeto llamado por su celda, `nombre X-Y-Z`
+  (`dragón 2-1-1`), y las espigas `nombre espiga N`, para la exportación y una futura guía de
+  armado (#11). Toda la división se deshace en un paso, con la pintura.
+- **Espigas opcionales** (#34): en cada unión, donde caben con pared, alojamientos en las dos
+  piezas y espigas sueltas que se reparten como una pieza más.
 
 ### Diagnóstico local de viabilidad FDM (alcance inicial de #7)
 

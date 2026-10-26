@@ -269,6 +269,7 @@
           <button class="toolbar__btn" type="button" data-tool="section" aria-pressed="false" data-on="false" data-i18n-attr="title:stage.sectionTitle;aria-label:stage.sectionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M2.5 12.5 12 7.5l9.5 5-9.5 5z" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.section"></span><kbd>C</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="connect" aria-pressed="false" data-i18n-attr="title:stage.connectTitle;aria-label:stage.connectTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5h18V20H3z"/><path d="M3 4h18v4.5H3z" class="cut"/><path d="M8.5 8.5v5.5M15.5 8.5v5.5"/></svg><span class="toolbar__label" data-i18n="stage.connect"></span><kbd>J</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="separate" aria-pressed="false" data-i18n-attr="title:stage.separateTitle;aria-label:stage.separateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 11 6.5 9l4 2v5l-4 2-4-2z"/><path d="M13.5 8 17.5 6l4 2v5l-4 2-4-2z" class="cut"/><path d="M10 6.5 12.5 4M11.5 18.5 14 16"/></svg><span class="toolbar__label" data-i18n="stage.separate"></span><kbd>D</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="split" aria-pressed="false" data-i18n-attr="title:stage.splitTitle;aria-label:stage.splitTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5h18v10H3z" class="cut"/><path d="M9 3.5v14M15 3.5v14" stroke-dasharray="2 2.2"/><path d="M2 20.5h8M14 20.5h8"/></svg><span class="toolbar__label" data-i18n="stage.split"></span><kbd>K</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
@@ -329,6 +330,32 @@
             <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Apply cut</button></div>
           </div>
           <p class="cut-review"><span id="cut-extents"></span><span id="cut-status" role="status" aria-live="polite"></span></p>
+        </div>
+        <div class="spl-controls" id="spl-controls" aria-labelledby="spl-title">
+          <div class="spl-head">
+            <h3 class="spl-title" id="spl-title" data-i18n="spl.title">Split for the printer</h3>
+            <span class="spl-room" id="spl-room"></span>
+            <button class="link" type="button" id="spl-scale" data-i18n="spl.scaleInstead" data-i18n-attr="title:spl.scaleHelp">Shrink to fit instead</button>
+          </div>
+          <div class="spl-axes" role="group" data-i18n-attr="aria-label:spl.cuts">
+            <div class="spl-axis" data-axis="0"><span class="spl-axis__name">X</span><button class="cut-action" type="button" data-spl-less="0" data-i18n-attr="title:spl.less;aria-label:spl.less">&minus;</button><output class="spl-axis__count" data-spl-count="0">0</output><button class="cut-action" type="button" data-spl-more="0" data-i18n-attr="title:spl.more;aria-label:spl.more">+</button><div class="spl-axis__at" data-spl-at="0"></div></div>
+            <div class="spl-axis" data-axis="1"><span class="spl-axis__name">Y</span><button class="cut-action" type="button" data-spl-less="1" data-i18n-attr="title:spl.less;aria-label:spl.less">&minus;</button><output class="spl-axis__count" data-spl-count="1">0</output><button class="cut-action" type="button" data-spl-more="1" data-i18n-attr="title:spl.more;aria-label:spl.more">+</button><div class="spl-axis__at" data-spl-at="1"></div></div>
+            <div class="spl-axis" data-axis="2"><span class="spl-axis__name">Z</span><button class="cut-action" type="button" data-spl-less="2" data-i18n-attr="title:spl.less;aria-label:spl.less">&minus;</button><output class="spl-axis__count" data-spl-count="2">0</output><button class="cut-action" type="button" data-spl-more="2" data-i18n-attr="title:spl.more;aria-label:spl.more">+</button><div class="spl-axis__at" data-spl-at="2"></div></div>
+          </div>
+          <div class="spl-options">
+            <div class="spl-option"><span data-i18n="spl.orientation">Pieces</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:spl.orientation"><button type="button" id="spl-keep" aria-pressed="true" data-i18n="spl.keep" data-i18n-attr="title:spl.keepHelp">As the model stands</button><button type="button" id="spl-lay" aria-pressed="false" data-i18n="spl.lay" data-i18n-attr="title:spl.layHelp">On a cut face</button></div></div>
+            <label class="cut-value spl-value" data-i18n-attr="title:spl.gapHelp"><span data-i18n="spl.gap">Gap</span><input id="spl-gap" type="number" inputmode="decimal" min="0" max="50" step="1" value="5"><i aria-hidden="true">mm</i></label>
+            <label class="check" data-i18n-attr="title:spl.dowelsHelp"><input type="checkbox" id="spl-dowels"><span data-i18n="spl.dowels">Dowels at joints</span></label>
+            <span class="spl-dowel" id="spl-dowel-fields" hidden><label class="cut-value spl-value"><span>&Oslash;</span><input id="spl-dsize" type="number" inputmode="decimal" min="1" max="50" step="0.5" value="5" data-i18n-attr="aria-label:con.diameter"><i aria-hidden="true">mm</i></label><label class="cut-value spl-value"><span data-i18n="con.depth">Depth</span><input id="spl-ddepth" type="number" inputmode="decimal" min="1" max="100" step="0.5" value="6"><i aria-hidden="true">mm</i></label><label class="cut-value spl-value" data-i18n-attr="title:con.clearanceHelp"><span data-i18n="con.clearance">Clearance</span><input id="spl-dclear" type="number" inputmode="decimal" min="0" max="2" step="0.05" value="0.2"><i aria-hidden="true">mm</i></label></span>
+          </div>
+          <div class="spl-result">
+            <p class="spl-summary" id="spl-summary" role="status" aria-live="polite"></p>
+            <div class="spl-table" id="spl-table" role="region" data-i18n-attr="aria-label:spl.pieces" tabindex="-1"><table class="spl-list"><thead><tr><th scope="col" data-i18n="spl.piece">Piece</th><th scope="col" data-i18n="sep.size">Size</th><th scope="col" data-i18n="spl.plate">Plate</th><th scope="col" data-i18n="spl.notes">Notes</th></tr></thead><tbody id="spl-rows"></tbody></table></div>
+          </div>
+          <div class="spl-foot">
+            <button class="btn btn--quiet btn--sm" type="button" id="spl-reset" data-i18n="spl.reset" data-i18n-attr="title:spl.resetHelp">Propose again</button>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="spl-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="spl-apply" disabled data-i18n="spl.apply">Split</button></div>
+          </div>
         </div>
         <div class="con-controls" id="con-controls" aria-labelledby="con-title">
           <div class="con-head">

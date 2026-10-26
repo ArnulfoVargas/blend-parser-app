@@ -138,6 +138,36 @@ pub fn check_at(printer: &Printer, footprint_mm: [f32; 2], offset_mm: [f32; 2], 
     }
 }
 
+/// The largest rectangle centred on the plate (where every plate's pieces
+/// go) that stays inside the margin and clear of excluded zones and the
+/// tower's reserve, as width and depth in millimetres.
+pub fn centred_room(printer: &Printer, reserve: &Reserve) -> [f32; 2] {
+    let (cx, cy) = printer.plate_centre();
+    let usable = printer.printable_area().grow(-reserve.margin_mm.max(0.0));
+    let mut half = [(cx - usable.x0).min(usable.x1 - cx).max(0.0), (cy - usable.y0).min(usable.y1 - cy).max(0.0)];
+    let tower = reserve.tower.then(|| {
+        let (x, y) = printer.tower_origin();
+        Rect::new(x, y, x + reserve.tower_mm[0], y + reserve.tower_mm[1]).grow(reserve.tower_gap_mm.max(0.0))
+    });
+    let obstacles: Vec<Rect> = printer.excluded_areas().into_iter().chain(tower).collect();
+    // Each obstacle in the way takes away a side: whichever keeps more room.
+    for _ in 0..obstacles.len() * 2 {
+        let room = Rect::centred(cx, cy, 2.0 * half[0], 2.0 * half[1]);
+        let Some(o) = obstacles.iter().find(|o| o.overlaps(&room)) else { break };
+        let clear_x = (o.x0 - cx).max(cx - o.x1);
+        let clear_y = (o.y0 - cy).max(cy - o.y1);
+        let by_x = (clear_x > 0.0).then(|| clear_x * half[1]);
+        let by_y = (clear_y > 0.0).then(|| half[0] * clear_y);
+        match (by_x, by_y) {
+            (Some(x), Some(y)) if x >= y => half[0] = clear_x,
+            (Some(_), None) => half[0] = clear_x,
+            (_, Some(_)) => half[1] = clear_y,
+            (None, None) => return [0.0, 0.0],
+        }
+    }
+    [2.0 * half[0], 2.0 * half[1]]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +192,24 @@ mod tests {
         assert!(fitted.fits(), "{fitted:?}");
         let more = check(&a1, [230.0 * k * 1.02, 230.0 * k * 1.02], &Reserve { margin_mm: 0.0, ..Default::default() });
         assert!(!more.fits());
+    }
+
+    #[test]
+    fn the_centred_room_fits_wherever_it_goes_and_keeps_clear_of_the_tower() {
+        for id in ["Bambu Lab A1", "Bambu Lab X1 Carbon", "Bambu Lab A1 mini"] {
+            let p = printer(id);
+            for reserve in [Reserve::default(), Reserve { tower: false, ..Default::default() }] {
+                let room = centred_room(&p, &reserve);
+                assert!(room[0] > 50.0 && room[1] > 50.0, "{id} {room:?}");
+                // A footprint as large as the room, centred, fits; a little larger does not.
+                assert!(check(&p, room, &reserve).fits(), "{id} {room:?}");
+                let more = [room[0] * 1.01, room[1] * 1.01];
+                assert!(!check(&p, more, &reserve).fits(), "{id} {room:?}");
+            }
+            let open = centred_room(&p, &Reserve { tower: false, margin_mm: 0.0, ..Default::default() });
+            let area = p.printable_area();
+            assert!(open[0] <= area.x1 - area.x0 + 1e-3 && open[1] <= area.y1 - area.y0 + 1e-3);
+        }
     }
 
     #[test]

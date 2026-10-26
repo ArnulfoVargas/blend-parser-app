@@ -8,6 +8,7 @@ pub mod cut;
 pub mod encode;
 pub mod estimate;
 pub mod field;
+pub mod fit;
 pub mod geom;
 pub mod mesh;
 pub mod optimize;
@@ -22,8 +23,8 @@ pub mod waste;
 
 pub use mesh::{MeshOps, RepairReport};
 pub use project::{
-    ColorOps, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, Preview, PrintOps, Project, SeparateError,
-    Stats, IDENTITY,
+    ColorOps, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, PlateGroup, Preview, PrintOps, Project,
+    SeparateError, SplitError, SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
 };
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;
