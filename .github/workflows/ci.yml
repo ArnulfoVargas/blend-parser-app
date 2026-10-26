@@ -67,7 +67,7 @@ jobs:
         run: |
           codesign --verify --deep --strict "$APP_PATH"
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")
-          lipo -verify_arch "$EXPECTED_ARCH" "$APP_PATH/Contents/MacOS/$executable"
+          lipo "$APP_PATH/Contents/MacOS/$executable" -verify_arch "$EXPECTED_ARCH"
       - uses: actions/upload-artifact@v7
         with:
           name: macos-${{ matrix.target }}
