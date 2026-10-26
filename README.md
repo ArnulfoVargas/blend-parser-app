@@ -199,6 +199,25 @@ Prueba con un modelo real y Blender instalado:
 BP_SAMPLE_BLEND=ruta/al/modelo.blend cargo test --release -p bp-blend -- --ignored --nocapture
 ```
 
+## Línea de comandos
+
+`blendparser-cli` convierte modelos (con Blender) y proyectos `.bpproj` (sin Blender) a 3MF
+sin abrir la ventana, uno o una carpeta entera, con el mismo núcleo y escritor que la app.
+Toma las impresoras propias, la última elegida y los ajustes del desperdicio de la carpeta de
+configuración de la app, así que con el mismo modelo y ajustes da el mismo 3MF (sin miniatura,
+que la dibuja el visor).
+
+```sh
+cargo build --release -p bp-cli          # target/release/blendparser-cli
+blendparser-cli convert dragon.blend --colors 4 --size 80 -o dragon.3mf
+blendparser-cli convert modelos/ --out-dir 3mf/ --printer "Bambu Lab X1 Carbon" --nozzle 0.6 --json
+blendparser-cli printers                 # identificadores de impresora
+blendparser-cli --help
+```
+
+Un archivo que falla no detiene el lote. Códigos de salida: 0 todo convertido, 1 convertido con
+avisos, 2 algún archivo falló, 64 uso incorrecto.
+
 ## Actualizaciones automáticas
 
 Desde la 0.0.2, BlendParser busca una versión nueva al arrancar (y al pulsar la versión en
@@ -273,7 +292,9 @@ crates/
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
-  bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa
+  bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa;
+              project_file: el contenedor .bpproj
+  bp-cli/     blendparser-cli: conversión por lotes sin interfaz
 src-tauri/    Capa de aplicación: comandos, estado, malla en binario hacia la UI
 src/          Interfaz (TypeScript + three.js), diseño Dose
   api.ts        Tipos y llamadas al backend

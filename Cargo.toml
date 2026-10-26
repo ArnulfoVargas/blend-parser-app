@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bp-core", "crates/bp-blend", "crates/bp-3mf", "src-tauri"]
+members = ["crates/bp-core", "crates/bp-blend", "crates/bp-3mf", "crates/bp-cli", "src-tauri"]
 
 [workspace.package]
 version = "0.0.2"

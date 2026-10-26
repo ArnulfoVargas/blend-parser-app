@@ -194,6 +194,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bp-cli"
+version = "0.0.2"
+dependencies = [
+ "bp-3mf",
+ "bp-blend",
+ "bp-core",
+ "serde",
+ "serde_json",
+ "zip 2.6.1",
+]
+
+[[package]]
 name = "bp-core"
 version = "0.0.2"
 dependencies = [
