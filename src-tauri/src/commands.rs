@@ -665,19 +665,17 @@ pub async fn undo(app: AppHandle) -> CmdResult<Summary> {
     .await
 }
 
-/// The model split into solid pieces per colour, laid out on single-colour
-/// plates, with STLs and an assembly guide, all in one ZIP.
+/// The model split into solid pieces per colour, laid out on plates, with
+/// STLs and an assembly guide in `lang`, all in one ZIP.
 #[tauri::command]
 pub async fn export_color_zip(
     app: AppHandle,
     path: String,
-    voxel_mm: f32,
-    depth_mm: f32,
-    core_slot: Option<u8>,
-    min_piece_mm3: f32,
-    mix: Option<bool>,
+    options: bp_3mf::project_file::KitSettings,
+    lang: String,
 ) -> CmdResult<dto::KitDto> {
-    let mix = mix.unwrap_or(false);
+    let bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot, min_piece_mm3, mix } = options;
+    let lang = bp_3mf::KitLang::from_code(&lang);
     in_range(voxel_mm, 0.2..=2.0, "error.kitDetailRange")?;
     in_range(depth_mm, 0.0..=50.0, "error.kitDepthRange")?;
     let handle = app.clone();
@@ -734,7 +732,12 @@ pub async fn export_color_zip(
         let filament_names: Vec<Option<String>> = d
             .slot_filaments()
             .iter()
-            .map(|f| f.map(|f| format!("{} {} {}", f.brand, f.kind, f.name_es).trim().to_string()))
+            .map(|f| {
+                f.map(|f| {
+                    let name = if lang == bp_3mf::KitLang::En { &f.name_en } else { &f.name_es };
+                    format!("{} {} {}", f.brand, f.kind, name).trim().to_string()
+                })
+            })
             .collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let info = bp_3mf::KitInfo {
@@ -757,6 +760,7 @@ pub async fn export_color_zip(
                 into_infill: prefs.waste.flush_reuse > 0.0,
                 prime_mm3: prefs.waste.prime_mm3,
             },
+            lang,
         };
         let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
         let s = bp_3mf::write_kit_zip(std::io::BufWriter::new(file), &kit, &info)

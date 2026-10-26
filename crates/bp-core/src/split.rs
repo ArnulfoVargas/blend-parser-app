@@ -707,6 +707,23 @@ pub(crate) mod tests {
         // Nearest-surface split of a cube: the top colour is a pyramid to the centre.
         assert!(volume(top) > 1000.0 && volume(top) < 1700.0, "{}", volume(top));
         assert!(s.pieces.iter().all(|p| p.contacts.len() == 1 && p.contacts[0].1 > 100.0));
+        // Where they meet, both sides find the faces to glue. The contact counts
+        // voxel faces, a staircase; the meshes are smooth, so a bit smaller.
+        let (a, b) = (&s.pieces[0], &s.pieces[1]);
+        for (x, y) in [(a, b), (b, a)] {
+            let area: f32 = crate::kit::contact_faces(x, y, s.voxel_mm * 0.5)
+                .iter()
+                .map(|&t| {
+                    let c = x.tris[t].map(|v| x.positions[v as usize]);
+                    0.5 * crate::geom::len(crate::geom::cross(
+                        crate::geom::sub(c[1], c[0]),
+                        crate::geom::sub(c[2], c[0]),
+                    ))
+                })
+                .sum();
+            let staircase = x.contacts[0].1;
+            assert!(area > 0.7 * staircase && area < 1.05 * staircase, "{area} vs {staircase}");
+        }
     }
 
     #[test]

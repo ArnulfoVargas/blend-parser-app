@@ -496,6 +496,7 @@ mod tests {
                 },
                 density_g_cm3: 1.24,
                 flush: Default::default(),
+                lang: Default::default(),
             };
             let zip = std::env::temp_dir().join(format!("blendparser-piezas-{depth_mm}.zip"));
             let summary = bp_3mf::write_kit_zip(std::fs::File::create(&zip).unwrap(), &kit, &info).unwrap();
