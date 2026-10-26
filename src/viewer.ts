@@ -40,9 +40,6 @@ type Grip = Axis | "all";
 /** A move handle: along X or Y, or anywhere on the plate. */
 type Slide = 0 | 1 | "plane";
 
-/** Turns snap to this many degrees unless Shift is held. */
-const TURN_STEP = 15;
-
 /** Blender's axis colours: X red, Y green, Z blue. */
 const AXIS_COLOURS = ["--axis-x", "--axis-y", "--axis-z"];
 
@@ -105,6 +102,8 @@ export class Viewer {
   private rings = new THREE.Group();
   private hoverRing: Axis | null = null;
   private turnDrag: { axis: Axis; centre: THREE.Vector3; sign: number; last: number; total: number; degrees: number } | null = null;
+  /** Turns snap to this many degrees unless Shift is held. */
+  private turnStep = 15;
   private section: Section | null = null;
   private clip = new THREE.Plane();
   private cut = new THREE.Group();
@@ -888,6 +887,11 @@ export class Viewer {
     return Math.atan2(y - e.clientY, e.clientX - x);
   }
 
+  /** The angle a dragged ring snaps to. */
+  setTurnStep(degrees: number) {
+    this.turnStep = degrees;
+  }
+
   private grabRing(e: PointerEvent): boolean {
     const axis = this.ringAt();
     const centre = this.mesh?.geometry.boundingBox?.getCenter(new THREE.Vector3());
@@ -905,7 +909,7 @@ export class Viewer {
     r.total += Math.atan2(Math.sin(step), Math.cos(step));
     r.last = a;
     const raw = THREE.MathUtils.radToDeg(r.total * r.sign);
-    r.degrees = e.shiftKey ? Math.round(raw) : Math.round(raw / TURN_STEP) * TURN_STEP;
+    r.degrees = e.shiftKey ? Math.round(raw) : Math.round(raw / this.turnStep) * this.turnStep;
     // Round the centre: x' = c + q (x - c).
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3().setComponent(r.axis, 1), THREE.MathUtils.degToRad(r.degrees));
     this.mesh!.quaternion.copy(q);
