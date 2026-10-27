@@ -63,7 +63,11 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   profundidad dada sobre un núcleo de un color; las migas se unen a su vecina. Las superficies se
   pulen igual a ambos lados de cada unión: el borde de color queda sobre la superficie del modelo
   (sin ranura), la piel sigue al modelo sin escalones y cada unión se simplifica una sola vez y se
-  usa volteada por la otra pieza, así que encajan exactas y siguen cerradas. Opcionalmente,
+  usa volteada por la otra pieza, así que encajan exactas y siguen cerradas. Por fuera, cada
+  pieza lleva la superficie exacta del modelo (aristas vivas incluidas): se hace un poco más grande
+  y se recorta contra el modelo con una booleana exacta ([manifold-rust](https://github.com/larsbrubaker/manifold-rust),
+  Rust puro). Si el modelo no está cerrado, esa pieza conserva la superficie aproximada y el resumen
+  lo dice. Opcionalmente,
   **espigas** como de bloque de juguete: en cada unión con sitio, una espiga redonda (diámetro,
   alto y holgura a elegir) sale de una pieza y entra en un alojamiento de la otra, con pared
   alrededor; la superficie de ambas se coloca exacta sobre su cilindro, así que la holgura se
@@ -335,7 +339,8 @@ crates/
     estimate    Cambios de filamento por capa, con su sentido
     waste       Desperdicio: purga por par de colores, purga inicial y torre
     split       Piezas sólidas por color: vóxeles, Voronoi de la superficie, tetraedros marchantes,
-                pulido compartido entre piezas y espigas con holgura (split/pins.rs)
+                pulido compartido entre piezas, espigas con holgura (split/pins.rs) y piel
+                exacta del modelo por booleanas (split/skin.rs)
     kit         Orientación de cada pieza, acomodo en placas por color y orden de armado
     render      Renderizador por software para las imágenes de la guía
     bvh         Picking del pincel, consulta por esfera, punto más cercano
