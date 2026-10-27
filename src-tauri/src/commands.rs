@@ -717,6 +717,7 @@ pub async fn export_color_zip(
                 clearance_mm: p.clearance_mm,
                 ..Default::default()
             }),
+            exact_skin: true,
         };
         d.kit = Some(bp_3mf::project_file::KitSettings {
             voxel_mm,

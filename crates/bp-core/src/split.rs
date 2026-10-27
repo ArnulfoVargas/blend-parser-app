@@ -18,6 +18,7 @@ use crate::bvh::{Bvh, TriSoup};
 use crate::geom::{self, Bary, Vec3};
 
 mod pins;
+mod skin;
 
 pub use pins::PinParams;
 use pins::{Pins, GAP};
@@ -34,11 +35,13 @@ pub struct SplitParams {
     pub min_piece_mm3: f32,
     /// Pins that key neighbouring pieces together; `None` leaves them to glue.
     pub pins: Option<PinParams>,
+    /// Give the pieces the model's own surface outside (see [`skin`]).
+    pub exact_skin: bool,
 }
 
 impl Default for SplitParams {
     fn default() -> Self {
-        Self { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 20.0, pins: None }
+        Self { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 20.0, pins: None, exact_skin: false }
     }
 }
 
@@ -76,6 +79,8 @@ pub struct Split {
     pub pins: Vec<PinJoin>,
     /// Joins wide enough for a pin where none fitted.
     pub unpinned: usize,
+    /// When asked for, how many pieces got the model's own surface outside.
+    pub exact_skin: Option<usize>,
 }
 
 /// Positions and triangles of one mesh.
@@ -515,7 +520,17 @@ const SURFACE_ERROR_MM: f32 = 0.05;
 /// - Faces on the model slide along it to even out (tangential smoothing,
 ///   pushed back onto the model each round), losing the lumps of the grid.
 /// - Faces between pieces are smoothed in place (Taubin, which does not shrink).
-fn polish(regions: &[RegionMesh], comp: &[u32], bvh: &Bvh, soup: &TriSoup, h: f32) -> Vec<MeshData> {
+///
+/// With `grow`, also the same surfaces with the outside pushed that far out,
+/// for [`skin::clip`].
+fn polish(
+    regions: &[RegionMesh],
+    comp: &[u32],
+    bvh: &Bvh,
+    soup: &TriSoup,
+    h: f32,
+    grow: Option<f32>,
+) -> (Vec<MeshData>, Option<Vec<MeshData>>) {
     let mut id: HashMap<EdgeKey, u32> = HashMap::new();
     let (mut pos, mut kind) = (Vec::new(), Vec::new());
     let mut local: Vec<Vec<u32>> = Vec::with_capacity(regions.len());
@@ -632,7 +647,16 @@ fn polish(regions: &[RegionMesh], comp: &[u32], bvh: &Bvh, soup: &TriSoup, h: f3
         }
     }
 
-    simplify_patches(regions, &local, comp, &pos, SURFACE_ERROR_MM)
+    let grown = grow.map(|g| {
+        let mut out = pos.clone();
+        for &v in &surface {
+            if let Some(n) = normal[v] {
+                out[v] = geom::add(out[v], geom::scale(n, g));
+            }
+        }
+        simplify_patches(regions, &local, comp, &out, SURFACE_ERROR_MM)
+    });
+    (simplify_patches(regions, &local, comp, &pos, SURFACE_ERROR_MM), grown)
 }
 
 /// A region and what lies across its patch: another region, `NONE` for the
@@ -917,7 +941,17 @@ pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: Spl
         .into_par_iter()
         .map(|c| mesh_region(&field, &comp, c as u32, &boundary[c], pins.as_ref(), &bvh, soup))
         .collect();
-    let meshes = polish(&regions, &comp, &bvh, soup, h);
+    let (mut meshes, grown) = polish(&regions, &comp, &bvh, soup, h, params.exact_skin.then_some(h));
+    let mut exact_skin = params.exact_skin.then_some(0);
+    if let (Some(grown), Some(body)) = (grown, params.exact_skin.then(|| skin::body(soup)).flatten()) {
+        let clipped: Vec<Option<MeshData>> = grown.par_iter().map(|g| skin::clip(&body, g)).collect();
+        for (m, c) in meshes.iter_mut().zip(clipped) {
+            if let Some(c) = c.filter(|c| watertight(&c.1)) {
+                *m = c;
+                exact_skin = exact_skin.map(|n| n + 1);
+            }
+        }
+    }
 
     // Order by colour, then largest first, and renumber the contacts.
     let mut order: Vec<usize> = (0..sizes.len()).filter(|&c| !meshes[c].1.is_empty()).collect();
@@ -967,7 +1001,7 @@ pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: Spl
             .collect();
         (pairs, z.missed)
     });
-    Split { pieces, voxel_mm: h, merged, dropped, pins: pin_pairs, unpinned }
+    Split { pieces, voxel_mm: h, merged, dropped, pins: pin_pairs, unpinned, exact_skin }
 }
 
 #[cfg(test)]
@@ -1058,7 +1092,7 @@ pub(crate) mod tests {
             depth_mm: 3.0,
             core_slot: Some(0),
             min_piece_mm3: 1.0,
-            pins: None,
+            ..Default::default()
         });
         let top = s.pieces.iter().find(|p| p.slot == 1).unwrap();
         // A 20 × 20 × 3 mm slab, minus the edges where the sides are nearer.
@@ -1212,6 +1246,38 @@ pub(crate) mod tests {
             split(&model, slab, SplitParams { voxel_mm: 0.5, pins: Some(PinParams::default()), ..Default::default() });
         assert!(s.pins.is_empty());
         assert_eq!(s.unpinned, 1);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+    }
+
+    #[test]
+    fn exact_skin_keeps_the_models_corners() {
+        let s = painted_cube(SplitParams { voxel_mm: 1.0, exact_skin: true, ..Default::default() });
+        assert_eq!(s.exact_skin, Some(2));
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+        let total: f32 = s.pieces.iter().map(volume).sum();
+        assert!((total - 8000.0).abs() < 8.0, "{total}");
+        // Every corner of the cube is a vertex of some piece, not rounded off.
+        for b in 0..8 {
+            let c = [[0.0, 20.0][b & 1], [0.0, 20.0][(b >> 1) & 1], [0.0, 20.0][b >> 2]];
+            let near = s
+                .pieces
+                .iter()
+                .flat_map(|p| p.positions.iter())
+                .map(|&v| geom::len(geom::sub(v, c)))
+                .fold(f32::MAX, f32::min);
+            assert!(near < 1e-3, "corner {c:?} is {near} mm off");
+        }
+    }
+
+    #[test]
+    fn an_open_model_keeps_the_voxel_skin() {
+        let (p, mut t) = cuboid([0.0; 3], [20.0; 3]);
+        t.pop();
+        let model = soup(&p, &t);
+        let top = |tri: u32, _b: Bary| u8::from(tri == 2 || tri == 3);
+        let s = split(&model, top, SplitParams { voxel_mm: 1.0, exact_skin: true, ..Default::default() });
+        assert_eq!(s.exact_skin, Some(0));
+        assert_eq!(s.pieces.len(), 2);
         assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
     }
 }
