@@ -685,10 +685,16 @@ pub async fn export_color_zip(
     options: bp_3mf::project_file::KitSettings,
     lang: String,
 ) -> CmdResult<dto::KitDto> {
-    let bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot, min_piece_mm3, mix, contents } = options;
+    let bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot, min_piece_mm3, mix, contents, pins } =
+        options;
     let lang = bp_3mf::KitLang::from_code(&lang);
     in_range(voxel_mm, 0.2..=2.0, "error.kitDetailRange")?;
     in_range(depth_mm, 0.0..=50.0, "error.kitDepthRange")?;
+    if let Some(p) = pins {
+        in_range(p.diameter_mm, 2.0..=20.0, "error.kitPinDiameterRange")?;
+        in_range(p.depth_mm, 1.0..=20.0, "error.kitPinDepthRange")?;
+        in_range(p.clearance_mm, 0.0..=1.0, "error.kitPinClearanceRange")?;
+    }
     if !contents.any() {
         return Err(AppError::new("error.kitNothing"));
     }
@@ -700,7 +706,18 @@ pub async fn export_color_zip(
         };
         let cancelled = || KIT_CANCEL.load(std::sync::atomic::Ordering::Relaxed);
         emit("split", 0, 0);
-        let params = bp_core::SplitParams { voxel_mm, depth_mm, core_slot, min_piece_mm3: min_piece_mm3.max(0.0) };
+        let params = bp_core::SplitParams {
+            voxel_mm,
+            depth_mm,
+            core_slot,
+            min_piece_mm3: min_piece_mm3.max(0.0),
+            pins: pins.map(|p| bp_core::PinParams {
+                diameter_mm: p.diameter_mm,
+                depth_mm: p.depth_mm,
+                clearance_mm: p.clearance_mm,
+                ..Default::default()
+            }),
+        };
         d.kit = Some(bp_3mf::project_file::KitSettings {
             voxel_mm,
             depth_mm,
@@ -708,6 +725,7 @@ pub async fn export_color_zip(
             min_piece_mm3: params.min_piece_mm3,
             mix,
             contents,
+            pins,
         });
         let split = d.project.split_by_color(params);
         if split.pieces.is_empty() {
@@ -814,6 +832,8 @@ pub async fn export_color_zip(
             oversize: s.oversize,
             review: s.review,
             dropped: s.dropped,
+            pins: s.pins,
+            unpinned: s.unpinned,
             bytes: std::fs::metadata(&path).map_or(0, |m| m.len()),
         })
     })

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::geom::{self, Vec3};
-use crate::split::{Piece, Split};
+use crate::split::{Piece, PinJoin, Split};
 
 pub type Mat3 = [[f32; 3]; 3];
 
@@ -102,6 +102,9 @@ pub struct Kit {
     /// Crumbs that went to a neighbour, and regions too thin to make a piece.
     pub merged: usize,
     pub dropped: usize,
+    /// Pins keying pieces together, and joins with no room for one.
+    pub pins: Vec<PinJoin>,
+    pub unpinned: usize,
 }
 
 /// Why a piece needs a look before printing it.
@@ -174,6 +177,34 @@ pub fn kit(split: Split, bed: Bed) -> Kit {
         voxel_mm: split.voxel_mm,
         merged: split.merged,
         dropped: split.dropped,
+        pins: split.pins,
+        unpinned: split.unpinned,
+    }
+}
+
+impl Kit {
+    /// The pins between pieces `a` and `b`, either way round.
+    pub fn pins_between(&self, a: usize, b: usize) -> impl Iterator<Item = &PinJoin> {
+        self.pins.iter().filter(move |p| (p.pin, p.socket) == (a, b) || (p.pin, p.socket) == (b, a))
+    }
+
+    /// For a step adding `piece` onto `joins`: the joined pieces whose pins
+    /// point another way than the first one's, so it cannot go onto them all at once.
+    pub fn crossed_pins(&self, piece: usize, joins: &[usize]) -> Vec<usize> {
+        let mut first: Option<Vec3> = None;
+        let mut crossed = vec![];
+        for &j in joins {
+            for p in self.pins_between(piece, j) {
+                // The way the new piece moves to go on.
+                let along = if p.socket == piece { p.axis } else { geom::scale(p.axis, -1.0) };
+                match first {
+                    None => first = Some(along),
+                    Some(f) if geom::dot(f, along) < 0.9 && !crossed.contains(&j) => crossed.push(j),
+                    _ => {}
+                }
+            }
+        }
+        crossed
     }
 }
 
@@ -777,6 +808,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn crossed_pins_are_the_ones_that_point_another_way() {
+        let mut k = kit(Split::default(), Bed::plain(100.0, 100.0));
+        k.pins = vec![
+            // Piece 0 slides down onto 1 and onto 2: the same way.
+            PinJoin { pin: 1, socket: 0, axis: [0.0, 0.0, 1.0] },
+            PinJoin { pin: 2, socket: 0, axis: [0.0, 0.0, 1.0] },
+            // ...but onto 3 sideways.
+            PinJoin { pin: 0, socket: 3, axis: [1.0, 0.0, 0.0] },
+        ];
+        assert!(k.crossed_pins(0, &[1, 2]).is_empty());
+        assert_eq!(k.crossed_pins(0, &[1, 3]), vec![3]);
+        assert_eq!(k.pins_between(3, 0).count(), 1);
+    }
+
+    #[test]
     fn check_names_what_to_look_at() {
         use crate::split::tests::cuboid;
         let piece = |lo, hi| {
@@ -795,7 +841,8 @@ mod tests {
             flat,
             piece([0.0; 3], [300.0, 300.0, 5.0]),
         ];
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(256.0, 256.0));
+        let k =
+            kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, Bed::plain(256.0, 256.0));
         let issues = check(&k, 0.4);
         assert!(issues[0].is_empty(), "{:?}", issues[0]);
         assert!(matches!(issues[1].as_slice(), [Issue::Thin(t)] if (*t - 0.6).abs() < 1e-3), "{:?}", issues[1]);
@@ -825,7 +872,8 @@ mod tests {
     #[test]
     fn plates_hold_one_colour_and_stay_on_the_bed() {
         let pieces: Vec<Piece> = (0..12).map(|i| piece((i % 2) as u8, [0.0; 3], [40.0, 30.0, 5.0], vec![])).collect();
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(120.0, 120.0));
+        let k =
+            kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, Bed::plain(120.0, 120.0));
         assert!(k.plates.len() >= 2);
         for plate in &k.plates {
             assert!(plate.pieces.iter().all(|&i| k.pieces[i].slot == plate.slot()));
@@ -884,14 +932,14 @@ mod tests {
         let mut pieces: Vec<Piece> = (0..5).map(|_| piece(0, [0.0; 3], [150.0, 20.0, 4.0], vec![])).collect();
         pieces.extend((0..2).map(|_| piece(0, [0.0; 3], [60.0, 30.0, 4.0], vec![])));
         let bed = Bed { margin_mm: 5.0, gap_mm: 2.0, ..Bed::plain(160.0, 160.0) };
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, bed);
+        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, bed);
         assert_eq!(k.plates.len(), 1, "one plate holds them all");
         assert_clear(&k, &[]);
         assert!(k.plates[0].occupancy > 0.6 && k.plates[0].occupancy <= 1.0, "{}", k.plates[0].occupancy);
         // A piece too deep one way turns the other way round to fit.
         let tall = vec![piece(0, [0.0; 3], [100.0, 40.0, 4.0], vec![])];
         let bed = Bed { margin_mm: 0.0, gap_mm: 0.0, ..Bed::plain(50.0, 120.0) };
-        let k = kit(Split { pieces: tall, voxel_mm: 0.5, merged: 0, dropped: 0 }, bed);
+        let k = kit(Split { pieces: tall, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, bed);
         assert!(k.placed[0].fits);
         assert!((k.placed[0].size[1] - 100.0).abs() < 1e-3, "{:?}", k.placed[0].size);
         // The STL stays in step with the turn: its extent is the size.
@@ -910,8 +958,7 @@ mod tests {
             Split {
                 pieces: (0..16).map(|i| piece((i % 3) as u8, [0.0; 3], [30.0, 25.0, 5.0], vec![])).collect(),
                 voxel_mm: 0.5,
-                merged: 0,
-                dropped: 0,
+                ..Default::default()
             },
             bed.clone(),
         );
@@ -919,7 +966,8 @@ mod tests {
         assert!(apart.plates.iter().all(|p| !p.mixed()));
         assert_clear(&apart, &[excluded]);
         // Mixed: fewer plates, clear of the tower as well.
-        let mixed = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed { mix: true, ..bed });
+        let mixed =
+            kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, Bed { mix: true, ..bed });
         assert_eq!(mixed.plates.len(), 1);
         assert!(mixed.plates[0].mixed() && mixed.plates[0].slots.len() == 3);
         assert_clear(&mixed, &[excluded, tower]);
@@ -940,7 +988,8 @@ mod tests {
     fn a_piece_larger_than_the_bed_gets_its_own_plate() {
         let pieces =
             vec![piece(0, [0.0; 3], [300.0, 40.0, 5.0], vec![]), piece(0, [0.0; 3], [20.0, 20.0, 5.0], vec![])];
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(200.0, 200.0));
+        let k =
+            kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, Bed::plain(200.0, 200.0));
         assert_eq!(k.plates.len(), 2);
         assert!(!k.placed[0].fits && k.placed[1].fits);
         assert_ne!(k.placed[0].plate, k.placed[1].plate);

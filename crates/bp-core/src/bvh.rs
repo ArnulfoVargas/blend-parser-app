@@ -221,10 +221,17 @@ impl Bvh {
 
     /// Nearest triangle to `q` and the barycentrics of the closest point on it.
     pub fn nearest(&self, soup: &TriSoup, q: Vec3) -> Option<(u32, Bary)> {
+        self.nearest_within(soup, q, f32::MAX)
+    }
+
+    /// [`Bvh::nearest`] among the triangles closer than `r`; much quicker when
+    /// `r` is small.
+    pub fn nearest_within(&self, soup: &TriSoup, q: Vec3, r: f32) -> Option<(u32, Bary)> {
         if self.nodes.is_empty() {
             return None;
         }
-        let mut best = (f32::MAX, 0u32, [1.0, 0.0, 0.0]);
+        let bound = if r < f32::MAX.sqrt() { r * r } else { f32::MAX };
+        let mut best = (bound, 0u32, [1.0, 0.0, 0.0]);
         let mut stack = vec![(0usize, 0.0f32)];
         while let Some((ni, d)) = stack.pop() {
             if d >= best.0 {
@@ -254,7 +261,7 @@ impl Bvh {
                 }
             }
         }
-        (best.0 < f32::MAX).then_some((best.1, best.2))
+        (best.0 < bound).then_some((best.1, best.2))
     }
 }
 
