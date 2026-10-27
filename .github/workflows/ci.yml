@@ -24,11 +24,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check:i18n
+      - run: npm run test:section-line
+      - run: npm run test:cut-preview
+      - run: npm run test:viewer-handles
       - run: node --test scripts/auto-release.test.mjs scripts/publish-signed-windows.test.mjs
       - run: npm run build
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: python3 -m unittest discover -s crates/bp-blend/tests -p 'test_*.py'
 
   prepare-release:
     needs: check

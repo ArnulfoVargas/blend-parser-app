@@ -274,15 +274,50 @@ pub async fn reset_rotation(app: AppHandle) -> CmdResult<TurnDto> {
     .await
 }
 
-/// Cuts the model `t` of the way along `axis` (0 to 1 over the preview) and
-/// keeps the low or the high side; with `keep_other`, the other side too, as an
-/// object of its own beside it.
+fn cut_error(error: bp_core::cut::CutError) -> AppError {
+    AppError::new(match error {
+        bp_core::cut::CutError::Misses => "error.cutMisses",
+        bp_core::cut::CutError::InvalidPlane => "error.cutPlane",
+        bp_core::cut::CutError::InvalidGeometry => "error.cutGeometry",
+    })
+}
+
+/// Dry run on a snapshot: validates the actual caps and retained geometry without
+/// changing the document, its paint or its undo history. Releases the document
+/// lock before the expensive cut so navigation and new file loads stay responsive.
 #[tauri::command]
-pub async fn cut_model(app: AppHandle, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> CmdResult<Summary> {
+pub async fn preview_cut(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    keep_low: bool,
+    keep_other: bool,
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+) -> CmdResult<usize> {
+    let mut project = with_doc(app, |d, _| Ok(d.project.clone())).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        project.cut_plane(point, normal, keep_low, keep_other, lay_on_cut, &selected).map_err(cut_error)?;
+        Ok(project.object_count())
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Cuts selected parts using the exact plane displayed by the preview.
+/// Both halves can be retained and optionally laid on their cut faces.
+#[tauri::command]
+pub async fn cut_model(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    keep_low: bool,
+    keep_other: bool,
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {
-        if !d.project.cut(axis, t, keep_low, keep_other) {
-            return Err(AppError::new("error.cutMisses"));
-        }
+        d.project.cut_plane(point, normal, keep_low, keep_other, lay_on_cut, &selected).map_err(cut_error)?;
         Ok(dto::summary(d, prefs))
     })
     .await

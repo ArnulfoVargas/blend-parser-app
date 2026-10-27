@@ -7,6 +7,7 @@ import "@fontsource/instrument-sans/500.css";
 import "@fontsource/dm-mono/400.css";
 import "@fontsource/dm-mono/500.css";
 import "./styles/app.css";
+import "./styles/section-line.css";
 
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -30,7 +31,9 @@ import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { setupPrintability } from "./printability";
-import { Viewer, type Axis, type Section, type Tool, type View } from "./viewer";
+import { Viewer, sectionNormal, type Section, type Tool, type View } from "./viewer";
+import { CutPanel } from "./cut-panel";
+import { CutReview } from "./cut-review";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -193,6 +196,25 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   },
   rotate: async (axis, degrees) => (summary ? turn(() => api.rotate(axis, degrees)) : false),
   section: (s) => syncSection(s),
+  sectionLine: (active, error) => {
+    cutDrawing = active;
+    syncCutDrawing();
+    queueCutReview();
+    if (error) toast(t(error === "tooShort" ? "cut.lineTooShort" : "cut.lineMisses"), "error");
+  },
+  cutChoice: (both) => {
+    keepOther.checked = both;
+    syncCutChoice();
+  },
+  cutPicking: (active) => {
+    cutPicking = active;
+    $("#cut-pick-part").setAttribute("aria-pressed", String(active));
+    setHint(t(active ? "cut.pickPartHelp" : "hint.section"));
+  },
+  cutDimensions: (low, high) => {
+    cutDimensions = [low, high];
+    showCutDimensions();
+  },
 });
 
 /** Points in preview units for the current size. */
@@ -253,35 +275,106 @@ async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
 document.querySelectorAll<HTMLButtonElement>("button[data-turn]").forEach((b) => b.addEventListener("click", () => void turn(() => api.rotate(Number(b.dataset.turn), 90))));
 $("#rotate-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
 
-const cutPos = $<HTMLInputElement>("#cut-pos");
+let cutDrawing = false;
+let cutPicking = false;
+let cutValidated = false;
+let cutDimensions: [Vec3 | null, Vec3 | null] = [null, null];
+const cutReview = new CutReview<{ section: Section; both: boolean; lay: boolean }>({
+  run: ({ section: s, both, lay }) => api.previewCut(s.point, sectionNormal(s), !s.flip, both, lay, s.selected),
+  pending: () => {
+    cutValidated = false;
+    $<HTMLButtonElement>("#cut-apply").disabled = true;
+    $("#cut-status").textContent = t("cut.checking");
+    $("#cut-status").dataset.state = "pending";
+  },
+  result: (objects, error) => {
+    cutValidated = objects !== null;
+    $<HTMLButtonElement>("#cut-apply").disabled = !cutValidated;
+    $("#cut-status").textContent = objects !== null ? t("cut.validated", { n: objects }) : errText(error);
+    $("#cut-status").dataset.state = objects !== null ? "valid" : "error";
+  },
+});
+function queueCutReview() {
+  const section = viewer.getSection();
+  const available = summary && section && app.dataset.tool === "section";
+  cutReview.schedule(available && !cutDrawing ? { section, both: keepOther.checked, lay: $<HTMLInputElement>("#cut-lay").checked } : null);
+  if (!available || cutDrawing) {
+    cutValidated = false;
+    $<HTMLButtonElement>("#cut-apply").disabled = true;
+    $("#cut-status").textContent = cutDrawing ? t("cut.adjusting") : "";
+  }
+}
+function showCutDimensions() {
+  const size = (value: Vec3 | null) => value ? value.map((v) => nf(v * (summary?.size.previewScale ?? 1), 1)).join(" × ") + " mm" : "—";
+  $("#cut-extents").textContent = `A: ${size(cutDimensions[0])} · B: ${size(cutDimensions[1])}`;
+  document.querySelectorAll<HTMLButtonElement>(".cut-half").forEach((button, i) => {
+    button.setAttribute("aria-label", t("cut.chooseHalf", { side: i ? "B" : "A" }));
+    button.title = t("cut.chooseHalf", { side: i ? "B" : "A" });
+  });
+}
+const cutPanel = new CutPanel({
+  current: () => currentCut(),
+  set: (s) => setSection(s),
+  reset: () => viewer.defaultSection(),
+  range: (s) => viewer.sectionRange(s),
+  snap: (degrees) => viewer.setCutSnap(degrees),
+});
+const cutDraw = document.createElement("div");
+cutDraw.className = "cut-draw";
+const cutDrawButton = Object.assign(document.createElement("button"), { type: "button", className: "btn btn--quiet btn--sm" });
+const cutDrawHelp = document.createElement("p");
+cutDrawHelp.id = "cut-draw-help";
+cutDrawHelp.setAttribute("role", "status");
+cutDrawButton.setAttribute("aria-describedby", cutDrawHelp.id);
+cutDraw.append(cutDrawButton, cutDrawHelp);
+$(".stage__view").append(cutDraw);
+cutDrawButton.addEventListener("click", () => viewer.drawSectionLine());
+function syncCutDrawing() {
+  cutDraw.dataset.drawing = String(cutDrawing);
+  cutDrawButton.textContent = t(cutDrawing ? "cut.cancelLine" : "cut.drawLine");
+  cutDrawButton.setAttribute("aria-pressed", String(cutDrawing));
+  cutDrawHelp.textContent = t(cutDrawing ? "cut.lineHelp" : "cut.lineReady");
+  $("#cut-controls").inert = cutDrawing;
+  $(".cut-guides").inert = cutDrawing;
+  $(".cut-kept").inert = cutDrawing;
+  $<HTMLButtonElement>("#cut-apply").disabled = cutDrawing || !cutValidated;
+  if (app.dataset.tool === "section") setHint(t(cutDrawing ? "cut.lineHelp" : "hint.section"));
+}
+syncCutDrawing();
 /** The cut's controls under the view, and the mark on its tool while it is on. */
 function syncSection(s: Section | null) {
   $<HTMLButtonElement>('button[data-tool="section"]').dataset.on = String(s !== null);
-  document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) => b.setAttribute("aria-pressed", String(s !== null && Number(b.dataset.cutAxis) === s.axis)));
-  if (s) cutPos.value = String(Math.round(s.t * 1000) / 10);
-  $<HTMLButtonElement>("#cut-flip").setAttribute("aria-pressed", String(s?.flip ?? false));
+  cutPanel.sync(s);
+  if (keepOther.checked) $("#cut-side").textContent = t("cut.bothChoice");
+  queueCutReview();
 }
 function setSection(s: Section | null) {
+  viewer.cancelSectionLine();
   viewer.setSection(s);
   syncSection(s);
 }
-const currentCut = (): Section => viewer.getSection() ?? { axis: 2, t: 0.5, flip: false };
-cutPos.addEventListener("input", () => setSection({ ...currentCut(), t: Number(cutPos.value) / 100 }));
-document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) =>
-  b.addEventListener("click", () => setSection({ ...currentCut(), axis: Number(b.dataset.cutAxis) as Axis })));
-$("#cut-flip").addEventListener("click", () => setSection({ ...currentCut(), flip: !currentCut().flip }));
+const currentCut = (): Section => viewer.getSection() ?? viewer.defaultSection();
 $("#cut-off").addEventListener("click", () => {
   setSection(null);
   setTool("orbit");
 });
 // Cutting for real keeps the side the view shows.
 const keepOther = $<HTMLInputElement>("#cut-keep-other");
+function syncCutChoice() {
+  viewer.setCutBoth(keepOther.checked);
+  $("#cut-both").setAttribute("aria-pressed", String(keepOther.checked));
+  syncSection(viewer.getSection());
+}
+keepOther.addEventListener("change", syncCutChoice);
+$("#cut-both").addEventListener("click", () => { keepOther.checked = !keepOther.checked; syncCutChoice(); });
+$("#cut-lay").addEventListener("change", queueCutReview);
+$("#cut-pick-part").addEventListener("click", () => viewer.pickCutPart(!cutPicking));
 $("#cut-apply").addEventListener("click", () => {
   const s = viewer.getSection();
-  if (!s || !summary) return;
+  if (!s || !summary || cutDrawing || !cutValidated) return;
   const both = keepOther.checked;
   measured = [];
-  void apply(() => api.cutModel(s.axis, s.t, !s.flip, both), () => {
+  void apply(() => api.cutModel(s.point, sectionNormal(s), !s.flip, both, $<HTMLInputElement>("#cut-lay").checked, s.selected), () => {
     setSection(null);
     setTool("orbit");
     toast(t(both ? "cut.doneBoth" : "cut.doneKept"), "ok", { label: t("cut.undo"), run: undoCut });
@@ -382,6 +475,9 @@ function renderImportWarnings(s: Summary) {
 
 function render(s: Summary) {
   summary = s;
+  viewer.setCutParts(s.parts);
+  cutPanel.update(s);
+  queueCutReview();
   printability.update(s);
   bind("fileName", s.fileName);
   bind("fileMeta", t("file.meta", { mb: nf(s.fileSize / 1048576, 1), count: s.materials.length, n: s.materials.length }));
@@ -1460,6 +1556,10 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
+  else if (e.key === "Escape" && viewer.getSection()) {
+    setSection(null);
+    setTool("orbit");
+  }
   else if (e.key === "Escape" && measured.length) {
     measured = [];
     syncMeasure();
@@ -1564,6 +1664,8 @@ window.addEventListener("keydown", (e) => {
 
 /** Everything drawn from code, worded again. */
 onLangChange(() => {
+  syncCutDrawing();
+  showCutDimensions();
   langSelect.value = currentLang();
   printerPicker.relabel(printerTexts());
   basePicker.relabel(baseTexts());

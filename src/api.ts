@@ -100,7 +100,7 @@ export interface Summary {
   fileName: string;
   fileSize: number;
   importWarnings: { code: string; detail: string }[];
-  parts: { name: string; triangles: number }[];
+  parts: { name: string; triangles: number; object: number; previewStart: number; previewEnd: number }[];
   materials: Material[];
   slots: Slot[];
   sourceTriangles: number;
@@ -121,7 +121,7 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | "fix" | null;
+  undoLabel: "stroke" | "merge" | "fix" | "cut" | null;
   paintedTriangles: number;
 }
 
@@ -173,8 +173,11 @@ export const api = {
   /** Turns the model about X (0), Y (1) or Z (2); it lands back on the plate. */
   rotate: (axis: number, degrees: number) => invoke<TurnResult>("rotate", { axis, degrees }),
   resetRotation: () => invoke<TurnResult>("reset_rotation"),
-  /** Cuts `t` of the way along `axis`, keeping the low or high side, and the other as its own object if asked. */
-  cutModel: (axis: number, t: number, keepLow: boolean, keepOther: boolean) => invoke<Summary>("cut_model", { axis, t, keepLow, keepOther }),
+  /** The exact preview plane; its coordinates include stretch, before uniform scale. */
+  cutModel: (point: Vec3, normal: Vec3, keepLow: boolean, keepOther: boolean, layOnCut: boolean, selected: number[]) =>
+    invoke<Summary>("cut_model", { point, normal, keepLow, keepOther, layOnCut, selected }),
+  previewCut: (point: Vec3, normal: Vec3, keepLow: boolean, keepOther: boolean, layOnCut: boolean, selected: number[]) =>
+    invoke<number>("preview_cut", { point, normal, keepLow, keepOther, layOnCut, selected }),
   undoCut: () => invoke<Summary>("undo_cut"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),

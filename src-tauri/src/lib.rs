@@ -40,6 +40,7 @@ pub fn run() {
             commands::rotate,
             commands::reset_rotation,
             commands::cut_model,
+            commands::preview_cut,
             commands::undo_cut,
             commands::set_mesh_ops,
             commands::analyze_printability,

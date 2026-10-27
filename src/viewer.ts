@@ -5,7 +5,9 @@
 // labels over the canvas in step with the camera.
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { Hit, PaintResult, Plate, PreviewMesh, Vec3 } from "./api";
+import type { Hit, PaintResult, Plate, PreviewMesh, Summary, Vec3 } from "./api";
+import { SectionLine, planeFromStroke, strokeCrossesMesh, type LineError } from "./section-line";
+import { CutPreview, type CutExtent } from "./cut-preview";
 
 // Colours are shown exactly as the filament swatches, without tone mapping.
 THREE.ColorManagement.enabled = false;
@@ -14,8 +16,11 @@ export type View = "filament" | "texture";
 export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section";
 export type Axis = 0 | 1 | 2;
 
-/** A cut across the model: what lies past `t` (0 at the low end of the axis, 1 at the high) is hidden; flipped, what lies before. */
-export interface Section { axis: Axis; t: number; flip: boolean }
+/** Plane point in preview units; XYZ Euler angles in degrees; negative side kept unless flipped. */
+export interface Section { point: Vec3; rotation: Vec3; flip: boolean; selected: number[] }
+export function sectionNormal(s: Section): Vec3 {
+  return new THREE.Vector3(0, 0, 1).applyEuler(new THREE.Euler(...s.rotation.map(THREE.MathUtils.degToRad) as Vec3, "XYZ")).toArray() as Vec3;
+}
 
 export interface BrushHandlers {
   pick(origin: Vec3, dir: Vec3): Promise<Hit | null>;
@@ -33,12 +38,16 @@ export interface BrushHandlers {
   rotate(axis: Axis, degrees: number): Promise<boolean>;
   /** The cut was slid in the view. */
   section(s: Section): void;
+  sectionLine(active: boolean, error?: LineError): void;
+  cutChoice(both: boolean): void;
+  cutPicking(active: boolean): void;
+  cutDimensions(low: Vec3 | null, high: Vec3 | null): void;
 }
 
 /** A size handle: one axis, or all three from the corner. */
 type Grip = Axis | "all";
 /** A move handle: along X or Y, or anywhere on the plate. */
-type Slide = 0 | 1 | "plane";
+type Slide = Axis | "plane";
 
 /** Turns snap to this many degrees unless Shift is held. */
 const TURN_STEP = 15;
@@ -104,13 +113,23 @@ export class Viewer {
   private moveDrag: { slide: Slide; base: THREE.Vector3; from: THREE.Vector3; d: THREE.Vector3; startMm: [number, number]; mm: [number, number] } | null = null;
   private rings = new THREE.Group();
   private hoverRing: Axis | null = null;
-  private turnDrag: { axis: Axis; centre: THREE.Vector3; sign: number; last: number; total: number; degrees: number } | null = null;
+  private turnDrag: { axis: Axis; centre: THREE.Vector3; sign: number; last: number; total: number; degrees: number; section: Section | null } | null = null;
+  private planeDrag: { slide: Slide; base: THREE.Vector3; from: THREE.Vector3; section: Section } | null = null;
   private section: Section | null = null;
   private clip = new THREE.Plane();
   private cut = new THREE.Group();
-  private cutGrip = new THREE.Group();
-  private hoverCut = false;
-  private cutDrag: { pivot: THREE.Vector3; dir: THREE.Vector3; from: number; t: number } | null = null;
+  private cutLabelAnchor = new THREE.Object3D();
+  private cutParts: Summary["parts"] = [];
+  private sectionLine: SectionLine;
+  private lineStart: Section | null = null;
+  private cutGrid: THREE.LineSegments;
+  private cutSnap = 15;
+  private cutPreview: CutPreview;
+  private cutExtent: CutExtent | null = null;
+  private cutDirty = false;
+  private keepBoth = false;
+  private pickingPart = false;
+  private halfLabels: HTMLButtonElement[];
   private placeLabel: HTMLDivElement;
   private settling = false;
   private bed = new THREE.Group();
@@ -136,7 +155,34 @@ export class Viewer {
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.12;
-    this.controls.addEventListener("change", () => this.requestRender());
+    this.controls.addEventListener("change", () => { this.sectionLine?.clear(); this.requestRender(); });
+    this.cutPreview = new CutPreview(cssColor("--color-accent-deep"));
+    this.scene.add(this.cutPreview.group);
+    const choices = Object.assign(document.createElement("div"), { className: "cut-choice-overlay" });
+    this.halfLabels = [false, true].map((flip) => {
+      const button = Object.assign(document.createElement("button"), { type: "button", className: "cut-half", hidden: true, textContent: flip ? "B" : "A" });
+      button.addEventListener("click", () => this.chooseCutSide(flip));
+      choices.append(button);
+      return button;
+    });
+    canvas.after(choices);
+    this.sectionLine = new SectionLine(canvas, {
+      begin: () => { this.lineStart = this.getSection(); },
+      state: (active) => {
+        this.controls.enableDamping = !active;
+        this.controls.update();
+        this.controls.enabled = !active;
+        this.canvas.style.cursor = active ? "crosshair" : "";
+        this.showHandles();
+        this.handlers.sectionLine(active);
+      },
+      cancel: () => {
+        this.setSection(this.lineStart, true);
+        if (this.lineStart) this.handlers.section(this.lineStart);
+      },
+      preview: (a, b) => { this.updateLinePlane(a, b, false); },
+      finish: (a, b) => this.updateLinePlane(a, b, true),
+    });
 
     this.scene.add(this.findings);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f86, 1.6));
@@ -221,11 +267,11 @@ export class Viewer {
     this.bed.visible = false;
     this.scene.add(this.bed);
 
-    // Move handles at the base centre: an arrow per plate axis and a square for both.
+    // One shared handle design for the model and the cutting plane.
     const handleMat = (name: string) =>
       new THREE.MeshBasicMaterial({ color: cssColor(name), depthTest: false, transparent: true, opacity: 0.85, side: THREE.DoubleSide });
     const unseen = new THREE.MeshBasicMaterial({ visible: false });
-    ([0, 1] as Axis[]).forEach((axis) => {
+    ([0, 1, 2] as Axis[]).forEach((axis) => {
       const arrow = new THREE.Group();
       const mat = handleMat(AXIS_COLOURS[axis]);
       const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.78, 12), mat);
@@ -239,6 +285,7 @@ export class Viewer {
       arm.add(shaft, tip, pick);
       // The cylinders stand on Y; for X they lie down.
       if (axis === 0) arm.rotation.z = -Math.PI / 2;
+      if (axis === 2) arm.rotation.x = Math.PI / 2;
       arrow.add(arm);
       arrow.userData.slide = axis;
       this.slides.add(arrow);
@@ -273,27 +320,26 @@ export class Viewer {
     this.rings.visible = false;
     this.scene.add(this.rings);
 
-    // The cut: a tinted sheet where it crosses the model, its outline, and a double arrow to slide it.
+    // The plane only draws its sheet and grid; it uses the shared arrows and rings.
     const sheet = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.14, depthWrite: false, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: cssColor("--color-accent-soft"), transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide }),
     );
     const outline = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1)),
-      new THREE.LineBasicMaterial({ depthTest: false, transparent: true, opacity: 0.9 }),
+      new THREE.LineBasicMaterial({ color: cssColor("--color-accent-deep"), depthTest: false, transparent: true, opacity: 0.9 }),
     );
     sheet.renderOrder = 18;
     outline.renderOrder = 19;
-    const gripMat = handleMat("--axis-z");
-    [1, -1].forEach((side) => {
-      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.5, 20), gripMat);
-      cone.position.z = side * 0.55;
-      cone.rotation.x = side * Math.PI / 2;
-      this.cutGrip.add(cone);
-    });
-    this.cutGrip.add(new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 12), gripMat), new THREE.Mesh(new THREE.SphereGeometry(1, 8, 6), unseen));
-    this.cutGrip.traverse((o) => (o.renderOrder = 26));
-    this.cut.add(sheet, outline, this.cutGrip);
+    this.cut.add(sheet, outline, this.cutLabelAnchor);
+    const gridPoints: THREE.Vector3[] = [];
+    for (const d of [-0.25, 0, 0.25]) {
+      gridPoints.push(new THREE.Vector3(d, -0.5, 0), new THREE.Vector3(d, 0.5, 0), new THREE.Vector3(-0.5, d, 0), new THREE.Vector3(0.5, d, 0));
+    }
+    this.cutGrid = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(gridPoints),
+      new THREE.LineBasicMaterial({ color: cssColor("--color-accent-deep"), transparent: true, opacity: 0.25, depthTest: false }));
+    this.cutGrid.renderOrder = 19;
+    this.cut.add(this.cutGrid);
     this.cut.visible = false;
     this.scene.add(this.cut);
 
@@ -320,7 +366,10 @@ export class Viewer {
     window.addEventListener("keyup", onShift);
     // Esc while moving or turning puts the model back; nothing else hears it.
     window.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || !(this.moveDrag || this.turnDrag)) return;
+      if (e.key === "Escape" && this.pickingPart) {
+        e.preventDefault(); e.stopImmediatePropagation(); this.pickCutPart(false); return;
+      }
+      if (e.key !== "Escape" || !(this.moveDrag || this.turnDrag || this.planeDrag)) return;
       e.stopImmediatePropagation();
       this.cancelPlace();
     }, { capture: true });
@@ -330,6 +379,11 @@ export class Viewer {
     canvas.addEventListener("pointerdown", (e) => this.onDown(e));
     canvas.addEventListener("pointerdown", (e) => this.grab(e), { capture: true });
     window.addEventListener("pointerup", (e) => this.onUp(e));
+    canvas.addEventListener("pointercancel", () => this.cancelPlace());
+    canvas.addEventListener("lostpointercapture", () => {
+      if (this.moveDrag || this.turnDrag || this.planeDrag) this.cancelPlace();
+    });
+    window.addEventListener("blur", () => this.cancelPlace());
     canvas.addEventListener("pointerleave", () => {
       this.cursor.visible = false;
       this.setHover(null);
@@ -340,6 +394,7 @@ export class Viewer {
 
   private loop = () => {
     requestAnimationFrame(this.loop);
+    if (this.cutDirty) this.updateCutPreview();
     // Damping needs a few frames after the user lets go.
     if (this.controls.update() || this.frame > 0) {
       this.renderer.render(this.scene, this.camera);
@@ -353,6 +408,8 @@ export class Viewer {
   }
 
   private resize() {
+    this.sectionLine.cancel();
+    this.sectionLine.clear();
     const { clientWidth: w, clientHeight: h } = this.canvas;
     if (!w || !h) return;
     this.renderer.setSize(w, h, false);
@@ -363,10 +420,16 @@ export class Viewer {
 
   /** Replaces the mesh. Keeps the camera unless `frame` is set. */
   load(data: PreviewMesh, frame: boolean) {
+    this.sectionLine.cancel();
+    this.sectionLine.clear();
     this.data = data;
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
+      this.mesh.traverse((o) => {
+        const materials = (o as THREE.Mesh).material;
+        if (materials) for (const m of [materials].flat()) m.dispose();
+      });
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(data.positions, 3));
@@ -379,6 +442,7 @@ export class Viewer {
     // Where the cut opens the model, its inner faces show flat, as a section's face.
     const inside = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: cssColor("--color-ink-2"), side: THREE.BackSide }));
     this.mesh.add(inside);
+    this.cutPreview.attach(geo);
     this.scene.add(this.mesh);
     this.recolorAll();
     this.reshaped();
@@ -392,6 +456,7 @@ export class Viewer {
    */
   moveMesh(matrix: number[][], shift: Vec3) {
     if (!this.mesh || !this.data) return;
+    this.cutPreview.invalidate();
     const p = this.data.positions;
     for (let i = 0; i < p.length; i += 3) {
       const [x, y, z] = [p[i], p[i + 1], p[i + 2]];
@@ -417,7 +482,7 @@ export class Viewer {
     this.mesh!.position.set(0, 0, 0);
     this.mesh!.scale.set(1, 1, 1);
     // A drag cut short by the new mesh must not leave the orbit switched off.
-    if (this.drag || this.moveDrag || this.turnDrag || this.cutDrag) {
+    if (this.drag || this.moveDrag || this.turnDrag || this.planeDrag) {
       if (this.moveDrag) this.unslide(this.moveDrag.d);
       this.controls.enabled = true;
       this.canvas.style.cursor = "";
@@ -425,7 +490,7 @@ export class Viewer {
     this.drag = null;
     this.moveDrag = null;
     this.turnDrag = null;
-    this.cutDrag = null;
+    this.planeDrag = null;
     this.placeGrips();
     this.sizeBox.visible = this.tool === "size";
     this.grips.visible = this.tool === "size";
@@ -441,6 +506,7 @@ export class Viewer {
   }
 
   frameAll() {
+    this.sectionLine.cancel();
     const s = this.mesh?.geometry.boundingSphere;
     if (!s) return;
     const dist = s.radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2)) * 1.1;
@@ -468,9 +534,11 @@ export class Viewer {
   }
 
   setTool(t: Tool) {
+    this.sectionLine.cancel();
+    this.sectionLine.clear();
+    if (this.pickingPart) this.pickCutPart(false);
     // A tool picked from the keyboard mid-drag ends the drag first.
-    if (this.moveDrag || this.turnDrag) this.cancelPlace();
-    if (this.cutDrag) this.releaseCut();
+    if (this.moveDrag || this.turnDrag || this.planeDrag) this.cancelPlace();
     this.tool = t;
     // In brush mode the left button paints; the right button orbits and the middle pans.
     this.controls.mouseButtons = t === "brush"
@@ -486,19 +554,19 @@ export class Viewer {
     this.heightLine.visible = false;
     this.hoverSlide = null;
     this.hoverRing = null;
-    this.hoverCut = false;
     // The cut starts across the middle the first time its tool is picked; it stays after.
-    if (t === "section" && !this.section) this.setSection({ axis: 2, t: 0.5, flip: false });
+    if (t === "section" && !this.section) this.setSection(this.defaultSection());
     this.showHandles();
+    this.cutDirty = true;
     // Moving needs the plate to move against.
     this.buildBed();
   }
 
   private showHandles() {
     const on = this.mesh !== null;
-    this.slides.visible = on && this.tool === "move";
-    this.rings.visible = on && this.tool === "rotate";
-    this.cut.visible = on && this.tool === "section" && this.section !== null;
+    this.cut.visible = on && this.tool === "section" && this.section !== null && !this.sectionLine?.active;
+    this.slides.visible = on && (this.tool === "move" || this.cut.visible);
+    this.rings.visible = on && (this.tool === "rotate" || this.cut.visible);
     this.placeHandles();
     this.requestRender();
   }
@@ -572,10 +640,12 @@ export class Viewer {
   }
 
   private async onMove(e: PointerEvent) {
+    if (this.sectionLine.active) return;
+    if (this.pickingPart) { this.canvas.style.cursor = "crosshair"; return; }
     if (this.drag) return this.dragTo(e);
     if (this.moveDrag) return this.slideTo(e);
     if (this.turnDrag) return this.turnTo(e);
-    if (this.cutDrag) return this.cutTo(e);
+    if (this.planeDrag) return this.slidePlaneTo(e);
     if ((this.tool === "move" || this.tool === "rotate" || this.tool === "section") && e.buttons === 0) {
       this.rayFrom(e);
       let over = false;
@@ -588,8 +658,9 @@ export class Viewer {
         over = ring !== null;
         if (ring !== this.hoverRing) this.hoverRing = ring;
       } else {
-        over = this.cutAt();
-        this.hoverCut = over;
+        this.hoverSlide = this.slideAt();
+        this.hoverRing = this.hoverSlide === null ? this.ringAt() : null;
+        over = this.hoverSlide !== null || this.hoverRing !== null;
       }
       this.canvas.style.cursor = over ? "grab" : "";
       this.placeHandles();
@@ -698,11 +769,18 @@ export class Viewer {
 
   /** Starts dragging a grip; the model scales about its base centre, as the size does. */
   private grab(e: PointerEvent) {
+    if (this.sectionLine.active) return;
+    if (this.tool === "section" && this.pickingPart && e.button === 0) {
+      e.stopImmediatePropagation(); e.preventDefault();
+      this.down = { x: e.clientX, y: e.clientY };
+      this.canvas.setPointerCapture(e.pointerId);
+      return;
+    }
     // While the last move, turn or resize is still being applied, the pointer orbits.
-    if (e.button !== 0 || !this.mesh || this.settling) return;
+    if (e.button !== 0 || !this.mesh || this.settling || this.drag || this.moveDrag || this.turnDrag || this.planeDrag) return;
     if (this.tool === "move" || this.tool === "rotate" || this.tool === "section") {
       this.rayFrom(e);
-      const started = this.tool === "move" ? this.grabSlide() : this.tool === "rotate" ? this.grabRing(e) : this.grabCut();
+      const started = this.tool === "move" ? this.grabSlide() : this.tool === "rotate" ? this.grabRing(e) : this.grabPlaneSlide() || this.grabRing(e);
       if (!started) return;
       e.stopImmediatePropagation();
       e.preventDefault();
@@ -788,7 +866,7 @@ export class Viewer {
 
   private slideAt(): Slide | null {
     if (!this.slides.visible) return null;
-    let o: THREE.Object3D | null = this.ray.intersectObjects(this.slides.children, true)[0]?.object ?? null;
+    let o: THREE.Object3D | null = this.ray.intersectObjects(this.slides.children.filter((h) => h.visible), true)[0]?.object ?? null;
     while (o && o.userData.slide === undefined) o = o.parent;
     return o ? (o.userData.slide as Slide) : null;
   }
@@ -890,11 +968,12 @@ export class Viewer {
 
   private grabRing(e: PointerEvent): boolean {
     const axis = this.ringAt();
-    const centre = this.mesh?.geometry.boundingBox?.getCenter(new THREE.Vector3());
+    const section = this.tool === "section" ? this.getSection() : null;
+    const centre = section ? new THREE.Vector3(...section.point) : this.mesh?.geometry.boundingBox?.getCenter(new THREE.Vector3());
     if (axis === null || !centre) return false;
     // Counter-clockwise on screen is a positive turn when the axis points at the camera.
     const sign = this.camera.position.getComponent(axis) - centre.getComponent(axis) >= 0 ? 1 : -1;
-    this.turnDrag = { axis, centre, sign, last: this.screenAngle(e, centre), total: 0, degrees: 0 };
+    this.turnDrag = { axis, centre, sign, last: this.screenAngle(e, centre), total: 0, degrees: 0, section };
     return true;
   }
 
@@ -905,9 +984,17 @@ export class Viewer {
     r.total += Math.atan2(Math.sin(step), Math.cos(step));
     r.last = a;
     const raw = THREE.MathUtils.radToDeg(r.total * r.sign);
-    r.degrees = e.shiftKey ? Math.round(raw) : Math.round(raw / TURN_STEP) * TURN_STEP;
+    const snap = e.shiftKey ? 0.1 : r.section ? this.cutSnap : TURN_STEP;
+    r.degrees = Math.round(raw / snap) * snap;
     // Round the centre: x' = c + q (x - c).
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3().setComponent(r.axis, 1), THREE.MathUtils.degToRad(r.degrees));
+    if (r.section) {
+      const start = new THREE.Quaternion().setFromEuler(new THREE.Euler(...r.section.rotation.map(THREE.MathUtils.degToRad) as Vec3, "XYZ"));
+      const rotation = new THREE.Euler().setFromQuaternion(q.multiply(start), "XYZ");
+      this.setSection({ ...r.section, rotation: [rotation.x, rotation.y, rotation.z].map(THREE.MathUtils.radToDeg) as Vec3 });
+      this.handlers.section(this.section!);
+      return;
+    }
     this.mesh!.quaternion.copy(q);
     this.mesh!.position.copy(r.centre).sub(r.centre.clone().applyQuaternion(q));
     this.requestRender();
@@ -918,6 +1005,11 @@ export class Viewer {
     this.turnDrag = null;
     this.controls.enabled = true;
     this.canvas.style.cursor = "";
+    if (r.section) {
+      this.placeHandles();
+      this.requestRender();
+      return;
+    }
     // Accepted, the turned mesh arrives through load.
     if (r.degrees % 360 === 0 || !(await this.settle(this.handlers.rotate(r.axis, r.degrees)))) this.unturn();
   }
@@ -930,52 +1022,184 @@ export class Viewer {
 
   /** Esc during a move or a turn: everything back where it was. */
   private cancelPlace() {
+    if (!this.moveDrag && !this.turnDrag && !this.planeDrag) return;
+    const section = this.planeDrag?.section ?? this.turnDrag?.section;
     if (this.moveDrag) this.unslide(this.moveDrag.d);
-    if (this.turnDrag) this.unturn();
+    if (this.turnDrag && !this.turnDrag.section) this.unturn();
     this.moveDrag = null;
     this.turnDrag = null;
+    this.planeDrag = null;
+    if (section) { this.setSection(section); this.handlers.section(section); }
     this.controls.enabled = true;
     this.canvas.style.cursor = "";
   }
 
   // ---- the section cut ------------------------------------------------------
 
-  /** Cuts the model across one axis, or with null shows it whole again. */
-  setSection(s: Section | null) {
-    const axisChanges = s?.axis !== this.section?.axis;
-    this.section = s && { ...s, t: THREE.MathUtils.clamp(s.t, 0, 1) };
-    if (s && axisChanges) {
-      const tint = cssColor(AXIS_COLOURS[s.axis]);
-      this.cut.traverse((o) => {
-        const m = (o as THREE.Mesh).material as THREE.MeshBasicMaterial | undefined;
-        if (m && m.visible) m.color.copy(tint);
-      });
+  private updateLinePlane(a: { x: number; y: number }, b: { x: number; y: number }, validate: boolean): boolean {
+    const box = this.mesh?.geometry.boundingBox;
+    if (!box || !this.data) return false;
+    const rect = this.canvas.getBoundingClientRect();
+    const plane = planeFromStroke(a, b, rect, this.camera, box.getCenter(new THREE.Vector3()));
+    const selected = this.lineStart?.selected ?? [];
+    const ranges = this.cutParts.length ? this.cutParts.filter((_, i) => !selected.length || selected.includes(i))
+      : [{ previewStart: 0, previewEnd: this.data.labels.length }];
+    const error = typeof plane === "string" ? plane
+      : validate && !strokeCrossesMesh(a, b, rect, this.camera, plane, this.data.positions, ranges) ? "misses" : null;
+    if (error || typeof plane === "string") {
+      if (validate) this.handlers.sectionLine(true, error ?? "misses");
+      return false;
     }
+    this.setSection({ ...(this.lineStart ?? this.defaultSection()), ...plane });
+    this.handlers.section(this.section!);
+    return true;
+  }
+
+  private updateCutPreview() {
+    this.cutDirty = false;
+    const section = this.section;
+    if (!section || !this.data || this.tool !== "section") {
+      this.cutExtent = null;
+      this.cutPreview.show(null, false, null, false);
+      this.halfLabels.forEach((button) => button.hidden = true);
+      return;
+    }
+    const ranges = this.cutParts.length ? this.cutParts.filter((_, i) => !section.selected.length || section.selected.includes(i))
+      : [{ previewStart: 0, previewEnd: this.data.labels.length }];
+    this.cutPreview.show(this.clip, this.keepBoth, null, false);
+    this.cutExtent = null;
+    this.cutPreview.calculate(this.data.positions, ranges, section.point, sectionNormal(section), (extent) => {
+      this.cutExtent = extent;
+      this.cutPreview.show(this.clip, this.keepBoth, extent, section.selected.length > 0);
+      const size = (box: THREE.Box3) => box.isEmpty() ? null : box.getSize(new THREE.Vector3()).toArray() as Vec3;
+      this.handlers.cutDimensions(size(extent.low), size(extent.high));
+      this.requestRender();
+    });
+    this.requestRender();
+  }
+
+  setCutBoth(both: boolean) {
+    this.keepBoth = both;
+    this.cutDirty = true;
+    this.requestRender();
+  }
+
+  chooseCutSide(flip: boolean) {
+    if (!this.section || this.sectionLine.active) return;
+    this.setCutBoth(false);
+    this.handlers.cutChoice(false);
+    this.setSection({ ...this.section, flip }, true);
+    this.handlers.section(this.section!);
+  }
+
+  pickCutPart(active: boolean) {
+    this.sectionLine.cancel();
+    this.sectionLine.clear();
+    this.pickingPart = active;
+    this.controls.mouseButtons = active
+      ? { LEFT: null as unknown as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }
+      : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    this.canvas.style.cursor = active ? "crosshair" : "";
+    this.handlers.cutPicking(active);
+  }
+
+  drawSectionLine() {
+    if (this.sectionLine.active) return this.sectionLine.cancel();
+    if (!this.mesh || this.settling) return;
+    if (this.tool !== "section") this.setTool("section");
+    if (this.pickingPart) this.pickCutPart(false);
+    this.cancelPlace();
+    this.controls.update();
+    this.lineStart = this.getSection();
+    this.sectionLine.start();
+  }
+
+  cancelSectionLine() { this.sectionLine.cancel(); }
+
+  defaultSection(axis: Axis = 2): Section {
+    return { point: (this.sectionBox()?.getCenter(new THREE.Vector3()).toArray() ?? [0, 0, 0]) as Vec3,
+      rotation: axis === 0 ? [0, 90, 0] : axis === 1 ? [-90, 0, 0] : [0, 0, 0], flip: false, selected: [] };
+  }
+
+  setCutSnap(degrees: number) {
+    if (Number.isFinite(degrees) && degrees > 0) {
+      this.cutSnap = degrees;
+    }
+  }
+
+  setCutParts(parts: Summary["parts"]) {
+    this.cutParts = parts;
+    if (parts[parts.length - 1]?.previewEnd === this.data?.labels.length) this.applySection();
+  }
+
+  private sectionBox(): THREE.Box3 | null {
+    if (!this.data || !this.section?.selected.length) return this.mesh?.geometry.boundingBox?.clone() ?? null;
+    const box = new THREE.Box3();
+    for (const i of this.section.selected) {
+      const part = this.cutParts[i];
+      if (!part) continue;
+      for (let v = part.previewStart * 9; v < part.previewEnd * 9; v += 3) box.expandByPoint(new THREE.Vector3().fromArray(this.data.positions, v));
+    }
+    return box.isEmpty() ? null : box;
+  }
+
+  /** The projected bounds along the normal; used by the slider and its drag. */
+  sectionRange(s: Section): [number, number] {
+    const box = this.sectionBox();
+    if (!box) return [0, 1];
+    const n = new THREE.Vector3(...sectionNormal(s));
+    const c = box.getCenter(new THREE.Vector3()).dot(n);
+    const d = box.getSize(new THREE.Vector3());
+    const radius = (Math.abs(n.x) * d.x + Math.abs(n.y) * d.y + Math.abs(n.z) * d.z) / 2;
+    return [c - radius, c + radius];
+  }
+
+  /** Uses the exact same point and normal that are sent to Rust. */
+  setSection(s: Section | null, preserveStroke = false) {
+    if (!preserveStroke && !this.sectionLine?.active) this.sectionLine?.clear();
+    this.section = s && { ...s, point: [...s.point], rotation: [...s.rotation], selected: [...s.selected] };
     this.applySection();
     this.showHandles();
   }
 
   getSection(): Section | null {
-    return this.section;
+    return this.section && { ...this.section, point: [...this.section.point], rotation: [...this.section.rotation], selected: [...this.section.selected] };
   }
 
   /** Puts the clipping plane where the section says, on the model as it is now. */
   private applySection() {
+    this.cutDirty = true;
     const box = this.mesh?.geometry.boundingBox;
     const s = this.section;
     if (s && box) {
-      const v = THREE.MathUtils.lerp(box.min.getComponent(s.axis), box.max.getComponent(s.axis), s.t);
-      // Kept where the normal's side is: below the cut, or above it flipped.
-      this.clip.set(new THREE.Vector3().setComponent(s.axis, s.flip ? 1 : -1), s.flip ? -v : v);
+      const n = new THREE.Vector3(...sectionNormal(s)).multiplyScalar(s.flip ? 1 : -1);
+      this.clip.setFromNormalAndCoplanarPoint(n, new THREE.Vector3(...s.point));
     }
     const planes = s && box ? [this.clip] : [];
     if (this.mesh) {
       // Uncut, the inner faces are never seen: not drawn at all.
       this.mesh.children[0].visible = planes.length > 0;
-      for (const m of [this.mesh.material, (this.mesh.children[0] as THREE.Mesh).material] as THREE.Material[]) {
-        if ((m.clippingPlanes?.length ?? 0) !== planes.length) m.needsUpdate = true;
-        m.clippingPlanes = planes;
+      // Geometry groups apply clipping only to selected parts, retaining the rest.
+      const geo = this.mesh.geometry;
+      geo.clearGroups();
+      if (!Array.isArray(this.mesh.material)) {
+        const surface = this.mesh.material;
+        this.mesh.material = [surface, surface.clone()];
+        const inside = this.mesh.children[0] as THREE.Mesh;
+        const material = inside.material as THREE.Material;
+        inside.material = [material, material.clone()];
       }
+      const insideMaterials = (this.mesh.children[0] as THREE.Mesh).material as THREE.Material[];
+      for (const [i, material] of [...this.mesh.material, ...insideMaterials].entries()) {
+        const clipping = i % 2 === 0 ? planes : [];
+        if ((material.clippingPlanes?.length ?? 0) !== clipping.length) material.needsUpdate = true;
+        material.clippingPlanes = clipping;
+      }
+      insideMaterials[1].visible = false;
+      if (this.cutParts.length) {
+        this.cutParts.forEach((part, i) => geo.addGroup(part.previewStart * 3, (part.previewEnd - part.previewStart) * 3,
+          s && s.selected.length && !s.selected.includes(i) ? 1 : 0));
+      } else geo.addGroup(0, geo.getAttribute("position").count, 0);
     }
     this.requestRender();
   }
@@ -988,6 +1212,15 @@ export class Viewer {
   /** The ray from where it enters what the cut keeps, so picking skips what is hidden; null when it never enters. */
   private clipRay(o: Vec3, d: Vec3): Vec3 | null {
     if (!this.section) return o;
+    if (this.section.selected.length && this.mesh) {
+      // An unselected piece is fully visible, including on the discarded side.
+      this.ray.set(new THREE.Vector3(...o), new THREE.Vector3(...d));
+      const hit = this.ray.intersectObject(this.mesh, true).find((h) => {
+        const part = this.cutParts.findIndex((p) => h.faceIndex != null && h.faceIndex >= p.previewStart && h.faceIndex < p.previewEnd);
+        return !this.section!.selected.includes(part) || this.kept(h.point);
+      });
+      return hit ? hit.point.addScaledVector(new THREE.Vector3(...d), -1e-5).toArray() as Vec3 : null;
+    }
     const origin = new THREE.Vector3(...o);
     const dist = this.clip.distanceToPoint(origin);
     if (dist >= 0) return o;
@@ -1001,7 +1234,7 @@ export class Viewer {
     const from = this.clipRay(o, d);
     if (!from) return null;
     const hit = await this.handlers.pick(from, d);
-    return hit && this.kept(new THREE.Vector3(...hit.point)) ? hit : null;
+    return hit && (this.section?.selected.length || this.kept(new THREE.Vector3(...hit.point))) ? hit : null;
   }
 
   /** Paints only where the cut keeps the model. */
@@ -1011,38 +1244,39 @@ export class Viewer {
     return this.handlers.paint(from, d);
   }
 
-  private cutAt(): boolean {
-    return this.cut.visible && this.ray.intersectObject(this.cutGrip, true).length > 0;
-  }
-
-  private grabCut(): boolean {
-    if (!this.section || !this.cutAt()) return false;
-    const pivot = this.cutGrip.getWorldPosition(new THREE.Vector3());
-    const dir = new THREE.Vector3().setComponent(this.section.axis, 1);
-    const from = this.along(pivot, dir);
-    if (from === null) return false;
-    this.cutDrag = { pivot, dir, from, t: this.section.t };
+  private grabPlaneSlide(): boolean {
+    const section = this.getSection();
+    const slide = this.slideAt();
+    if (!section || slide === null) return false;
+    const base = new THREE.Vector3(...section.point);
+    const from = this.slidePoint(slide, base);
+    if (!from) return false;
+    this.planeDrag = { slide, base, from, section };
     return true;
   }
 
-  private cutTo(e: PointerEvent) {
-    const c = this.cutDrag!;
-    const s = this.section;
-    const box = this.mesh?.geometry.boundingBox;
-    if (!s || !box) return;
+  private slidePlaneTo(e: PointerEvent) {
+    const drag = this.planeDrag!;
     this.rayFrom(e);
-    const u = this.along(c.pivot, c.dir);
-    if (u === null) return;
-    const span = Math.max(1e-6, box.max.getComponent(s.axis) - box.min.getComponent(s.axis));
-    this.section = { ...s, t: THREE.MathUtils.clamp(c.t + (u - c.from) / span, 0, 1) };
-    this.applySection();
-    this.handlers.section(this.section);
+    const point = this.slidePoint(drag.slide, drag.base);
+    if (!point) return;
+    const delta = point.sub(drag.from);
+    const mm = this.mmPerUnit();
+    const step = e.shiftKey ? 0.01 : 0.1;
+    const position = drag.section.point.map((v, axis) => {
+      if (drag.slide === "plane" ? axis === 2 : axis !== drag.slide) return v;
+      return Math.round((v + delta.getComponent(axis)) * mm / step) * step / mm;
+    }) as Vec3;
+    this.setSection({ ...drag.section, point: position });
+    this.handlers.section(this.section!);
   }
 
-  private releaseCut() {
-    this.cutDrag = null;
+  private releasePlaneSlide() {
+    this.planeDrag = null;
     this.controls.enabled = true;
     this.canvas.style.cursor = "";
+    this.placeHandles();
+    this.requestRender();
   }
 
   // ---- handles --------------------------------------------------------------
@@ -1052,12 +1286,15 @@ export class Viewer {
     const box = this.mesh?.geometry.boundingBox;
     if (!box) return;
     const c = box.getCenter(new THREE.Vector3());
+    const isCut = this.tool === "section" && this.section !== null;
+    const centre = isCut ? new THREE.Vector3(...this.section!.point) : c;
     if (this.slides.visible) {
-      const base = c.clone().setZ(box.min.z);
+      const base = isCut ? centre : c.clone().setZ(box.min.z);
       this.slides.position.copy(base);
       this.slides.scale.setScalar(80 * this.unitsPerPixel(base));
-      const active = this.moveDrag?.slide ?? this.hoverSlide;
+      const active = this.planeDrag?.slide ?? this.moveDrag?.slide ?? this.hoverSlide;
       this.slides.children.forEach((h) => {
+        h.visible = h.userData.slide !== 2 || isCut;
         const hot = h.userData.slide === active;
         h.scale.setScalar(hot ? 1.12 : 1);
         h.traverse((o) => {
@@ -1067,15 +1304,15 @@ export class Viewer {
       });
     }
     if (this.rings.visible) {
-      this.rings.position.copy(c);
-      const radius = (this.mesh!.geometry.boundingSphere?.radius ?? 50) * 1.08;
-      const upp = this.unitsPerPixel(c);
+      this.rings.position.copy(centre);
+      const upp = this.unitsPerPixel(centre);
+      const radius = 105 * upp;
       const active = this.turnDrag?.axis ?? this.hoverRing;
       this.rings.children.forEach((ring) => {
         const hot = ring.userData.ring === active;
         const tube = (hot ? 3.5 : 2) * upp;
         // Rebuilt only when the zoom or the hover changes its width enough to see.
-        if (ring.userData.radius !== radius || Math.abs(tube - (ring.userData.tube ?? 0)) > tube * 0.08) {
+        if (Math.abs(radius - (ring.userData.radius ?? 0)) > radius * 0.025 || Math.abs(tube - (ring.userData.tube ?? 0)) > tube * 0.08) {
           const [shown, pick] = ring.children as THREE.Mesh[];
           shown.geometry.dispose();
           pick.geometry.dispose();
@@ -1090,20 +1327,23 @@ export class Viewer {
     }
     if (this.cut.visible && this.section) {
       const s = this.section;
-      this.cut.position.copy(c).setComponent(s.axis, THREE.MathUtils.lerp(box.min.getComponent(s.axis), box.max.getComponent(s.axis), s.t));
-      this.cut.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3().setComponent(s.axis, 1));
+      this.cut.position.set(...s.point);
+      this.cut.quaternion.setFromEuler(new THREE.Euler(...s.rotation.map(THREE.MathUtils.degToRad) as Vec3, "XYZ"));
       // The sheet spans the box a little past its two other axes.
       const size = box.getSize(new THREE.Vector3()).multiplyScalar(1.12);
-      const w = Math.abs(new THREE.Vector3(1, 0, 0).applyQuaternion(this.cut.quaternion).dot(size));
-      const h = Math.abs(new THREE.Vector3(0, 1, 0).applyQuaternion(this.cut.quaternion).dot(size));
+      const projection = (v: THREE.Vector3) => {
+        v.applyQuaternion(this.cut.quaternion);
+        return Math.abs(v.x) * size.x + Math.abs(v.y) * size.y + Math.abs(v.z) * size.z;
+      };
+      const w = projection(new THREE.Vector3(1, 0, 0));
+      const h = projection(new THREE.Vector3(0, 1, 0));
       this.cut.children[0].scale.set(w, h, 1);
       this.cut.children[1].scale.set(w, h, 1);
-      // The grip sits on the sheet's corner nearest the camera.
+      this.cutGrid.scale.set(w, h, 1);
+      // The coordinate label sits near the sheet's corner; it is not another helper.
       this.cut.updateMatrixWorld();
       const cam = this.cut.worldToLocal(this.camera.position.clone());
-      this.cutGrip.position.set(Math.sign(cam.x || 1) * w / 2, Math.sign(cam.y || 1) * h / 2, 0);
-      const px = this.hoverCut || this.cutDrag ? 22 : 18;
-      this.cutGrip.scale.setScalar(px * this.unitsPerPixel(this.cutGrip.getWorldPosition(new THREE.Vector3())));
+      this.cutLabelAnchor.position.set(Math.sign(cam.x || 1) * w / 2, Math.sign(cam.y || 1) * h / 2, 0);
     }
     // Picked before the next frame draws them.
     [this.slides, this.rings, this.cut].forEach((g) => g.visible && g.updateMatrixWorld(true));
@@ -1124,8 +1364,8 @@ export class Viewer {
     }
     if (this.cut.visible && this.section) {
       const s = this.section;
-      const mm = (box.max.getComponent(s.axis) - box.min.getComponent(s.axis)) * s.t * this.mmPerUnit();
-      return { text: `${"XYZ"[s.axis]} ${fmt(mm)} mm`, at: this.cutGrip.getWorldPosition(new THREE.Vector3()), cls: `is-${"xyz"[s.axis]}` };
+      return { text: s.point.map((v, i) => `${"XYZ"[i]} ${fmt(v * this.mmPerUnit())}`).join(" · ") + " mm",
+        at: this.cutLabelAnchor.getWorldPosition(new THREE.Vector3()), cls: "is-live" };
     }
     return null;
   }
@@ -1234,6 +1474,15 @@ export class Viewer {
       el.hidden = at === null;
       if (at) el.style.transform = `translate(${at.x}px, ${at.y}px) translate(-50%, -50%)`;
     };
+    const labelPoints = this.cutExtent && this.tool === "section" && !this.sectionLine.active && !this.pickingPart
+      ? [this.cutExtent.low, this.cutExtent.high].map((box) => box.isEmpty() ? null : screen(box.getCenter(new THREE.Vector3()))) : [null, null];
+    if (labelPoints[0] && labelPoints[1] && Math.hypot(labelPoints[0].x - labelPoints[1].x, labelPoints[0].y - labelPoints[1].y) < 70) {
+      labelPoints[0].x -= 38; labelPoints[1].x += 38;
+    }
+    this.halfLabels.forEach((button, i) => {
+      button.setAttribute("aria-pressed", String(this.keepBoth || this.section?.flip === Boolean(i)));
+      put(button, labelPoints[i]);
+    });
 
     const pts = this.tapePoints;
     const target = this.target();
@@ -1344,7 +1593,7 @@ export class Viewer {
 
   private onDown(e: PointerEvent) {
     if (this.tool === "measure" && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
-    if (this.drag || this.moveDrag || this.turnDrag || this.cutDrag) return;
+    if (this.drag || this.moveDrag || this.turnDrag || this.planeDrag) return;
     if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
     this.painting = true;
     this.canvas.setPointerCapture(e.pointerId);
@@ -1356,10 +1605,27 @@ export class Viewer {
     if (this.drag) return void this.release();
     if (this.moveDrag) return void this.releaseSlide();
     if (this.turnDrag) return void this.releaseTurn();
-    if (this.cutDrag) return this.releaseCut();
+    if (this.planeDrag) return this.releasePlaneSlide();
     // A click, not a drag to orbit, places a measuring point.
     const d = this.down;
     this.down = null;
+    if (this.tool === "section" && this.pickingPart && d && this.mesh && e.button === 0) {
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+        this.rayFrom(e);
+        const hit = this.ray.intersectObject(this.mesh, false)[0];
+        const part = hit && this.cutParts.findIndex((p) => hit.faceIndex != null && hit.faceIndex >= p.previewStart && hit.faceIndex < p.previewEnd);
+        if (part != null && part >= 0 && this.section) {
+          const selected = e.ctrlKey || e.metaKey ? [...this.section.selected] : [];
+          const index = selected.indexOf(part);
+          if (index >= 0) selected.splice(index, 1); else selected.push(part);
+          this.setSection({ ...this.section, selected });
+          this.handlers.section(this.section!);
+          if (!e.ctrlKey && !e.metaKey) this.pickCutPart(false);
+        }
+      }
+      if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
+      return;
+    }
     if (this.tool === "measure" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
       this.shift = e.shiftKey;
       // With Shift the point is where the tape shows it, on the axis; otherwise on the model.

@@ -104,6 +104,7 @@ enum UndoEntry {
     Stroke(Vec<Change>),
     Slots(Box<SlotSnapshot>),
     Geometry(Box<Project>),
+    Cut,
 }
 
 const NO_LABEL: u8 = u8::MAX;
@@ -125,6 +126,23 @@ fn transpose(m: &Mat3) -> Mat3 {
     std::array::from_fn(|r| std::array::from_fn(|c| m[c][r]))
 }
 
+/// Shortest rotation taking one unit normal to another, including opposite normals.
+fn rotation_between(from: Vec3, to: Vec3) -> Mat3 {
+    let c = geom::dot(from, to).clamp(-1.0, 1.0);
+    if c > 1.0 - 1e-6 {
+        return IDENTITY;
+    }
+    if c < -1.0 + 1e-6 {
+        let seed = if from[0].abs() < 0.8 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let axis = geom::normalize(geom::cross(from, seed));
+        return std::array::from_fn(|i| std::array::from_fn(|j| 2.0 * axis[i] * axis[j] - IDENTITY[i][j]));
+    }
+    let v = geom::cross(from, to);
+    let k = [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]];
+    let k2 = mat_mul(k, k);
+    std::array::from_fn(|i| std::array::from_fn(|j| IDENTITY[i][j] + k[i][j] + k2[i][j] / (1.0 + c)))
+}
+
 /// How a turn moved the preview's positions, `p' = matrix · p + shift`, when
 /// it could be applied to them as they are.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,6 +157,7 @@ struct CutSnapshot {
     parts: Vec<Part>,
     unrotated: Vec<Vec<Vec3>>,
     painted: Vec<Vec<u8>>,
+    undo: Vec<UndoEntry>,
 }
 
 /// Transfers brush labels within one part. Exact source ancestry takes priority;
@@ -544,10 +563,56 @@ impl Project {
         }
         // The preview is the final shape: a flattened base moved it down from where the scene is.
         let at = lo[axis] + (hi[axis] - lo[axis]) * t.clamp(0.0, 1.0) + (shape_hi[axis] - hi[axis]);
-        let value = at / self.stretch[axis];
+        let mut point = [0.0; 3];
+        let mut normal = [0.0; 3];
+        point[axis] = at;
+        normal[axis] = 1.0;
+        // Preserve the original axis-cut placement for callers of the old interface.
+        self.cut_impl(cut::Plane { point, normal }, keep_low, keep_other, false, &[], false).is_ok()
+    }
+
+    /// Cuts in preview coordinates. An empty selection means all parts.
+    /// All geometry is prepared and validated before changing the document.
+    pub fn cut_plane(
+        &mut self,
+        point: Vec3,
+        normal: Vec3,
+        keep_low: bool,
+        keep_other: bool,
+        lay_on_cut: bool,
+        selected: &[usize],
+    ) -> Result<(), cut::CutError> {
+        let mut plane = cut::Plane::new(point, normal)?;
+        if selected.iter().any(|&i| i >= self.scene.parts.len()) {
+            return Err(cut::CutError::InvalidPlane);
+        }
+        if let (Some((_, hi)), Some((_, shape_hi))) = (self.work.bounds(), self.shape.bounds()) {
+            plane.point = geom::add(plane.point, geom::sub(shape_hi, hi));
+        }
+        self.cut_impl(plane, keep_low, keep_other, lay_on_cut, selected, true)
+    }
+
+    fn cut_impl(
+        &mut self,
+        preview_plane: cut::Plane,
+        keep_low: bool,
+        keep_other: bool,
+        lay_on_cut: bool,
+        selected: &[usize],
+        checked: bool,
+    ) -> Result<(), cut::CutError> {
+        // Positions are stored before per-axis stretch. The plane is a covector:
+        // its normal transforms by S^T, not S^-1.
+        let plane = cut::Plane::new(
+            std::array::from_fn(|i| preview_plane.point[i] / self.stretch[i]),
+            std::array::from_fn(|i| preview_plane.normal[i] * self.stretch[i]),
+        )?;
         let eps = geom::len(self.source_size) * 1e-6;
+        let first_new_object = self.scene.parts.iter().map(|p| p.object).max().unwrap_or(0) + 1;
         let (mut kept, mut other) = (vec![], vec![]);
         let (mut kept_paint, mut other_paint) = (vec![], vec![]);
+        let (mut untouched, mut untouched_paint) = (vec![], vec![]);
+        let mut intersects = false;
         let transfers: Vec<_> = self
             .scene
             .parts
@@ -562,7 +627,26 @@ impl Project {
             .collect();
         for (pi, (part, src)) in self.scene.parts.iter().zip(&self.source_positions).enumerate() {
             let whole = Part { positions: src.clone(), ..part.clone() };
-            let [low, high] = cut::split_with_origins(&whole, axis, value, eps).map(|(part, origins)| {
+            if !selected.is_empty() && !selected.contains(&pi) {
+                let painted = transfers[pi].as_ref().map(|_| CutPaint {
+                    part: pi,
+                    origins: (0..whole.tris.len()).map(|i| Some(i as u32)).collect(),
+                    corners: (0..whole.tris.len())
+                        .map(|ti| whole.corners(ti).map(|v| std::array::from_fn(|i| v[i] * self.stretch[i])))
+                        .collect(),
+                });
+                untouched.push(whole);
+                untouched_paint.push(painted);
+                continue;
+            }
+            let crosses = whole.positions.iter().any(|&v| plane.distance(v) < -eps)
+                && whole.positions.iter().any(|&v| plane.distance(v) > eps);
+            intersects |= crosses;
+            let sides = cut::split_plane_with_origins(&whole, plane, eps);
+            if checked && sides.iter().any(|(p, _)| !p.tris.is_empty() && !cut::valid_solid(p, eps)) {
+                return Err(cut::CutError::InvalidGeometry);
+            }
+            let [low, high] = sides.map(|(part, origins)| {
                 let painted = transfers[pi].as_ref().map(|_| CutPaint {
                     part: pi,
                     origins,
@@ -582,26 +666,51 @@ impl Project {
                 other_paint.push(o.1);
             }
         }
-        if kept.is_empty() || other.is_empty() {
-            return false;
+        if kept.is_empty() || other.is_empty() || (checked && !intersects) {
+            return Err(cut::CutError::Misses);
         }
+        self.end_stroke();
         let parts = std::mem::take(&mut self.scene.parts);
-        self.cut_history.push(CutSnapshot { parts, unrotated: self.unrotated.clone(), painted: self.painted.clone() });
+        self.cut_history.push(CutSnapshot {
+            parts,
+            unrotated: self.unrotated.clone(),
+            painted: self.painted.clone(),
+            undo: std::mem::take(&mut self.undo),
+        });
+        let kept_normal = geom::scale(preview_plane.normal, if keep_low { 1.0 } else { -1.0 });
+        let rotate_parts = |parts: &mut Vec<Part>, normal: Vec3| {
+            let turn = rotation_between(normal, [0.0, 0.0, -1.0]);
+            for v in parts.iter_mut().flat_map(|p| &mut p.positions) {
+                let stretched = std::array::from_fn(|i| v[i] * self.stretch[i]);
+                let rotated = mat_vec(turn, stretched);
+                *v = std::array::from_fn(|i| rotated[i] / self.stretch[i]);
+            }
+        };
+        if lay_on_cut {
+            rotate_parts(&mut kept, kept_normal);
+        }
+        if checked {
+            // A selected upper half must land too, without lifting untouched objects.
+            let bed_z = self.source_positions.iter().flatten().map(|v| v[2]).fold(f32::INFINITY, f32::min);
+            let low_z = kept.iter().flat_map(|p| &p.positions).map(|v| v[2]).fold(f32::INFINITY, f32::min);
+            for v in kept.iter_mut().flat_map(|p| &mut p.positions) {
+                v[2] += bed_z - low_z;
+            }
+        }
         if keep_other {
             // Its cut face looks back at the kept side; turned to face the plate.
             let sign = if keep_low { -1.0 } else { 1.0 };
-            let turn = match axis {
-                0 => axis_turn(1, 90.0 * sign),
-                1 => axis_turn(0, -90.0 * sign),
-                _ if keep_low => IDENTITY,
-                _ => axis_turn(0, 180.0),
-            };
-            let first_new = kept.iter().chain(&other).map(|p| p.object).max().unwrap_or(0) + 1;
+            let turn = rotation_between(geom::scale(plane.normal, sign), [0.0, 0.0, -1.0]);
+            if lay_on_cut {
+                rotate_parts(&mut other, geom::scale(kept_normal, -1.0));
+            }
             for p in &mut other {
-                p.object += first_new;
+                p.object += first_new_object;
                 p.name = format!("{} ({})", p.name, p.object + 1);
-                for v in &mut p.positions {
-                    *v = mat_vec(turn, *v);
+                if !checked {
+                    for v in &mut p.positions {
+                        *v = mat_vec(turn, *v);
+                    }
                 }
             }
             let bounds = |ps: &[Part]| {
@@ -611,9 +720,16 @@ impl Project {
                     (std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn::<f32, 3, _>(|i| hi[i].max(p[i])))
                 })
             };
-            let ((klo, khi), (olo, ohi)) = (bounds(&kept), bounds(&other));
+            let ((klo, mut khi), (olo, ohi)) = (bounds(&kept), bounds(&other));
+            if checked {
+                for p in &untouched {
+                    for v in &p.positions {
+                        khi[0] = khi[0].max(v[0]);
+                    }
+                }
+            }
             // Beside the model along X, 5 mm apart, centred with it on Y and on the plate.
-            let gap = 5.0 / self.scale;
+            let gap = 5.0 / self.scale / self.stretch[0];
             let shift = [khi[0] + gap - olo[0], (klo[1] + khi[1] - olo[1] - ohi[1]) / 2.0, klo[2] - olo[2]];
             for v in other.iter_mut().flat_map(|p| p.positions.iter_mut()) {
                 *v = geom::add(*v, shift);
@@ -621,6 +737,8 @@ impl Project {
             kept.append(&mut other);
             kept_paint.append(&mut other_paint);
         }
+        kept.append(&mut untouched);
+        kept_paint.append(&mut untouched_paint);
         self.scene.parts = kept;
         let shift = self.scene.place_on_plate();
         self.placement = geom::add(self.placement, shift);
@@ -666,7 +784,8 @@ impl Project {
             }
         }
         self.rebuild_paint();
-        true
+        self.undo.push(UndoEntry::Cut);
+        Ok(())
     }
 
     pub fn can_undo_cut(&self) -> bool {
@@ -675,7 +794,7 @@ impl Project {
 
     /// Printed objects: 1 for the model, more once pieces cut off it are kept.
     pub fn object_count(&self) -> usize {
-        self.scene.parts.iter().map(|p| p.object as usize + 1).max().unwrap_or(1)
+        self.scene.parts.iter().map(|p| p.object).collect::<std::collections::HashSet<_>>().len().max(1)
     }
 
     /// Puts back what the last cut took, in the orientation the model has now.
@@ -696,6 +815,7 @@ impl Project {
             }
         }
         self.rebuild_paint();
+        self.undo = s.undo;
         true
     }
 
@@ -829,6 +949,7 @@ impl Project {
             UndoEntry::Stroke(_) => "stroke",
             UndoEntry::Slots(_) => "merge",
             UndoEntry::Geometry(_) => "fix",
+            UndoEntry::Cut => "cut",
         })
     }
 
@@ -1115,6 +1236,7 @@ impl Project {
         self.end_stroke();
         match self.undo.pop() {
             None => false,
+            Some(UndoEntry::Cut) => self.undo_cut(),
             Some(UndoEntry::Stroke(stroke)) => {
                 for c in stroke.into_iter().rev() {
                     let (p, i) = (c.part as usize, c.tri as usize);
@@ -1170,6 +1292,20 @@ impl Project {
         }
         pv.offsets.push(pv.labels.len() as u32);
         pv
+    }
+
+    /// Leaf ranges in the binary preview, one for each scene part.
+    pub fn preview_part_ranges(&self) -> Vec<(usize, usize)> {
+        let mut start = 0;
+        self.trees
+            .iter()
+            .map(|nodes| {
+                let end = start + nodes.iter().map(Node::leaf_count).sum::<usize>();
+                let range = (start, end);
+                start = end;
+                range
+            })
+            .collect()
     }
 
     pub fn stats(&self) -> Stats {
@@ -1507,6 +1643,90 @@ mod tests {
         p.end_stroke();
         assert_eq!(p.painted_count(), 1);
         target
+    }
+
+    #[test]
+    fn free_cut_matches_the_preview_after_turn_scale_and_stretch_and_undo_restores_paint() {
+        for stretch in [false, true] {
+            for normal in [[1.0, 0.0, 1.0], [0.31, -0.47, 0.8]] {
+                let mut p = Project::new(tower(), 2);
+                brush_front(&mut p);
+                p.rotate(0, 27.0);
+                if stretch {
+                    p.set_size_mm([19.0, 11.0, 37.0]);
+                } else {
+                    p.set_height_mm(35.0);
+                }
+                let before = p.preview();
+                let placement = p.placement;
+                let (lo, hi) = p.work.bounds().unwrap();
+                let point = geom::scale(geom::add(lo, hi), 0.5);
+                let plane = cut::Plane::new(point, normal).unwrap();
+                p.cut_plane(point, normal, true, false, false, &[]).unwrap();
+                // Cutting recentres XY and drops the result to the bed; compare in the pre-cut frame.
+                let shift = std::array::from_fn(|i| (p.placement[i] - placement[i]) * p.stretch[i]);
+                assert!(p
+                    .work
+                    .parts
+                    .iter()
+                    .flat_map(|part| &part.positions)
+                    .all(|&v| plane.distance(geom::sub(v, shift)) < 1e-4));
+                assert_eq!(p.undo_label(), Some("cut"));
+                assert!(p.painted_count() > 0);
+                for part in &p.scene.parts {
+                    assert!(cut::valid_solid(part, 1e-5));
+                }
+                let cap_normal = plane.normal;
+                assert!(p.work.parts.iter().any(|part| (0..part.tris.len()).any(|ti| {
+                    let [a, b, c] = part.corners(ti);
+                    let n = geom::normalize(geom::cross(geom::sub(b, a), geom::sub(c, a)));
+                    geom::dot(n, cap_normal) > 1.0 - 1e-5
+                })));
+                assert!(p.undo());
+                assert_eq!(p.preview().positions, before.positions);
+                assert_eq!(p.preview().labels, before.labels);
+            }
+        }
+    }
+
+    #[test]
+    fn free_cut_selection_placement_and_failures_are_atomic() {
+        let mut scene = tower();
+        let mut second = scene.parts[0].clone();
+        second.object = 1;
+        for v in &mut second.positions {
+            v[0] += 25.0;
+        }
+        scene.parts.push(second);
+        for lay in [false, true] {
+            let mut p = Project::new(scene.clone(), 2);
+            let original = p.preview();
+            let (lo, hi) = p.work.bounds().unwrap();
+            let point = [lo[0] + 5.0, 0.0, (lo[2] + hi[2]) / 2.0];
+            let second_tris = p.scene.parts[1].tris.len();
+            p.cut_plane(point, [0.3, 0.0, 1.0], true, true, lay, &[0]).unwrap();
+            assert_eq!(p.scene.parts.last().unwrap().tris.len(), second_tris);
+            assert_eq!(p.object_count(), 3);
+            assert!(p.export_parts().iter().all(|part| part.paint.len() == part.tris.len()));
+            assert!(p.undo());
+            assert_eq!(p.preview().positions, original.positions);
+            for (point, normal, selected, error) in [
+                ([0.0; 3], [0.0; 3], vec![], cut::CutError::InvalidPlane),
+                ([0.0; 3], [0.0, 0.0, 1.0], vec![99], cut::CutError::InvalidPlane),
+                ([0.0, 0.0, 999.0], [0.0, 0.0, 1.0], vec![], cut::CutError::Misses),
+            ] {
+                assert_eq!(p.cut_plane(point, normal, true, true, lay, &selected), Err(error));
+                assert_eq!(p.preview().positions, original.positions);
+                assert!(!p.can_undo_cut());
+            }
+        }
+        let mut p = Project::new(self::scene(), 2); // open surface
+        let before = p.preview().positions;
+        assert_eq!(
+            p.cut_plane([0.0, 0.0, 8.0], [0.0, 0.0, 1.0], true, false, false, &[]),
+            Err(cut::CutError::InvalidGeometry)
+        );
+        assert_eq!(p.preview().positions, before);
     }
 
     fn brush_area(p: &Project, target: u8) -> f32 {
