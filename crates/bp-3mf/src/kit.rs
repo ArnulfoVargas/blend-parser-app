@@ -78,6 +78,9 @@ pub struct KitSummary {
     /// Crumbs that went to a neighbour, and regions too thin to make a piece.
     pub merged: usize,
     pub dropped: usize,
+    /// Pins keying pieces together, and joins with no room for one.
+    pub pins: usize,
+    pub unpinned: usize,
 }
 
 /// Spanish name for a filament colour, close enough to tell spools apart.
@@ -1062,6 +1065,49 @@ impl<'a> Names<'a> {
                 ),
             });
         }
+        if !k.pins.is_empty() || k.unpinned > 0 {
+            let (pins, missed) = (k.pins.len(), k.unpinned);
+            notes.push(match l {
+                Lang::Es => {
+                    let mut t = format!(
+                        "{} con {} alojamiento {} las piezas: {} cada unión, pero conviene pegarlas igual.",
+                        l.n(pins, ("espiga", "espigas"), ("", "")),
+                        if pins == 1 { "su" } else { "sus" },
+                        if pins == 1 { "encaja" } else { "encajan" },
+                        if pins == 1 { "guía" } else { "guían" }
+                    );
+                    if missed > 0 {
+                        let _ = write!(
+                            t,
+                            " {} no {} sitio para una y {} solo pegada{}.",
+                            l.n(missed, ("unión", "uniones"), ("", "")),
+                            if missed == 1 { "tenía" } else { "tenían" },
+                            if missed == 1 { "va" } else { "van" },
+                            if missed == 1 { "" } else { "s" }
+                        );
+                    }
+                    t
+                }
+                Lang::En => {
+                    let mut t = format!(
+                        "{} in {} {} the pieces together, lining up the joint{}; glue them all the same.",
+                        l.n(pins, ("", ""), ("pin", "pins")),
+                        if pins == 1 { "its socket" } else { "their sockets" },
+                        if pins == 1 { "keys" } else { "key" },
+                        if pins == 1 { "" } else { "s" }
+                    );
+                    if missed > 0 {
+                        let _ = write!(
+                            t,
+                            " {} had no room for one and {} only glued.",
+                            l.n(missed, ("", ""), ("joint", "joints")),
+                            if missed == 1 { "is" } else { "are" }
+                        );
+                    }
+                    t
+                }
+            });
+        }
         notes
     }
 
@@ -1400,19 +1446,56 @@ fn step_text(n: &Names, k: usize) -> (String, String) {
         ),
         (_, false, _, false) => {
             let list: Vec<String> = step.joins.iter().map(|&j| format!("{} ({:.0} mm²)", labels[j], area(j))).collect();
+            let keyed: Vec<&str> = step
+                .joins
+                .iter()
+                .filter(|&&j| kit.pins_between(p, j).next().is_some())
+                .map(|&j| labels[j].as_str())
+                .collect();
+            let crossed = kit.crossed_pins(p, &step.joins);
+            let mut pins = String::new();
+            if !keyed.is_empty() {
+                pins = match l {
+                    Lang::Es => {
+                        format!(" Las espigas la guían: encájala en {} por ellas antes de apretar.", keyed.join(", "))
+                    }
+                    Lang::En => format!(" Pins guide it: fit it onto {} by them before pressing.", keyed.join(", ")),
+                };
+            }
+            if !crossed.is_empty() {
+                let crossed: Vec<&str> = crossed.iter().map(|&j| labels[j].as_str()).collect();
+                pins += &match l {
+                    Lang::Es => format!(
+                        " Ojo: las espigas con {} entran desde otra dirección; si no encaja, córtalas a ras.",
+                        crossed.join(", ")
+                    ),
+                    Lang::En => format!(
+                        " Mind: the pins with {} go in from another way; if it will not seat, cut them flush.",
+                        crossed.join(", ")
+                    ),
+                };
+            }
             match l {
-                Lang::Es => format!(
+                Lang::Es => {
+                    format!(
                     "Pega {} a {}: pon pegamento en la zona rayada y presiónala en su sitio, como muestra la imagen.{}",
                     labels[p],
                     list.join(", "),
                     if step.joins.len() > 1 { " Encájala en el hueco entre ellas antes de que seque." } else { "" }
-                ),
-                Lang::En => format!(
-                    "Glue {} to {}: put glue on the striped area and press it into place, as the picture shows.{}",
-                    labels[p],
-                    list.join(", "),
-                    if step.joins.len() > 1 { " Seat it in the gap between them before the glue sets." } else { "" }
-                ),
+                ) + &pins
+                }
+                Lang::En => {
+                    format!(
+                        "Glue {} to {}: put glue on the striped area and press it into place, as the picture shows.{}",
+                        labels[p],
+                        list.join(", "),
+                        if step.joins.len() > 1 {
+                            " Seat it in the gap between them before the glue sets."
+                        } else {
+                            ""
+                        }
+                    ) + &pins
+                }
             }
         }
     };
@@ -2003,6 +2086,8 @@ pub fn write_kit_zip_with<W: Write + Seek>(
         review: n.review().len(),
         merged: kit.merged,
         dropped: kit.dropped,
+        pins: kit.pins.len(),
+        unpinned: kit.unpinned,
     })
 }
 
@@ -2029,7 +2114,10 @@ mod tests {
         for mix in [false, true] {
             let bed = kit_bed(&printer, &reserve, 4.0, mix);
             assert!(!bed.excluded.is_empty() && bed.tower.is_some());
-            let kit = bp_core::kit::kit(Split { pieces: pieces(), voxel_mm: 0.5, merged: 0, dropped: 0 }, bed.clone());
+            let kit = bp_core::kit::kit(
+                Split { pieces: pieces(), voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() },
+                bed.clone(),
+            );
             let tower = bed.tower.filter(|_| mix);
             for (i, p) in kit.placed.iter().enumerate() {
                 let r = crate::plate::Rect::centred(p.at[0], p.at[1], p.size[0], p.size[1]);
@@ -2107,7 +2195,18 @@ mod tests {
             Piece { slot: 1, positions: pb, tris: tb, volume_mm3: 1600.0, contacts: vec![(0, 400.0)] },
             Piece { slot: 1, positions: pc, tris: tc, volume_mm3: 140.0, contacts: vec![(0, 280.0)] },
         ];
-        let kit = bp_core::kit::kit(Split { pieces, voxel_mm: 0.5, merged: 3, dropped: 1 }, Bed::plain(256.0, 256.0));
+        let kit = bp_core::kit::kit(
+            Split {
+                pieces,
+                voxel_mm: 0.5,
+                merged: 3,
+                dropped: 1,
+                // A pin out of the base into the slab on it; no room on the sliver's joint.
+                pins: vec![bp_core::PinJoin { pin: 0, socket: 1, axis: [0.0, 0.0, 1.0] }],
+                unpinned: 1,
+            },
+            Bed::plain(256.0, 256.0),
+        );
         let palette = vec!["#202020".to_string(), "#F5F4F0".to_string()];
         let names = vec![None, Some("Bambu Lab PLA Basic Blanco".to_string())];
         let info = KitInfo {
@@ -2123,6 +2222,7 @@ mod tests {
                 min_piece_mm3: 30.0,
                 mix: false,
                 contents: Default::default(),
+                pins: None,
             },
             density_g_cm3: 1.24,
             flush: Default::default(),
@@ -2130,7 +2230,10 @@ mod tests {
         };
         let mut buf = Cursor::new(Vec::new());
         let summary = write_kit_zip(&mut buf, &kit, &info).unwrap();
-        assert_eq!(summary, KitSummary { pieces: 3, plates: 2, oversize: 0, review: 1, merged: 3, dropped: 1 });
+        assert_eq!(
+            summary,
+            KitSummary { pieces: 3, plates: 2, oversize: 0, review: 1, merged: 3, dropped: 1, pins: 1, unpinned: 1 }
+        );
         let mut zip = zip::ZipArchive::new(Cursor::new(buf.into_inner())).unwrap();
         let names: Vec<String> = zip.file_names().map(String::from).collect();
         for f in ["LEEME.txt", "resumen.html", "guia-de-armado.html", "guia-de-armado.txt", "3mf/arana_placas.3mf"] {
@@ -2169,11 +2272,17 @@ mod tests {
             summary_html.contains("3 migas")
                 && summary_html.contains("1 zona demasiado fina para formar una pieza se dejó")
         );
+        assert!(
+            summary_html.contains("1 espiga con su alojamiento encaja las piezas")
+                && summary_html.contains("1 unión no tenía sitio para una y va solo pegada."),
+            "{summary_html}"
+        );
         let readme = String::from_utf8(read(&mut zip, "LEEME.txt")).unwrap();
         assert!(readme.contains("P03 (Blanco)") && readme.contains("3 piezas, 2 colores, 2 placas"), "{readme}");
         // 5,74 cm³ of PLA weigh about 7 g.
         assert!(readme.contains(" 7 g de filamento"), "{readme}");
         assert!(guide.contains("Paso 2 / 3") && guide.contains("Pega P02 a P01"));
+        assert!(guide.contains("Las espigas la guían: encájala en P01"), "{guide}");
         // Ticks are remembered per kit, and every step has one.
         assert_eq!(guide.matches("data-step=").count(), 3);
         assert!(guide.contains("data-kit=\"arana|3|3|") && guide.contains("localStorage"));
@@ -2203,7 +2312,10 @@ mod tests {
                 Piece { slot: (i % 2) as u8, positions, tris, volume_mm3: 1000.0, contacts }
             })
             .collect();
-        bp_core::kit::kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(256.0, 256.0))
+        bp_core::kit::kit(
+            Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() },
+            Bed::plain(256.0, 256.0),
+        )
     }
 
     fn info<'a>(palette: &'a [String], lang: Lang) -> KitInfo<'a> {
@@ -2220,6 +2332,7 @@ mod tests {
                 min_piece_mm3: 30.0,
                 mix: false,
                 contents: Default::default(),
+                pins: None,
             },
             density_g_cm3: 1.24,
             flush: Default::default(),

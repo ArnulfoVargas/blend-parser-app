@@ -17,6 +17,11 @@ use rayon::prelude::*;
 use crate::bvh::{Bvh, TriSoup};
 use crate::geom::{self, Bary, Vec3};
 
+mod pins;
+
+pub use pins::PinParams;
+use pins::{Pins, GAP};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SplitParams {
     /// Voxel edge in millimetres; grown when the grid would be too large.
@@ -27,11 +32,13 @@ pub struct SplitParams {
     pub core_slot: Option<u8>,
     /// Pieces smaller than this join the neighbour they touch most.
     pub min_piece_mm3: f32,
+    /// Pins that key neighbouring pieces together; `None` leaves them to glue.
+    pub pins: Option<PinParams>,
 }
 
 impl Default for SplitParams {
     fn default() -> Self {
-        Self { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 20.0 }
+        Self { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 20.0, pins: None }
     }
 }
 
@@ -45,6 +52,18 @@ pub struct Piece {
     pub contacts: Vec<(usize, f32)>,
 }
 
+/// A pin and the two pieces it keys together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PinJoin {
+    /// The piece it stands out of.
+    pub pin: usize,
+    /// The piece with its socket.
+    pub socket: usize,
+    /// Unit, the way the pin points: the way the socket's piece slides on.
+    pub axis: Vec3,
+}
+
+#[derive(Default)]
 pub struct Split {
     /// Sorted by colour, then largest first.
     pub pieces: Vec<Piece>,
@@ -54,6 +73,9 @@ pub struct Split {
     pub merged: usize,
     /// Regions too thin to give a surface, left out.
     pub dropped: usize,
+    pub pins: Vec<PinJoin>,
+    /// Joins wide enough for a pin where none fitted.
+    pub unpinned: usize,
 }
 
 /// Positions and triangles of one mesh.
@@ -207,7 +229,7 @@ fn components(grid: &Grid, lab: &[u8]) -> (Vec<u32>, Vec<u32>, Vec<u8>) {
     let (mut sizes, mut labels) = (vec![], vec![]);
     let mut stack = vec![];
     for start in 0..lab.len() {
-        if lab[start] == OUT || comp[start] != NONE {
+        if lab[start] >= GAP || comp[start] != NONE {
             continue;
         }
         let id = sizes.len() as u32;
@@ -332,7 +354,15 @@ impl Field<'_> {
 }
 
 /// Marching tetrahedra over the cells around one region's boundary.
-fn mesh_region(field: &Field, comp: &[u32], id: u32, boundary: &[usize], bvh: &Bvh, soup: &TriSoup) -> RegionMesh {
+fn mesh_region(
+    field: &Field,
+    comp: &[u32],
+    id: u32,
+    boundary: &[usize],
+    pins: Option<&Pins>,
+    bvh: &Bvh,
+    soup: &TriSoup,
+) -> RegionMesh {
     let (grid, lab) = (field.grid, field.lab);
     let (nx, ny) = (grid.n[0], grid.n[1]);
     let corner: [usize; 8] = std::array::from_fn(|b| (b & 1) + nx * (((b >> 1) & 1) + ny * (b >> 2)));
@@ -341,18 +371,23 @@ fn mesh_region(field: &Field, comp: &[u32], id: u32, boundary: &[usize], bvh: &B
     cells.dedup();
 
     let member = |v: usize| comp[v] == id;
-    let mut verts: HashMap<(usize, usize), u32> = HashMap::new();
+    let mut verts: HashMap<EdgeKey, u32> = HashMap::new();
     let mut positions = Vec::new();
     let mut keys = Vec::new();
     let mut tris = Vec::new();
     // Where the surface crosses the edge from voxel `a` (in the region) to `b`
     // (not): on the model surface if `b` is outside, else where the colour
-    // changes. Both regions compute the same point, so they mate exactly.
+    // changes. Both regions compute the same point, so they mate exactly;
+    // except round a pin, where each has its own surface (see [`pins`]).
     let mut point = |a: usize, b: usize, positions: &mut Vec<Vec3>| -> u32 {
-        *verts.entry((a.min(b), a.max(b))).or_insert_with(|| {
-            keys.push((a.min(b), a.max(b)));
+        let pinned = pins.and_then(|z| z.crossing(grid, lab, a, b));
+        let key = (a.min(b), a.max(b), if pinned.is_some_and(|(_, own)| own) { id } else { NONE });
+        *verts.entry(key).or_insert_with(|| {
+            keys.push(key);
             let (pa, pb) = (grid.center(a), grid.center(b));
-            let p = if lab[b] == OUT {
+            let p = if let Some((p, _)) = pinned {
+                p
+            } else if lab[b] == OUT {
                 bvh.raycast(soup, pa, geom::sub(pb, pa))
                     .filter(|hit| hit.t <= 1.0)
                     .map_or(geom::scale(geom::add(pa, pb), 0.5), |hit| hit.point)
@@ -438,18 +473,24 @@ fn cancel_folds(tris: Vec<[u32; 3]>) -> Vec<[u32; 3]> {
     tris.into_iter().filter(|t| count[&key(t)] == 1).collect()
 }
 
+/// The voxel edge a vertex lies on, and the region that owns it alone, or
+/// `NONE` when the regions either side share it.
+type EdgeKey = (usize, usize, u32);
+
 /// One region's surface straight from marching tetrahedra. Each vertex
 /// remembers the voxel edge it lies on; a neighbouring region's surface uses
 /// the same edge for the same point, which is how the polish below keeps
 /// mating faces together.
 struct RegionMesh {
     positions: Vec<Vec3>,
-    keys: Vec<(usize, usize)>,
+    keys: Vec<EdgeKey>,
     tris: Vec<[u32; 3]>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    /// On a pin or its socket: exact already.
+    Fixed,
     /// On the model's surface.
     Outer,
     /// Where two pieces meet, beside the model's surface: the colour border.
@@ -475,7 +516,7 @@ const SURFACE_ERROR_MM: f32 = 0.05;
 ///   pushed back onto the model each round), losing the lumps of the grid.
 /// - Faces between pieces are smoothed in place (Taubin, which does not shrink).
 fn polish(regions: &[RegionMesh], comp: &[u32], bvh: &Bvh, soup: &TriSoup, h: f32) -> Vec<MeshData> {
-    let mut id: HashMap<(usize, usize), u32> = HashMap::new();
+    let mut id: HashMap<EdgeKey, u32> = HashMap::new();
     let (mut pos, mut kind) = (Vec::new(), Vec::new());
     let mut local: Vec<Vec<u32>> = Vec::with_capacity(regions.len());
     for r in regions {
@@ -483,7 +524,13 @@ fn polish(regions: &[RegionMesh], comp: &[u32], bvh: &Bvh, soup: &TriSoup, h: f3
         for (&k, &p) in r.keys.iter().zip(&r.positions) {
             ids.push(*id.entry(k).or_insert_with(|| {
                 pos.push(p);
-                kind.push(if comp[k.0] == NONE || comp[k.1] == NONE { Kind::Outer } else { Kind::Mate });
+                kind.push(if k.2 != NONE {
+                    Kind::Fixed
+                } else if comp[k.0] == NONE || comp[k.1] == NONE {
+                    Kind::Outer
+                } else {
+                    Kind::Mate
+                });
                 pos.len() as u32 - 1
             }));
         }
@@ -532,7 +579,7 @@ fn polish(regions: &[RegionMesh], comp: &[u32], bvh: &Bvh, soup: &TriSoup, h: f3
     };
     // The surface vertices with the model's normal under each; seams start
     // on the model, wherever the grid left them.
-    let surface: Vec<usize> = (0..pos.len()).filter(|&v| kind[v] != Kind::Mate).collect();
+    let surface: Vec<usize> = (0..pos.len()).filter(|&v| matches!(kind[v], Kind::Outer | Kind::Seam)).collect();
     let mut normal: Vec<Option<Vec3>> = vec![None; pos.len()];
     let first: Vec<(Vec3, Option<Vec3>)> = surface
         .par_iter()
@@ -555,7 +602,7 @@ fn polish(regions: &[RegionMesh], comp: &[u32], bvh: &Bvh, soup: &TriSoup, h: f3
                 let avg = if kind[v] == Kind::Seam {
                     average(&pos, v, &|k| k == Kind::Seam)
                 } else {
-                    average(&pos, v, &|k| k != Kind::Mate)
+                    average(&pos, v, &|k| matches!(k, Kind::Outer | Kind::Seam))
                 };
                 let Some(avg) = avg else { return (p, Some(n)) };
                 let mut d = geom::sub(avg, p);
@@ -605,15 +652,19 @@ fn simplify_patches(
     error: f32,
 ) -> Vec<MeshData> {
     // The patch of each face: the region on the other side of all its
-    // vertices (`NONE` for the outside), or `JUNCTION` when they disagree.
+    // vertices (`NONE` for the outside, `PINNED` round a pin), or `JUNCTION`
+    // when they disagree.
     const JUNCTION: u32 = NONE - 1;
+    const PINNED: u32 = NONE - 2;
     let patch_of: Vec<Vec<u32>> = regions
         .iter()
         .enumerate()
         .map(|(r, m)| {
             let other = |v: u32| {
-                let (a, b) = m.keys[v as usize];
-                if comp[a] == r as u32 {
+                let (a, b, own) = m.keys[v as usize];
+                if own != NONE {
+                    PINNED
+                } else if comp[a] == r as u32 {
                     comp[b]
                 } else {
                     comp[a]
@@ -634,7 +685,7 @@ fn simplify_patches(
         .collect();
     let key = |r: usize, o: u32| -> PatchKey {
         match o {
-            NONE | JUNCTION => (r as u32, o),
+            NONE | JUNCTION | PINNED => (r as u32, o),
             _ => ((r as u32).min(o), (r as u32).max(o)),
         }
     };
@@ -655,21 +706,46 @@ fn simplify_patches(
         }
     }
     drop(owner);
-    // Faces of each patch in global vertices, taken from the lower region.
-    let mut patches: HashMap<PatchKey, Vec<[u32; 3]>> = HashMap::new();
+    // Faces of each patch in global vertices: from the lower region, and
+    // between two regions from the higher one too.
+    let mut patches: HashMap<PatchKey, [Vec<[u32; 3]>; 2]> = HashMap::new();
     let mut junctions: Vec<Vec<[u32; 3]>> = vec![Vec::new(); regions.len()];
     for (r, (m, ids)) in regions.iter().zip(local).enumerate() {
         for (t, &o) in m.tris.iter().zip(&patch_of[r]) {
             let g = t.map(|v| ids[v as usize]);
             if o == JUNCTION {
                 junctions[r].push(g);
-            } else if o == NONE || (r as u32) < o {
-                patches.entry(key(r, o)).or_default().push(g);
+            } else {
+                let k = key(r, o);
+                patches.entry(k).or_default()[usize::from(k.0 != r as u32)].push(g);
             }
         }
     }
+    // A face between two regions is used by one and flipped by the other only
+    // where both sides are the same faces; otherwise each keeps its own.
+    let canon = |t: [u32; 3]| {
+        let k = (0..3).min_by_key(|&k| t[k]).unwrap_or(0);
+        [t[k], t[(k + 1) % 3], t[(k + 2) % 3]]
+    };
+    let mut jobs: Vec<(PatchKey, Vec<[u32; 3]>)> = Vec::with_capacity(patches.len());
+    for (k, [low, high]) in patches {
+        if (k.1 as usize) < regions.len() {
+            let mut a: Vec<_> = low.iter().map(|&t| canon(t)).collect();
+            let mut b: Vec<_> = high.iter().map(|&t| canon([t[0], t[2], t[1]])).collect();
+            a.sort_unstable();
+            b.sort_unstable();
+            if a != b {
+                junctions[k.0 as usize].extend(low);
+                if let Some(j) = junctions.get_mut(k.1 as usize) {
+                    j.extend(high);
+                }
+                continue;
+            }
+        }
+        jobs.push((k, low));
+    }
     let adapter = meshopt::VertexDataAdapter::new(meshopt::typed_to_bytes(pos), std::mem::size_of::<Vec3>(), 0);
-    let simplified: Vec<(PatchKey, Vec<[u32; 3]>)> = patches
+    let simplified: Vec<(PatchKey, Vec<[u32; 3]>)> = jobs
         .into_par_iter()
         .map(|(k, tris)| {
             let Ok(adapter) = &adapter else { return (k, tris) };
@@ -679,7 +755,8 @@ fn simplify_patches(
                 adapter,
                 &shared,
                 0,
-                error,
+                // A pin and its socket keep their clearance.
+                if k.1 == PINNED { error * 0.2 } else { error },
                 meshopt::SimplifyOptions::ErrorAbsolute
                     | meshopt::SimplifyOptions::Sparse
                     | meshopt::SimplifyOptions::LockBorder
@@ -693,8 +770,8 @@ fn simplify_patches(
     let mut faces = junctions;
     for ((r, o), tris) in simplified {
         faces[r as usize].extend_from_slice(&tris);
-        if o != NONE {
-            faces[o as usize].extend(tris.iter().map(|t| [t[0], t[2], t[1]]));
+        if let Some(f) = faces.get_mut(o as usize) {
+            f.extend(tris.iter().map(|t| [t[0], t[2], t[1]]));
         }
     }
     faces
@@ -723,7 +800,7 @@ fn simplify_patches(
 /// colour at a point of it.
 pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: SplitParams) -> Split {
     if soup.is_empty() {
-        return Split { pieces: vec![], voxel_mm: params.voxel_mm, merged: 0, dropped: 0 };
+        return Split { voxel_mm: params.voxel_mm, ..Default::default() };
     }
     let bvh = Bvh::build(soup);
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -808,7 +885,12 @@ pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: Spl
 
     let min_voxels = (params.min_piece_mm3 / (h * h * h)).ceil().max(1.0) as u32;
     let merged = merge_crumbs(&grid, &mut lab, min_voxels);
-    let (comp, sizes, labels) = components(&grid, &lab);
+    let (mut comp, mut sizes, mut labels) = components(&grid, &lab);
+    let pins = params.pins.map(|p| {
+        let pins = pins::place(&grid, &mut lab, &comp, &labels, &sizes, &p);
+        (comp, sizes, labels) = components(&grid, &lab);
+        pins
+    });
 
     // Contact area between regions, and each region's boundary voxels.
     let mut faces: HashMap<(u32, u32), u32> = HashMap::new();
@@ -833,7 +915,7 @@ pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: Spl
     let field = Field { grid: &grid, lab: &lab, seeds: &seeds, seed_of: &seed_of, core, depth: params.depth_mm };
     let regions: Vec<RegionMesh> = (0..sizes.len())
         .into_par_iter()
-        .map(|c| mesh_region(&field, &comp, c as u32, &boundary[c], &bvh, soup))
+        .map(|c| mesh_region(&field, &comp, c as u32, &boundary[c], pins.as_ref(), &bvh, soup))
         .collect();
     let meshes = polish(&regions, &comp, &bvh, soup, h);
 
@@ -868,7 +950,24 @@ pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: Spl
     for p in &mut pieces {
         p.contacts.sort_by(|x, y| y.1.total_cmp(&x.1));
     }
-    Split { pieces, voxel_mm: h, merged, dropped }
+    // Each pin between the pieces its two ends lie in.
+    let piece_at = |p: Vec3| -> Option<usize> {
+        let c: [isize; 3] = std::array::from_fn(|a| ((p[a] - grid.origin[a]) / h).floor() as isize);
+        if (0..3).any(|a| c[a] < 0 || c[a] as usize >= grid.n[a]) {
+            return None;
+        }
+        let r = comp[grid.index(c.map(|x| x as usize))];
+        new_id.get(r as usize).copied().filter(|&i| i != usize::MAX)
+    };
+    let (pin_pairs, unpinned) = pins.map_or((vec![], 0), |z| {
+        let pairs = z
+            .pins
+            .iter()
+            .filter_map(|p| Some(PinJoin { pin: piece_at(p.base(h))?, socket: piece_at(p.tip(h))?, axis: p.axis() }))
+            .collect();
+        (pairs, z.missed)
+    });
+    Split { pieces, voxel_mm: h, merged, dropped, pins: pin_pairs, unpinned }
 }
 
 #[cfg(test)]
@@ -954,7 +1053,13 @@ pub(crate) mod tests {
 
     #[test]
     fn depth_limits_the_colour_and_leaves_a_core() {
-        let s = painted_cube(SplitParams { voxel_mm: 1.0, depth_mm: 3.0, core_slot: Some(0), min_piece_mm3: 1.0 });
+        let s = painted_cube(SplitParams {
+            voxel_mm: 1.0,
+            depth_mm: 3.0,
+            core_slot: Some(0),
+            min_piece_mm3: 1.0,
+            pins: None,
+        });
         let top = s.pieces.iter().find(|p| p.slot == 1).unwrap();
         // A 20 × 20 × 3 mm slab, minus the edges where the sides are nearer.
         assert!(volume(top) > 600.0 && volume(top) < 1300.0, "{}", volume(top));
@@ -995,18 +1100,15 @@ pub(crate) mod tests {
         let mirrored: std::collections::HashSet<_> = b
             .tris
             .iter()
-            .map(|t| {
+            .flat_map(|t| {
                 let [x, y, z] = t.map(|v| key(b.positions[v as usize]));
                 // Every rotation of the triangle, wound the other way.
                 [[x, z, y], [z, y, x], [y, x, z]]
             })
-            .flatten()
             .collect();
         let contact = crate::kit::contact_faces(a, b, 0.25);
-        let matched = contact
-            .iter()
-            .filter(|&&t| mirrored.contains(&a.tris[t].map(|v| key(a.positions[v as usize]))))
-            .count();
+        let matched =
+            contact.iter().filter(|&&t| mirrored.contains(&a.tris[t].map(|v| key(a.positions[v as usize])))).count();
         // All but the strip where both meet the outside.
         assert!(matched as f32 > 0.9 * contact.len() as f32, "{matched} of {}", contact.len());
     }
@@ -1038,5 +1140,78 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn pins_key_two_halves_with_clearance() {
+        let (p, t) = cuboid([0.0; 3], [30.0; 3]);
+        let model = soup(&p, &t);
+        let halves = |tri: u32, b: Bary| u8::from(geom::at(&model.corners[tri as usize], b)[2] > 15.0);
+        let pins = PinParams::default();
+        let s = split(&model, halves, SplitParams { voxel_mm: 0.5, pins: Some(pins), ..Default::default() });
+        assert_eq!(s.pieces.len(), 2);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+        assert_eq!(s.pins.len(), 2, "{:?}", s.pins);
+        assert_eq!(s.unpinned, 0);
+        let PinJoin { pin, socket, .. } = s.pins[0];
+        assert_ne!(pin, socket);
+        // The pins stand out of their piece, and only that far.
+        let top = s.pieces[pin].positions.iter().map(|v| v[2]).fold(f32::MIN, f32::max);
+        let bottom = s.pieces[pin].positions.iter().map(|v| v[2]).fold(f32::MAX, f32::min);
+        let reach = if bottom < 1.0 { top - 15.0 } else { 15.0 - bottom };
+        assert!((reach - pins.depth_mm).abs() < 0.05, "{reach}");
+        // Every bit of a pin keeps about the clearance from its socket.
+        let mut other = TriSoup::default();
+        for t in &s.pieces[socket].tris {
+            other.push(t.map(|v| s.pieces[socket].positions[v as usize]), 0, 0);
+        }
+        let bvh = Bvh::build(&other);
+        let gaps: Vec<f32> = s.pieces[pin]
+            .positions
+            .iter()
+            .filter(|v| (v[2] - 15.0).abs() > 0.3 && (v[2] - 15.0).abs() < pins.depth_mm + 0.01)
+            .filter(|v| (v[2] > 15.0) == (bottom < 1.0))
+            .map(|&q| {
+                let (t, b) = bvh.nearest(&other, q).unwrap();
+                geom::len(geom::sub(geom::at(&other.corners[t as usize], b), q))
+            })
+            .collect();
+        assert!(gaps.len() > 50);
+        let min = gaps.iter().copied().fold(f32::MAX, f32::min);
+        let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
+        assert!(min > 0.1 && (mean - pins.clearance_mm).abs() < 0.04, "min {min}, mean {mean}");
+    }
+
+    #[test]
+    fn the_pin_goes_where_its_socket_fits() {
+        // A small cube standing on a wide, thin plate: no room for a socket
+        // in the plate, so the pin stands out of the plate into the cube.
+        let (mut p, mut t) = cuboid([0.0; 3], [60.0, 60.0, 3.0]);
+        let (cp, ct) = cuboid([25.0, 25.0, 2.0], [37.0, 37.0, 14.0]);
+        let base = p.len() as u32;
+        p.extend(cp);
+        t.extend(ct.iter().map(|x| x.map(|v| v + base)));
+        let model = soup(&p, &t);
+        let cube = |tri: u32, b: Bary| u8::from(geom::at(&model.corners[tri as usize], b)[2] > 3.0);
+        let s =
+            split(&model, cube, SplitParams { voxel_mm: 0.5, pins: Some(PinParams::default()), ..Default::default() });
+        assert_eq!(s.pieces.len(), 2);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+        assert_eq!(s.pins.len(), 1, "{:?}", s.pins);
+        let PinJoin { pin, socket, .. } = s.pins[0];
+        assert_eq!((s.pieces[pin].slot, s.pieces[socket].slot), (0, 1));
+    }
+
+    #[test]
+    fn no_pin_where_none_fits() {
+        // Two slabs 2 mm thick: no socket fits in either.
+        let (p, t) = cuboid([0.0; 3], [30.0, 30.0, 4.0]);
+        let model = soup(&p, &t);
+        let slab = |tri: u32, b: Bary| u8::from(geom::at(&model.corners[tri as usize], b)[2] > 2.0);
+        let s =
+            split(&model, slab, SplitParams { voxel_mm: 0.5, pins: Some(PinParams::default()), ..Default::default() });
+        assert!(s.pins.is_empty());
+        assert_eq!(s.unpinned, 1);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
     }
 }

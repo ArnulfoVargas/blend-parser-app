@@ -60,7 +60,15 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   el explorador de archivos. Si el visor no puede dibujarla, el 3MF sale sin ella.
 - Exportar por color: divide el modelo en piezas **sólidas** (no cáscaras) que encajan entre sí.
   Cada voxel interior toma el color de la superficie pintada más cercana, o solo hasta una
-  profundidad dada sobre un núcleo de un color; las migas se unen a su vecina. El `.zip` trae un
+  profundidad dada sobre un núcleo de un color; las migas se unen a su vecina. Las superficies se
+  pulen igual a ambos lados de cada unión: el borde de color queda sobre la superficie del modelo
+  (sin ranura), la piel sigue al modelo sin escalones y cada unión se simplifica una sola vez y se
+  usa volteada por la otra pieza, así que encajan exactas y siguen cerradas. Opcionalmente,
+  **espigas** como de bloque de juguete: en cada unión con sitio, una espiga redonda (diámetro,
+  alto y holgura a elegir) sale de una pieza y entra en un alojamiento de la otra, con pared
+  alrededor; la superficie de ambas se coloca exacta sobre su cilindro, así que la holgura se
+  respeta aunque sea menor que el vóxel. La guía avisa de qué uniones llevan espiga y de las que
+  entrarían desde direcciones cruzadas. El `.zip` trae un
   3MF con las piezas giradas sobre su cara más plana y acomodadas en placas de un solo color, un
   STL por pieza y una guía de armado (`guia-de-armado.html` con imágenes de cada paso, e
   `instrucciones.txt`).
@@ -326,7 +334,8 @@ crates/
     optimize    Limpieza de islas de color por adyacencia
     estimate    Cambios de filamento por capa, con su sentido
     waste       Desperdicio: purga por par de colores, purga inicial y torre
-    split       Piezas sólidas por color: vóxeles, Voronoi de la superficie, tetraedros marchantes
+    split       Piezas sólidas por color: vóxeles, Voronoi de la superficie, tetraedros marchantes,
+                pulido compartido entre piezas y espigas con holgura (split/pins.rs)
     kit         Orientación de cada pieza, acomodo en placas por color y orden de armado
     render      Renderizador por software para las imágenes de la guía
     bvh         Picking del pincel, consulta por esfera, punto más cercano
