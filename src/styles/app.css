@@ -452,6 +452,9 @@ details.group[open] .group__sum { visibility: hidden; }
 /* Estante de herramientas dentro de la vista, como el de Blender: iconos, y sus nombres al desplegarlo */
 .toolbar { position: absolute; z-index: 3; top: var(--space-md); left: var(--space-md); display: flex; flex-direction: column; gap: var(--space-3xs); padding: var(--space-3xs); border-radius: var(--radius-input); background: color-mix(in oklab, var(--color-paper) 88%, transparent); box-shadow: 0 0 0 1px var(--color-rule), 0 6px 16px -10px color-mix(in oklab, var(--color-ink) 40%, transparent); backdrop-filter: blur(6px); }
 .app:not([data-state="ready"]) .toolbar { display: none; }
+/* More tools than a short view has room for: the shelf scrolls instead of running off the view. */
+.toolbar { max-height: calc(100% - 2 * var(--space-md)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.toolbar > * { flex-shrink: 0; }
 .toolbar__btn { position: relative; display: flex; align-items: center; gap: var(--space-xs); min-width: 36px; height: 36px; padding: 0 var(--space-xs); border: 0; border-radius: 8px; background: none; color: var(--color-ink-2); font: 500 var(--text-sm)/1 var(--font-body); white-space: nowrap; cursor: pointer; transition: background-color var(--dur-short) var(--ease-out), color var(--dur-short) var(--ease-out); }
 .toolbar__icon { flex: none; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .toolbar__icon .fill { fill: currentColor; stroke: none; }

@@ -13,7 +13,7 @@ import { CutPreview, type CutExtent } from "./cut-preview";
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
-export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section";
+export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "separate";
 export type Axis = 0 | 1 | 2;
 
 /** Plane point in preview units; XYZ Euler angles in degrees; negative side kept unless flipped. */
@@ -42,6 +42,8 @@ export interface BrushHandlers {
   cutChoice(both: boolean): void;
   cutPicking(active: boolean): void;
   cutDimensions(low: Vec3 | null, high: Vec3 | null): void;
+  /** A click (not a drag) on the view with a tool that picks pieces: the preview triangle under it, if any. */
+  toolClick?(tool: Tool, triangle: number | null, additive: boolean): void;
 }
 
 /** A size handle: one axis, or all three from the corner. */
@@ -82,6 +84,8 @@ export class Viewer {
   private controls: OrbitControls;
   private mesh: THREE.Mesh | null = null;
   private colors: Uint8Array | null = null;
+  /** Colour per preview triangle that replaces its filament while a tool shows pieces. */
+  private tint: (Vec3 | null)[] | null = null;
   private data: PreviewMesh | null = null;
   private palette: [number, number, number][] = [];
   private view: View = "filament";
@@ -423,6 +427,7 @@ export class Viewer {
     this.sectionLine.cancel();
     this.sectionLine.clear();
     this.data = data;
+    this.tint = null;
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -597,12 +602,34 @@ export class Viewer {
     this.requestRender();
   }
 
+  /** Colours preview triangles (RGB 0–255) over their filament; null puts the filaments back. */
+  setTriangleTint(colors: (Vec3 | null)[] | null) {
+    this.tint = colors && this.data && colors.length === this.data.offsets.length - 1 ? colors : null;
+    this.recolorAll();
+  }
+
+  /** The preview triangle a leaf belongs to. */
+  private triangleOf(leaf: number): number {
+    const offsets = this.data!.offsets;
+    let lo = 0, hi = offsets.length - 2;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (offsets[mid] <= leaf) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  }
+
   private colorLeaves(from: number, to: number) {
     const { labels, sourceRgb } = this.data!;
     const c = this.colors!;
+    let tri = this.tint && from < to ? this.triangleOf(from) : 0;
     for (let l = from; l < to; l++) {
       let r: number, g: number, b: number;
-      if (this.view === "texture") {
+      if (this.tint) while (l >= this.data!.offsets[tri + 1]) tri++;
+      const tinted = this.tint?.[tri];
+      if (tinted) {
+        [r, g, b] = tinted;
+      } else if (this.view === "texture") {
         r = sourceRgb[l * 3]; g = sourceRgb[l * 3 + 1]; b = sourceRgb[l * 3 + 2];
       } else {
         [r, g, b] = this.palette[labels[l]] ?? [200, 200, 200];
@@ -1592,7 +1619,7 @@ export class Viewer {
   }
 
   private onDown(e: PointerEvent) {
-    if (this.tool === "measure" && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
+    if ((this.tool === "measure" || this.tool === "separate") && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
     if (this.drag || this.moveDrag || this.turnDrag || this.planeDrag) return;
     if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
     this.painting = true;
@@ -1625,6 +1652,11 @@ export class Viewer {
       }
       if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
       return;
+    }
+    if (this.tool === "separate" && d && this.mesh && this.data && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+      this.rayFrom(e);
+      const hit = this.ray.intersectObject(this.mesh, false)[0];
+      this.handlers.toolClick?.(this.tool, hit?.faceIndex != null ? this.triangleOf(hit.faceIndex) : null, e.ctrlKey || e.metaKey || e.shiftKey);
     }
     if (this.tool === "measure" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
       this.shift = e.shiftKey;

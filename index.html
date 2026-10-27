@@ -267,6 +267,7 @@
           <button class="toolbar__btn" type="button" data-tool="move" aria-pressed="false" data-i18n-attr="title:stage.moveTitle;aria-label:stage.moveTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5 12 3l2.5 2.5M9.5 18.5 12 21l2.5-2.5M5.5 9.5 3 12l2.5 2.5M18.5 9.5 21 12l-2.5 2.5"/></svg><span class="toolbar__label" data-i18n="stage.move"></span><kbd>G</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="rotate" aria-pressed="false" data-i18n-attr="title:stage.rotateTitle;aria-label:stage.rotateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.8 3.5v4h-4"/><ellipse cx="12" cy="12" rx="7.5" ry="2.6"/></svg><span class="toolbar__label" data-i18n="stage.rotate"></span><kbd>R</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="section" aria-pressed="false" data-on="false" data-i18n-attr="title:stage.sectionTitle;aria-label:stage.sectionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M2.5 12.5 12 7.5l9.5 5-9.5 5z" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.section"></span><kbd>C</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="separate" aria-pressed="false" data-i18n-attr="title:stage.separateTitle;aria-label:stage.separateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 11 6.5 9l4 2v5l-4 2-4-2z"/><path d="M13.5 8 17.5 6l4 2v5l-4 2-4-2z" class="cut"/><path d="M10 6.5 12.5 4M11.5 18.5 14 16"/></svg><span class="toolbar__label" data-i18n="stage.separate"></span><kbd>D</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
@@ -327,6 +328,34 @@
             <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Apply cut</button></div>
           </div>
           <p class="cut-review"><span id="cut-extents"></span><span id="cut-status" role="status" aria-live="polite"></span></p>
+        </div>
+        <div class="sep-controls" id="sep-controls" aria-labelledby="sep-title">
+          <div class="sep-head">
+            <h3 class="sep-title" id="sep-title" data-i18n="sep.title">Pieces</h3>
+            <span class="sep-count" id="sep-count" role="status"></span>
+            <div class="sep-place"><span data-i18n="sep.place">New objects</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:sep.place"><button type="button" id="sep-assembled" aria-pressed="true" data-i18n="sep.assembled">Where they are</button><button type="button" id="sep-flat" aria-pressed="false" data-i18n="sep.flat">On the plate</button></div></div>
+            <label class="sep-weld" data-i18n-attr="title:sep.weldHelp"><span data-i18n="sep.weld">Join corners closer than</span><span class="unit-input"><input class="input" id="sep-weld" type="number" inputmode="decimal" min="0" max="5" step="0.01" value="0.01"><span aria-hidden="true">mm</span></span></label>
+            <button class="cut-action" type="button" id="sep-detect" data-i18n-attr="title:sep.detect;aria-label:sep.detect"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 8M4 4v6h6"/></svg></button>
+          </div>
+          <div class="sep-table" role="region" aria-labelledby="sep-title" tabindex="-1"><table class="sep-list"><thead><tr><th scope="col"><input type="checkbox" id="sep-all" data-i18n-attr="aria-label:sep.selectAll"></th><th scope="col" data-i18n="sep.piece">Piece</th><th scope="col" data-i18n="sep.size">Size</th><th scope="col" data-i18n="sep.surface">Surface</th><th scope="col" data-i18n="sep.goes">Becomes</th></tr></thead><tbody id="sep-rows"></tbody></table></div>
+          <div class="sep-foot">
+            <div class="sep-batch" role="group" data-i18n-attr="aria-label:sep.batch">
+              <span class="sep-batch__label" id="sep-picked"></span>
+              <button class="btn btn--quiet btn--sm" type="button" id="sep-group" data-i18n="sep.group">Join into one object</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="sep-split" data-i18n="sep.each">One object each</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="sep-keep" data-i18n="sep.keep">Leave in the model</button>
+            </div>
+            <details class="sep-proposals" id="sep-proposals">
+              <summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16M12 4v3m0 10v3"/><path d="M7 7.5 4 12l3 4.5M17 7.5l3 4.5-3 4.5"/></svg><span data-i18n="sep.proposals">Cut proposals</span><svg class="sep-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 14 4-4 4 4"/></svg></summary>
+              <div class="sep-proposals__menu">
+                <p class="sep-note" data-i18n="sep.proposalsHelp">Suggestions to review, read from where the model narrows and where its colour changes. Nothing is cut until you confirm it in the Section tool.</p>
+                <div class="sep-proposals__run"><button class="btn btn--quiet btn--sm" type="button" id="sep-propose" data-i18n="sep.propose">Find proposals</button><span id="sep-propose-status" role="status"></span></div>
+                <ol class="sep-proposal-list" id="sep-proposal-list"></ol>
+              </div>
+            </details>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="sep-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="sep-apply" data-i18n="sep.apply" data-i18n-attr="title:sep.applyHelp">Separate</button></div>
+          </div>
+          <p class="sep-status" id="sep-status" role="status" aria-live="polite"></p>
         </div>
         <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
         <p class="stage__hint" data-bind="hint"></p>

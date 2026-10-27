@@ -13,7 +13,9 @@ use crate::optimize;
 use crate::paint::{self, Node, PaintParams};
 use crate::palette;
 use crate::scene::{Part, Scene};
+use crate::separate;
 use crate::split::{self, ColorPiece};
+use std::collections::HashMap;
 
 /// Colour settings, in final millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +80,39 @@ pub struct Stats {
     /// For each slot, the closest other slot and their ΔE.
     pub nearest: Vec<Option<(usize, f32)>>,
     pub repair: RepairReport,
+}
+
+/// A disconnected piece of the model (see [`Project::detect_pieces`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetectedPiece {
+    /// The scene part it is in.
+    pub part: usize,
+    pub triangles: usize,
+    pub size_mm: Vec3,
+    /// Its box's centre, in preview coordinates.
+    pub centre: Vec3,
+    /// Its surface is closed and consistently wound.
+    pub closed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeparateError {
+    /// The pieces asked for are not the ones the model has now.
+    Stale,
+    /// Every piece would stay in the object it is in.
+    NothingToSeparate,
+}
+
+/// A plane worth reviewing as a cut (see [`Project::propose_cuts`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CutProposal {
+    pub part: usize,
+    pub axis: usize,
+    /// Preview coordinates, as the cut tool takes them.
+    pub point: Vec3,
+    pub normal: Vec3,
+    /// Areas in final square millimetres.
+    pub signal: separate::Signal,
 }
 
 #[derive(Clone)]
@@ -158,6 +193,8 @@ struct CutSnapshot {
     unrotated: Vec<Vec<Vec3>>,
     painted: Vec<Vec<u8>>,
     undo: Vec<UndoEntry>,
+    /// What the undo button calls it: "cut", "separate"…
+    kind: &'static str,
 }
 
 /// Transfers brush labels within one part. Exact source ancestry takes priority;
@@ -670,13 +707,6 @@ impl Project {
             return Err(cut::CutError::Misses);
         }
         self.end_stroke();
-        let parts = std::mem::take(&mut self.scene.parts);
-        self.cut_history.push(CutSnapshot {
-            parts,
-            unrotated: self.unrotated.clone(),
-            painted: self.painted.clone(),
-            undo: std::mem::take(&mut self.undo),
-        });
         let kept_normal = geom::scale(preview_plane.normal, if keep_low { 1.0 } else { -1.0 });
         let rotate_parts = |parts: &mut Vec<Part>, normal: Vec3| {
             let turn = rotation_between(normal, [0.0, 0.0, -1.0]);
@@ -739,7 +769,30 @@ impl Project {
         }
         kept.append(&mut untouched);
         kept_paint.append(&mut untouched_paint);
-        self.scene.parts = kept;
+        self.commit_parts(kept, kept_paint, &transfers, "cut");
+        Ok(())
+    }
+
+    /// Replaces the scene's parts as one undoable step (`kind` names it for the
+    /// undo button). Each new part says where its triangles came from, so brush
+    /// labels follow them; triangles with no parent take the model's colours.
+    fn commit_parts(
+        &mut self,
+        parts: Vec<Part>,
+        paint: Vec<Option<CutPaint>>,
+        transfers: &[Option<PaintTransfer>],
+        kind: &'static str,
+    ) {
+        self.end_stroke();
+        let previous = std::mem::replace(&mut self.scene.parts, parts);
+        self.cut_history.push(CutSnapshot {
+            parts: previous,
+            unrotated: self.unrotated.clone(),
+            painted: self.painted.clone(),
+            undo: std::mem::take(&mut self.undo),
+            kind,
+        });
+        let kept_paint = paint;
         let shift = self.scene.place_on_plate();
         self.placement = geom::add(self.placement, shift);
         self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
@@ -785,7 +838,6 @@ impl Project {
         }
         self.rebuild_paint();
         self.undo.push(UndoEntry::Cut);
-        Ok(())
     }
 
     pub fn can_undo_cut(&self) -> bool {
@@ -795,6 +847,223 @@ impl Project {
     /// Printed objects: 1 for the model, more once pieces cut off it are kept.
     pub fn object_count(&self) -> usize {
         self.scene.parts.iter().map(|p| p.object).collect::<std::collections::HashSet<_>>().len().max(1)
+    }
+
+    // ---- separating pieces -------------------------------------------------
+
+    /// Disconnected pieces of every part, triangles as the scene has them.
+    /// Corners within `weld_mm` (final millimetres) count as one.
+    fn source_pieces(&self, weld_mm: f32) -> Vec<(usize, Vec<u32>)> {
+        let weld = weld_mm.max(0.0) / self.scale;
+        self.scene
+            .parts
+            .iter()
+            .enumerate()
+            .flat_map(|(pi, p)| separate::pieces(&p.positions, &p.tris, weld).into_iter().map(move |t| (pi, t)))
+            .collect()
+    }
+
+    /// The disconnected pieces of the model, part by part and largest first,
+    /// and for each triangle of the preview mesh the piece it belongs to.
+    pub fn detect_pieces(&self, weld_mm: f32) -> (Vec<DetectedPiece>, Vec<u32>) {
+        let found = self.source_pieces(weld_mm);
+        let weld = weld_mm.max(0.0) / self.scale;
+        let mut by_tri: Vec<Vec<u32>> = self.scene.parts.iter().map(|p| vec![u32::MAX; p.tris.len()]).collect();
+        let pieces = found
+            .iter()
+            .enumerate()
+            .map(|(k, (pi, tris))| {
+                let part = &self.scene.parts[*pi];
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for &t in tris {
+                    by_tri[*pi][t as usize] = k as u32;
+                    for v in part.tris[t as usize] {
+                        let p = part.positions[v as usize];
+                        lo = std::array::from_fn(|i| lo[i].min(p[i]));
+                        hi = std::array::from_fn(|i| hi[i].max(p[i]));
+                    }
+                }
+                DetectedPiece {
+                    part: *pi,
+                    triangles: tris.len(),
+                    size_mm: geom::scale(geom::sub(hi, lo), self.scale),
+                    centre: geom::scale(geom::add(lo, hi), 0.5),
+                    closed: separate::closed(&part.positions, &part.tris, tris, weld),
+                }
+            })
+            .collect();
+        // Simplified triangles lost their source face: the nearest one stands in.
+        let mut work = Vec::with_capacity(self.work.triangle_count());
+        for (pi, shape) in self.shape.parts.iter().enumerate() {
+            let source = &self.scene.parts[pi];
+            let lookup = shape.origin.is_none().then(|| {
+                let mut soup = TriSoup::default();
+                for ti in 0..source.tris.len() {
+                    soup.push(source.corners(ti), 0, ti as u32);
+                }
+                (Bvh::build(&soup), soup)
+            });
+            for ti in 0..shape.tris.len() {
+                let src = match (&shape.origin, &lookup) {
+                    (Some(origin), _) => Some(origin[ti].0),
+                    (None, Some((bvh, soup))) => {
+                        bvh.nearest(soup, geom::at(&shape.corners(ti), [1.0 / 3.0; 3])).map(|h| h.0)
+                    }
+                    _ => None,
+                };
+                work.push(src.and_then(|s| by_tri[pi].get(s as usize).copied()).unwrap_or(u32::MAX));
+            }
+        }
+        (pieces, work)
+    }
+
+    /// Makes the pieces [`Self::detect_pieces`] found with the same `weld_mm`
+    /// objects of their own: pieces given the same group form one object, and
+    /// `None` leaves a piece in the object it is in. The pieces' triangles do
+    /// not change, so colours and hand painting stay. With `lay_flat` each new
+    /// object rests on the plate in a row beside the model; otherwise the
+    /// pieces keep their assembly position. One undoable step; returns how
+    /// many objects there are now.
+    pub fn separate_pieces(
+        &mut self,
+        weld_mm: f32,
+        groups: &[Option<u32>],
+        lay_flat: bool,
+    ) -> Result<usize, SeparateError> {
+        let found = self.source_pieces(weld_mm);
+        if found.len() != groups.len() {
+            return Err(SeparateError::Stale);
+        }
+        // Nothing changes when the pieces end up grouped exactly as they were.
+        let mut forward: HashMap<u32, (bool, u32)> = HashMap::new();
+        let mut backward: HashMap<(bool, u32), u32> = HashMap::new();
+        let unchanged = found.iter().zip(groups).all(|((pi, _), g)| {
+            let before = self.scene.parts[*pi].object;
+            let after = g.map_or((false, before), |g| (true, g));
+            *forward.entry(before).or_insert(after) == after && *backward.entry(after).or_insert(before) == before
+        });
+        if unchanged || groups.iter().all(Option::is_none) {
+            return Err(SeparateError::NothingToSeparate);
+        }
+        let transfers: Vec<_> = self
+            .scene
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(pi, part)| {
+                self.painted[pi]
+                    .iter()
+                    .any(|&l| l != NO_LABEL)
+                    .then(|| PaintTransfer::new(&self.shape.parts[pi], &self.painted[pi], part.tris.len()))
+            })
+            .collect();
+        let stretch = self.stretch;
+        let first_new_object = self.scene.parts.iter().map(|p| p.object).max().unwrap_or(0) + 1;
+        let mut order: Vec<u32> = groups.iter().flatten().copied().collect();
+        order.sort_unstable();
+        order.dedup();
+        let (mut kept, mut kept_paint) = (vec![], vec![]);
+        // Per new object, its parts (one per source part it takes pieces from).
+        let mut moved: Vec<Vec<(Part, Option<CutPaint>)>> = (0..order.len()).map(|_| vec![]).collect();
+        for (pi, (part, src)) in self.scene.parts.iter().zip(&self.source_positions).enumerate() {
+            let whole = Part { positions: src.clone(), ..part.clone() };
+            let piece = |tris: &[u32]| {
+                let p = separate::sub_part(&whole, tris);
+                let paint = transfers[pi].as_ref().map(|_| CutPaint {
+                    part: pi,
+                    origins: tris.iter().map(|&t| Some(t)).collect(),
+                    corners: tris
+                        .iter()
+                        .map(|&t| whole.corners(t as usize).map(|v| std::array::from_fn(|i| v[i] * stretch[i])))
+                        .collect(),
+                });
+                (p, paint)
+            };
+            let mine: Vec<(&Vec<u32>, Option<u32>)> =
+                found.iter().zip(groups).filter(|((p, _), _)| *p == pi).map(|((_, t), g)| (t, *g)).collect();
+            let mut stay: Vec<u32> =
+                mine.iter().filter(|(_, g)| g.is_none()).flat_map(|(t, _)| t.iter().copied()).collect();
+            if !stay.is_empty() {
+                stay.sort_unstable();
+                let (p, paint) = piece(&stay);
+                kept.push(p);
+                kept_paint.push(paint);
+            }
+            for (rank, g) in order.iter().enumerate() {
+                let mut tris: Vec<u32> =
+                    mine.iter().filter(|(_, x)| *x == Some(*g)).flat_map(|(t, _)| t.iter().copied()).collect();
+                if tris.is_empty() {
+                    continue;
+                }
+                tris.sort_unstable();
+                let (mut p, paint) = piece(&tris);
+                p.object = first_new_object + rank as u32;
+                p.name = format!("{} ({})", p.name, p.object + 1);
+                moved[rank].push((p, paint));
+            }
+        }
+        if lay_flat {
+            // Each object down on the plate, then side by side along X past the rest, 5 mm apart.
+            let bed_z = self.source_positions.iter().flatten().map(|v| v[2]).fold(f32::INFINITY, f32::min);
+            let bounds = |parts: &mut dyn Iterator<Item = &Part>| {
+                parts.flat_map(|p| p.positions.iter()).fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
+                    (std::array::from_fn(|i| lo[i].min(v[i])), std::array::from_fn(|i| hi[i].max(v[i])))
+                })
+            };
+            let (klo, khi) = bounds(&mut kept.iter());
+            let mut x = if kept.is_empty() { None } else { Some(khi[0]) };
+            let centre_y = if kept.is_empty() { 0.0 } else { (klo[1] + khi[1]) / 2.0 };
+            let gap = 5.0 / self.scale / stretch[0];
+            for object in &mut moved {
+                let (lo, hi) = bounds(&mut object.iter().map(|(p, _)| p));
+                let to_x = x.map_or(lo[0], |x| x + gap);
+                let shift = [to_x - lo[0], centre_y - (lo[1] + hi[1]) / 2.0, bed_z - lo[2]];
+                for v in object.iter_mut().flat_map(|(p, _)| p.positions.iter_mut()) {
+                    *v = geom::add(*v, shift);
+                }
+                x = Some(hi[0] + shift[0]);
+            }
+        }
+        for (p, paint) in moved.into_iter().flatten() {
+            kept.push(p);
+            kept_paint.push(paint);
+        }
+        self.commit_parts(kept, kept_paint, &transfers, "separate");
+        Ok(self.object_count())
+    }
+
+    /// Planes worth reviewing to split a continuous mesh, in preview
+    /// coordinates: where it narrows and where its colour changes. Only
+    /// suggestions; nothing is cut until the user confirms a cut.
+    pub fn propose_cuts(&self, selected: &[usize]) -> Vec<CutProposal> {
+        let labels: Vec<Vec<u8>> = self.trees.iter().map(|n| n.iter().map(Node::dominant).collect()).collect();
+        let closed: Vec<bool> = self
+            .work
+            .parts
+            .iter()
+            .map(|p| separate::closed(&p.positions, &p.tris, &(0..p.tris.len() as u32).collect::<Vec<_>>(), 0.0))
+            .collect();
+        let mm2 = self.scale * self.scale;
+        separate::proposals(&self.work.parts, &labels, selected, &closed)
+            .into_iter()
+            .map(|p| {
+                let (lo, hi) =
+                    self.work.parts[p.part].positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
+                        (std::array::from_fn(|i| lo[i].min(v[i])), std::array::from_fn(|i| hi[i].max(v[i])))
+                    });
+                let mut point = geom::scale(geom::add(lo, hi), 0.5);
+                point[p.axis] = p.at;
+                let mut normal = [0.0; 3];
+                normal[p.axis] = 1.0;
+                let signal = match p.signal {
+                    separate::Signal::Neck { area, before, after } => {
+                        separate::Signal::Neck { area: area * mm2, before: before * mm2, after: after * mm2 }
+                    }
+                    s => s,
+                };
+                CutProposal { part: p.part, axis: p.axis, point, normal, signal }
+            })
+            .collect()
     }
 
     /// Puts back what the last cut took, in the orientation the model has now.
@@ -949,7 +1218,7 @@ impl Project {
             UndoEntry::Stroke(_) => "stroke",
             UndoEntry::Slots(_) => "merge",
             UndoEntry::Geometry(_) => "fix",
-            UndoEntry::Cut => "cut",
+            UndoEntry::Cut => self.cut_history.last().map_or("cut", |c| c.kind),
         })
     }
 
@@ -1585,6 +1854,98 @@ mod tests {
             ..Default::default()
         };
         Scene { parts: vec![part], ..Default::default() }
+    }
+
+    /// Two towers side by side in one part, the second `lift` above the plate.
+    fn twins(lift: f32) -> Scene {
+        let mut scene = tower();
+        let one = scene.parts[0].clone();
+        let part = &mut scene.parts[0];
+        let (base, loops) = (part.positions.len() as u32, part.tri_loops.len() as u32 * 3);
+        part.positions.extend(one.positions.iter().map(|v| [v[0] + 25.0, v[1], v[2] + lift]));
+        part.tris.extend(one.tris.iter().map(|t| t.map(|v| v + base)));
+        part.tri_loops.extend(one.tri_loops.iter().map(|l| l.map(|v| v + loops)));
+        part.tri_source.extend(&one.tri_source);
+        scene
+    }
+
+    #[test]
+    fn separating_pieces_keeps_geometry_and_paint_and_undoes() {
+        let mut p = Project::new(twins(0.0), 2);
+        let (pieces, map) = p.detect_pieces(0.01);
+        assert_eq!(pieces.len(), 2);
+        assert!(pieces.iter().all(|x| x.closed && x.triangles == 20 && x.part == 0));
+        assert!((pieces[0].size_mm[2] - 20.0).abs() < 1e-3);
+        assert_eq!(map.len(), p.work.triangle_count());
+        assert!(map.iter().all(|&k| k < 2));
+        // A brush mark on the left tower.
+        let target = 1 - p.trees[0][0].dominant();
+        p.paint([-15.0, -50.0, 3.0], [0.0, 1.0, 0.0], 0.01, target).unwrap();
+        p.end_stroke();
+        let area = brush_area(&p, target);
+        assert!(area > 0.0);
+        let before = p.preview();
+        let bounds = p.work.bounds().unwrap();
+        let left = usize::from(pieces[0].centre[0] > pieces[1].centre[0]);
+        let groups: Vec<Option<u32>> = (0..2).map(|k| (k != left).then_some(0)).collect();
+        assert_eq!(p.separate_pieces(0.01, &groups, false), Ok(2));
+        assert_eq!(p.undo_label(), Some("separate"));
+        assert_eq!(p.scene.parts.len(), 2);
+        assert_eq!(p.scene.parts.iter().map(|x| x.object).collect::<Vec<_>>(), [0, 1]);
+        // The assembly position is kept: same box, same triangles, same painting.
+        assert_eq!(p.work.bounds().unwrap(), bounds);
+        assert_eq!(p.work.triangle_count(), 40);
+        assert_eq!(p.painted_count(), 1);
+        assert!((brush_area(&p, target) - area).abs() < 1e-4);
+        for part in &p.scene.parts {
+            assert!(cut::valid_solid(part, 1e-5));
+        }
+        assert_eq!(p.export_parts().iter().map(|x| x.object).collect::<Vec<_>>(), [0, 1]);
+        assert!(p.undo());
+        assert_eq!(p.object_count(), 1);
+        assert_eq!(p.preview().positions, before.positions);
+        assert_eq!(p.preview().labels, before.labels);
+    }
+
+    #[test]
+    fn separated_pieces_can_rest_on_the_plate_beside_the_model() {
+        let mut p = Project::new(twins(5.0), 2);
+        let (pieces, _) = p.detect_pieces(0.01);
+        let high = usize::from(pieces[1].centre[2] > pieces[0].centre[2]);
+        let groups: Vec<Option<u32>> = (0..2).map(|k| (k == high).then_some(7)).collect();
+        assert_eq!(p.separate_pieces(0.01, &groups, true), Ok(2));
+        let parts = p.export_parts();
+        let span = |o: u32, axis: usize| {
+            let vs = parts.iter().filter(|x| x.object == o).flat_map(|x| x.positions.iter().map(move |v| v[axis]));
+            vs.fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v), b.max(v)))
+        };
+        let (moved, stay) = (span(1, 2), span(0, 2));
+        assert!(moved.0.abs() < 1e-3 && stay.0.abs() < 1e-3, "{moved:?} {stay:?}");
+        assert!((span(1, 0).0 - span(0, 0).1 - 5.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn separating_refuses_stale_or_empty_choices() {
+        let mut p = Project::new(twins(0.0), 2);
+        assert_eq!(p.separate_pieces(0.01, &[Some(0)], false), Err(SeparateError::Stale));
+        assert_eq!(p.separate_pieces(0.01, &[None, None], false), Err(SeparateError::NothingToSeparate));
+        // Both pieces into one new object: still one object, nothing to do.
+        assert_eq!(p.separate_pieces(0.01, &[Some(3), Some(3)], false), Err(SeparateError::NothingToSeparate));
+        assert!(!p.can_undo_cut());
+        // A tolerance as wide as the gap between the towers makes them one piece.
+        assert_eq!(p.detect_pieces(20.0).0.len(), 1);
+    }
+
+    #[test]
+    fn a_continuous_tower_gets_a_colour_proposal_where_red_meets_blue() {
+        let p = Project::new(tower(), 2);
+        let found = p.propose_cuts(&[]);
+        let z: Vec<_> = found.iter().filter(|x| x.axis == 2).collect();
+        assert_eq!(z.len(), 1, "{found:?}");
+        assert!((z[0].point[2] - 10.0).abs() < 0.5 && z[0].normal == [0.0, 0.0, 1.0]);
+        assert!(matches!(z[0].signal, separate::Signal::Colour { .. }));
+        // It is a proposal only: the model is still one piece.
+        assert_eq!(p.detect_pieces(0.01).0.len(), 1);
     }
 
     #[test]

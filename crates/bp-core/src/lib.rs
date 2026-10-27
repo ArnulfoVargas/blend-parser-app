@@ -15,11 +15,14 @@ pub mod palette;
 pub mod printability;
 pub mod project;
 pub mod scene;
+pub mod separate;
 pub mod split;
 pub mod waste;
 
 pub use mesh::{MeshOps, RepairReport};
-pub use project::{ColorOps, ExportPart, Mat3, Preview, PrintOps, Project, Stats, IDENTITY};
+pub use project::{
+    ColorOps, CutProposal, DetectedPiece, ExportPart, Mat3, Preview, PrintOps, Project, SeparateError, Stats, IDENTITY,
+};
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;
 pub use waste::{Waste, WasteParams};

@@ -121,11 +121,21 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | "fix" | "cut" | null;
+  undoLabel: "stroke" | "merge" | "fix" | "cut" | "separate" | null;
   paintedTriangles: number;
 }
 
 export interface Hit { point: Vec3; normal: Vec3 }
+
+/** A disconnected piece of the model. */
+export interface Piece { part: number; partName: string; object: number; triangles: number; sizeMm: Vec3; centre: Vec3; closed: boolean }
+/** The pieces and, per preview triangle, the index of its piece (2³²−1 for none). */
+export interface Pieces { pieces: Piece[]; triPiece: number[] }
+/** A plane worth reviewing as a cut, in preview coordinates, with the signal behind it. */
+export interface CutProposal {
+  part: number; axis: 0 | 1 | 2; point: Vec3; normal: Vec3;
+  signal: { kind: "neck"; areaMm2: number; beforeMm2: number; afterMm2: number } | { kind: "colour"; from: number; to: number };
+}
 export interface PaintResult extends Hit { tris: number[] }
 
 /** The paintable mesh, decoded from the binary preview payload. */
@@ -179,6 +189,10 @@ export const api = {
   previewCut: (point: Vec3, normal: Vec3, keepLow: boolean, keepOther: boolean, layOnCut: boolean, selected: number[]) =>
     invoke<number>("preview_cut", { point, normal, keepLow, keepOther, layOnCut, selected }),
   undoCut: () => invoke<Summary>("undo_cut"),
+  detectPieces: (weldMm: number) => invoke<Pieces>("detect_pieces", { weldMm }),
+  /** Same group: one object; null: the piece stays in the object it is in. */
+  separatePieces: (weldMm: number, groups: (number | null)[], layFlat: boolean) => invoke<Summary>("separate_pieces", { weldMm, groups, layFlat }),
+  proposeCuts: (selected: number[]) => invoke<CutProposal[]>("propose_cuts", { selected }),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),
   setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number) =>
