@@ -491,6 +491,14 @@ details.group[open] .group__sum { visibility: hidden; }
 .place__group:first-child { padding-left: 0; }
 .place__group + .place__group { border-left: 1px solid var(--color-rule); }
 .place .check { min-height: 36px; }
+.joint-kind { display: flex; align-items: center; gap: var(--space-xs); }
+.select--sm { min-height: 32px; padding: 0 var(--space-xs); font-size: var(--text-sm); }
+.joint { position: relative; }
+.joint > summary { list-style: none; cursor: pointer; }
+.joint > summary::-webkit-details-marker { display: none; }
+.joint.is-off > summary { opacity: 0.55; }
+.joint__panel { position: absolute; z-index: var(--z-dropdown); bottom: calc(100% + var(--space-2xs)); left: 0; display: grid; gap: var(--space-sm); width: 16rem; padding: var(--space-sm); border-radius: var(--radius-input); background: var(--grain), var(--color-paper); box-shadow: 0 0 0 1px var(--color-rule), var(--shadow-lift); white-space: normal; }
+.joint__panel .field__unit .input { width: 6rem; }
 .app[data-tool="section"] .stage__foot { flex-wrap: wrap; row-gap: var(--space-xs); }
 .app[data-tool="section"] .stage__hint { flex-basis: 100%; text-align: left; }
 .seg--sm button { min-height: 30px; padding: 0 var(--space-sm); }

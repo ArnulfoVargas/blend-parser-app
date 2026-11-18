@@ -319,6 +319,40 @@
             <button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Cortar aquí</button>
           </div>
           <div class="place__group">
+            <label class="joint-kind" data-i18n-attr="title:joint.help"><span data-i18n="joint.label">Conectores</span>
+              <select class="select select--sm" id="joint-kind">
+                <option value="none" data-i18n="joint.none">Ninguno</option>
+                <option value="plug" selected data-i18n="joint.plug">Espiga y agujero</option>
+                <option value="dowel" data-i18n="joint.dowel">Pasadores</option>
+              </select>
+            </label>
+            <details class="joint" id="joint-details">
+              <summary class="btn btn--quiet btn--sm" data-i18n="joint.settings">Ajustes</summary>
+              <div class="joint__panel">
+                <label class="field"><span data-i18n="joint.shape">Forma</span>
+                  <select class="select" id="joint-shape">
+                    <option value="circle" data-i18n="joint.circle">Redonda</option>
+                    <option value="square" data-i18n="joint.square">Cuadrada</option>
+                    <option value="hexagon" data-i18n="joint.hexagon">Hexagonal</option>
+                  </select>
+                </label>
+                <label class="field"><span data-i18n="joint.size">Ancho</span><span class="field__unit"><input class="input" id="joint-size" type="number" min="1" max="50" step="0.5" value="6"><span>mm</span></span></label>
+                <label class="field"><span data-i18n="joint.depth">Profundidad</span><span class="field__unit"><input class="input" id="joint-depth" type="number" min="0.5" max="50" step="0.5" value="5"><span>mm</span></span></label>
+                <label class="field" data-i18n-attr="title:joint.toleranceHelp"><span data-i18n="joint.tolerance">Holgura por lado</span><span class="field__unit"><input class="input" id="joint-tolerance" type="number" min="0" max="1" step="0.05" value="0.15"><span>mm</span></span></label>
+                <label class="field"><span data-i18n="joint.count">Por cara</span>
+                  <select class="select" id="joint-count">
+                    <option value="0" selected data-i18n="joint.auto">Automático</option>
+                    <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                  </select>
+                </label>
+                <p class="help" data-i18n="joint.note">La espiga sale de la pieza que se ve y entra en la otra. Los pasadores salen como objetos aparte.</p>
+              </div>
+            </details>
+          </div>
+          <div class="place__group">
+            <button class="btn btn--quiet btn--sm" type="button" id="cut-fit" data-i18n="fit.apply" data-i18n-attr="title:fit.help">Dividir para que quepa</button>
+          </div>
+          <div class="place__group">
             <button class="btn btn--quiet btn--sm" type="button" id="cut-undo" disabled data-i18n="cut.undo">Deshacer corte</button>
             <button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.off">Quitar corte</button>
           </div>

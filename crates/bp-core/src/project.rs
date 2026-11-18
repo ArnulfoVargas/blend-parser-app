@@ -3,7 +3,7 @@
 
 use crate::bvh::{Bvh, RayHit, TriSoup};
 use crate::color::{to_u8, Classifier, Rgb};
-use crate::cut;
+use crate::cut::{self, Joint, JointAt, JointKind};
 use crate::encode;
 use crate::estimate::{self, SwapEstimate};
 use crate::field::ColorField;
@@ -130,6 +130,61 @@ fn transpose(m: &Mat3) -> Mat3 {
 pub struct RigidMove {
     pub matrix: Mat3,
     pub shift: Vec3,
+}
+
+/// What a cut with connectors, or a split to fit, made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CutReport {
+    /// Connectors that found room on the cut faces.
+    pub connectors: usize,
+    /// Dowel pins added as objects of their own.
+    pub pins: usize,
+    /// Pieces of the model a split to fit made (pins aside).
+    pub pieces: usize,
+    /// Plugs were asked for, but dowels were used so no plug stands under a piece.
+    pub dowels_instead: bool,
+}
+
+/// Most pieces a split to fit makes along one axis.
+const MAX_PIECES: usize = 8;
+
+/// Lays groups of parts (each one object) on the plate in rows `width_mm`
+/// wide, 5 mm apart, each resting on Z = 0; renumbers their objects in order.
+fn shelve(groups: Vec<Vec<Part>>, width_mm: f32, unit: Vec3) -> Vec<Part> {
+    const GAP_MM: f32 = 5.0;
+    let mm_bounds = |g: &[Part]| {
+        let mut it =
+            g.iter().flat_map(|p| p.positions.iter()).map(|v| -> Vec3 { std::array::from_fn(|i| v[i] * unit[i]) });
+        let first = it.next().unwrap_or([0.0; 3]);
+        it.fold((first, first), |(lo, hi), p| {
+            (
+                std::array::from_fn::<f32, 3, _>(|i| lo[i].min(p[i])),
+                std::array::from_fn::<f32, 3, _>(|i| hi[i].max(p[i])),
+            )
+        })
+    };
+    let (mut x, mut y, mut row) = (0.0f32, 0.0f32, 0.0f32);
+    let mut out = vec![];
+    for (k, mut group) in groups.into_iter().enumerate() {
+        let (lo, hi) = mm_bounds(&group);
+        let (w, d) = (hi[0] - lo[0], hi[1] - lo[1]);
+        if x > 0.0 && x + w > width_mm {
+            x = 0.0;
+            y += row + GAP_MM;
+            row = 0.0;
+        }
+        let shift: Vec3 = [(x - lo[0]) / unit[0], (y - lo[1]) / unit[1], -lo[2] / unit[2]];
+        for part in &mut group {
+            part.object = k as u32;
+            for v in &mut part.positions {
+                *v = geom::add(*v, shift);
+            }
+        }
+        x += w + GAP_MM;
+        row = row.max(d);
+        out.append(&mut group);
+    }
+    out
 }
 
 /// What a cut replaced, to undo it.
@@ -484,27 +539,59 @@ impl Project {
     /// on its cut face beside the model. Both openings are capped. Hand painting
     /// goes, as the triangles change. False when the plane misses the model.
     pub fn cut(&mut self, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> bool {
-        let (Some((lo, hi)), Some((_, shape_hi))) = (self.work.bounds(), self.shape.bounds()) else { return false };
+        self.cut_joined(axis, t, keep_low, keep_other, None).is_some()
+    }
+
+    /// Millimetres per scene unit along each axis.
+    fn unit(&self) -> Vec3 {
+        std::array::from_fn(|i| self.scale * self.stretch[i])
+    }
+
+    /// [`Self::cut`] that, keeping both sides, joins them with connectors placed
+    /// on the cut faces. Plugs stand out of the kept piece into holes in the
+    /// other, which rests on its face; when both faces end up on the plate (a
+    /// cut across Z keeping the top) dowels are used instead, so nothing stands
+    /// out from under a piece. Dowel pins are objects of their own. None when
+    /// the plane misses the model.
+    pub fn cut_joined(
+        &mut self,
+        axis: usize,
+        t: f32,
+        keep_low: bool,
+        keep_other: bool,
+        joint: Option<Joint>,
+    ) -> Option<CutReport> {
+        let (Some((lo, hi)), Some((_, shape_hi))) = (self.work.bounds(), self.shape.bounds()) else { return None };
         if axis > 2 || !t.is_finite() {
-            return false;
+            return None;
         }
+        let mut report = CutReport::default();
+        let joint = joint.filter(|_| keep_other).map(|mut j| {
+            if axis == 2 && !keep_low && j.kind == JointKind::Plug {
+                j.kind = JointKind::Dowel;
+                report.dowels_instead = true;
+            }
+            JointAt { joint: j, plug_side: usize::from(!keep_low), unit: self.unit() }
+        });
         // The preview is the final shape: a flattened base moved it down from where the scene is.
         let at = lo[axis] + (hi[axis] - lo[axis]) * t.clamp(0.0, 1.0) + (shape_hi[axis] - hi[axis]);
         let value = at / self.stretch[axis];
         let eps = geom::len(self.source_size) * 1e-6;
-        let (mut kept, mut other) = (vec![], vec![]);
+        let (mut kept, mut other, mut pins) = (vec![], vec![], vec![]);
         for (part, src) in self.scene.parts.iter().zip(&self.source_positions) {
             let whole = Part { positions: src.clone(), ..part.clone() };
-            let [low, high] = cut::split(&whole, axis, value, eps);
+            let cut = cut::split_joined(&whole, axis, value, eps, joint.as_ref());
+            let [low, high] = cut.pieces;
             let (k, o) = if keep_low { (low, high) } else { (high, low) };
             kept.extend((!k.tris.is_empty()).then_some(k));
             other.extend((!o.tris.is_empty()).then_some(o));
+            report.connectors += cut.connectors;
+            pins.extend(cut.pins);
         }
         if kept.is_empty() || other.is_empty() {
-            return false;
+            return None;
         }
-        let parts = std::mem::take(&mut self.scene.parts);
-        self.cut_history.push(CutSnapshot { parts, unrotated: self.unrotated.clone() });
+        report.pins = pins.len();
         if keep_other {
             // Its cut face looks back at the kept side; turned to face the plate.
             let sign = if keep_low { -1.0 } else { 1.0 };
@@ -537,8 +624,31 @@ impl Project {
                 *v = geom::add(*v, shift);
             }
             kept.append(&mut other);
+            // The pins in a row past the other piece, each an object of its own.
+            let next = kept.iter().map(|p| p.object).max().unwrap_or(0) + 1;
+            let unit = self.unit();
+            let (_, hi) = bounds(&kept);
+            let mut y = klo[1];
+            for (k, pin) in pins.iter_mut().enumerate() {
+                let (plo, phi) = bounds(std::slice::from_ref(pin));
+                let at = [hi[0] + 5.0 / unit[0] - plo[0], y - plo[1], klo[2] - plo[2]];
+                y += phi[1] - plo[1] + 3.0 / unit[1];
+                pin.object = next + k as u32;
+                for v in &mut pin.positions {
+                    *v = geom::add(*v, at);
+                }
+            }
+            kept.append(&mut pins);
         }
-        self.scene.parts = kept;
+        self.commit_parts(kept);
+        Some(report)
+    }
+
+    /// Replaces the model's parts after a cut, keeping the old ones for undo,
+    /// and sets the result on the plate.
+    fn commit_parts(&mut self, parts: Vec<Part>) {
+        let old = std::mem::replace(&mut self.scene.parts, parts);
+        self.cut_history.push(CutSnapshot { parts: old, unrotated: self.unrotated.clone() });
         let shift = self.scene.place_on_plate();
         self.placement = geom::add(self.placement, shift);
         self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
@@ -553,7 +663,106 @@ impl Project {
         self.apply_stretch();
         self.rebuild_geometry();
         self.rebuild_paint();
-        true
+    }
+
+    /// How many pieces along X, Y and Z the model needs so each one fits in
+    /// `room_mm` (width, depth and height the printer can take).
+    pub fn pieces_to_fit(&self, room_mm: Vec3) -> [usize; 3] {
+        let size = self.stats_size();
+        std::array::from_fn(|i| {
+            if room_mm[i] <= 0.0 {
+                1
+            } else {
+                ((size[i] / room_mm[i]) - 1e-4).ceil().clamp(1.0, MAX_PIECES as f32) as usize
+            }
+        })
+    }
+
+    fn stats_size(&self) -> Vec3 {
+        self.shape.bounds().map_or([0.0; 3], |(lo, hi)| std::array::from_fn(|i| (hi[i] - lo[i]) * self.scale))
+    }
+
+    /// Splits the model into equal pieces along each axis so every piece fits in
+    /// `room_mm`, like a large print split for a small printer. Every piece keeps
+    /// its paint and its orientation (pieces above a Z cut rest on their cut
+    /// face) and becomes an object of its own, laid out in rows `room_mm` wide.
+    /// With `joint`, neighbouring pieces get connectors: plugs stand out of the
+    /// lower piece of each pair (the left, front or bottom one). None when the
+    /// model already fits.
+    pub fn split_to_fit(&mut self, room_mm: Vec3, joint: Option<Joint>) -> Option<CutReport> {
+        let n = self.pieces_to_fit(room_mm);
+        if n == [1, 1, 1] {
+            return None;
+        }
+        let unit = self.unit();
+        let joint = joint.map(|j| JointAt { joint: j, plug_side: 0, unit });
+        let mut it = self.source_positions.iter().flatten().copied();
+        let first = it.next()?;
+        let (lo, hi) = it.fold((first, first), |(lo, hi), p| {
+            (
+                std::array::from_fn::<f32, 3, _>(|i| lo[i].min(p[i])),
+                std::array::from_fn::<f32, 3, _>(|i| hi[i].max(p[i])),
+            )
+        });
+        let eps = geom::len(self.source_size) * 1e-6;
+        let mut report = CutReport::default();
+        // Each piece with the cell it fills, as (x, y, z).
+        let mut pieces: Vec<(Part, [usize; 3])> = self
+            .scene
+            .parts
+            .iter()
+            .zip(&self.source_positions)
+            .map(|(part, src)| (Part { positions: src.clone(), ..part.clone() }, [0; 3]))
+            .collect();
+        let mut pins = vec![];
+        for axis in 0..3 {
+            for k in 1..n[axis] {
+                let value = lo[axis] + (hi[axis] - lo[axis]) * k as f32 / n[axis] as f32;
+                let mut next = vec![];
+                for (part, cell) in pieces {
+                    // Only the remainder past the last plane reaches this one.
+                    if cell[axis] != k - 1 {
+                        next.push((part, cell));
+                        continue;
+                    }
+                    let cut = cut::split_joined(&part, axis, value, eps, joint.as_ref());
+                    let [low, high] = cut.pieces;
+                    report.connectors += cut.connectors;
+                    pins.extend(cut.pins);
+                    if !low.tris.is_empty() {
+                        next.push((low, cell));
+                    }
+                    if !high.tris.is_empty() {
+                        let mut c = cell;
+                        c[axis] = k;
+                        next.push((high, c));
+                    }
+                }
+                pieces = next;
+            }
+        }
+        report.pins = pins.len();
+        // One object per original object and cell, in cell order.
+        let mut keys: Vec<(u32, [usize; 3])> = pieces.iter().map(|(p, c)| (p.object, *c)).collect();
+        keys.sort_unstable_by_key(|&(o, c)| (c[2], c[1], c[0], o));
+        keys.dedup();
+        let mut groups: Vec<Vec<Part>> = vec![vec![]; keys.len()];
+        for (part, cell) in pieces {
+            let g =
+                keys.binary_search_by_key(&(cell[2], cell[1], cell[0], part.object), |&(o, c)| (c[2], c[1], c[0], o));
+            groups[g.unwrap_or(0)].push(part);
+        }
+        groups.retain(|g| !g.is_empty());
+        report.pieces = groups.len();
+        for (k, g) in groups.iter_mut().enumerate() {
+            for part in g {
+                part.name = format!("{} ({})", part.name, k + 1);
+            }
+        }
+        groups.extend(pins.into_iter().map(|p| vec![p]));
+        let parts = shelve(groups, room_mm[0].max(1.0), unit);
+        self.commit_parts(parts);
+        Some(report)
     }
 
     pub fn can_undo_cut(&self) -> bool {
@@ -1365,6 +1574,56 @@ mod tests {
         assert!(parts.iter().all(|x| x.tris.len() == x.paint.len()));
         assert!(p.undo_cut() && !p.can_undo_cut());
         assert_eq!(p.object_count(), 1);
+    }
+
+    #[test]
+    fn a_joined_cut_adds_plugs_or_dowel_pins() {
+        let mut p = Project::new(tower(), 2);
+        let plug = Joint { size_mm: 3.0, depth_mm: 2.0, count: 1, ..Joint::default() };
+        let r = p.cut_joined(2, 0.5, true, true, Some(plug)).unwrap();
+        assert_eq!((r.connectors, r.pins, r.dowels_instead), (1, 0, false));
+        assert_eq!(p.object_count(), 2);
+        // The plug stands 2 mm over the bottom piece's 10 mm.
+        let parts = p.export_parts();
+        let low = parts
+            .iter()
+            .filter(|x| x.object == 0)
+            .flat_map(|x| x.positions.iter())
+            .map(|v| v[2])
+            .fold(f32::MIN, f32::max);
+        assert!((low - 12.0).abs() < 1e-3, "{low}");
+        assert!(p.undo_cut());
+
+        // Keeping the top, both faces end up on the plate: dowels instead.
+        let r = p.cut_joined(2, 0.5, false, true, Some(plug)).unwrap();
+        assert!(r.dowels_instead && r.pins == 1);
+        assert_eq!(p.object_count(), 3);
+        assert!(p.undo_cut());
+        // A cut that keeps one side ignores the joint.
+        let r = p.cut_joined(2, 0.5, true, false, Some(plug)).unwrap();
+        assert_eq!(r.connectors, 0);
+    }
+
+    #[test]
+    fn split_to_fit_makes_pieces_that_fit_and_lays_them_out() {
+        let mut p = Project::new(tower(), 2);
+        assert_eq!(p.pieces_to_fit([100.0, 100.0, 8.0]), [1, 1, 3]);
+        assert!(p.split_to_fit([100.0, 100.0, 30.0], None).is_none(), "it already fits");
+        let joint = Joint { kind: JointKind::Dowel, size_mm: 3.0, depth_mm: 2.0, count: 1, ..Joint::default() };
+        let r = p.split_to_fit([100.0, 100.0, 8.0], Some(joint)).unwrap();
+        assert_eq!(r.pieces, 3);
+        assert_eq!(r.pins, 2);
+        assert_eq!(p.object_count(), 5);
+        let parts = p.export_parts();
+        for o in 0..5u32 {
+            let zs: Vec<f32> =
+                parts.iter().filter(|x| x.object == o).flat_map(|x| x.positions.iter()).map(|v| v[2]).collect();
+            let (lo, hi) = (zs.iter().copied().fold(f32::MAX, f32::min), zs.iter().copied().fold(f32::MIN, f32::max));
+            assert!(lo.abs() < 1e-3 && hi <= 8.0 + 1e-3, "object {o}: {lo}..{hi}");
+        }
+        assert!(p.undo_cut());
+        assert_eq!(p.object_count(), 1);
+        assert!((p.stats().size_mm[2] - 20.0).abs() < 1e-3);
     }
 
     #[test]

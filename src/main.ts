@@ -14,6 +14,8 @@ import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import {
   api,
   isAppError,
+  type CutResult,
+  type Joint,
   type PlatePrefs,
   type PrinterProfile,
   type Printers,
@@ -282,15 +284,123 @@ $("#cut-off").addEventListener("click", () => {
 });
 // Cutting for real keeps the side the view shows.
 const keepOther = $<HTMLInputElement>("#cut-keep-other");
+const jointKind = $<HTMLSelectElement>("#joint-kind");
+const JOINT_STORE = "blendparser.joint";
+const jointFields = {
+  shape: $<HTMLSelectElement>("#joint-shape"),
+  size: $<HTMLInputElement>("#joint-size"),
+  depth: $<HTMLInputElement>("#joint-depth"),
+  tolerance: $<HTMLInputElement>("#joint-tolerance"),
+  count: $<HTMLSelectElement>("#joint-count"),
+};
+/** The connectors the controls ask for, or null for none. */
+function currentJoint(): Joint | null {
+  if (jointKind.value === "none") return null;
+  const n = (i: HTMLInputElement, or: number) => (Number.isFinite(i.valueAsNumber) ? i.valueAsNumber : or);
+  return {
+    kind: jointKind.value as Joint["kind"],
+    shape: jointFields.shape.value as Joint["shape"],
+    sizeMm: n(jointFields.size, 6),
+    depthMm: n(jointFields.depth, 5),
+    toleranceMm: n(jointFields.tolerance, 0.15),
+    count: Number(jointFields.count.value),
+  };
+}
+// The connector settings are remembered on this computer.
+try {
+  const saved = JSON.parse(localStorage.getItem(JOINT_STORE) ?? "null") as Record<string, string> | null;
+  if (saved) {
+    if (saved.kind) jointKind.value = saved.kind;
+    for (const [k, el] of Object.entries(jointFields)) if (saved[k] !== undefined) el.value = saved[k];
+  }
+} catch {
+  // Nothing saved or storage blocked: the defaults stay.
+}
+function saveJoint() {
+  try {
+    const v: Record<string, string> = { kind: jointKind.value };
+    for (const [k, el] of Object.entries(jointFields)) v[k] = el.value;
+    localStorage.setItem(JOINT_STORE, JSON.stringify(v));
+  } catch {
+    // Storage blocked: the settings last this session only.
+  }
+}
+function syncJoint() {
+  // Connectors join two pieces: only a cut that keeps both takes them.
+  jointKind.disabled = !keepOther.checked;
+  $<HTMLDetailsElement>("#joint-details").classList.toggle("is-off", jointKind.value === "none");
+}
+[jointKind, ...Object.values(jointFields)].forEach((el) => el.addEventListener("change", () => (saveJoint(), syncJoint())));
+keepOther.addEventListener("change", syncJoint);
+syncJoint();
+// The settings close like a menu: clicking elsewhere or pressing Escape.
+const jointDetails = $<HTMLDetailsElement>("#joint-details");
+document.addEventListener("pointerdown", (e) => {
+  if (jointDetails.open && !jointDetails.contains(e.target as Node)) jointDetails.open = false;
+});
+jointDetails.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && jointDetails.open) {
+    jointDetails.open = false;
+    jointDetails.querySelector("summary")?.focus();
+  }
+});
+
+/** What the connectors came to, for the toast after a cut. */
+function jointNote(r: CutResult, asked: Joint | null): string {
+  if (!asked) return "";
+  if (r.connectors === 0) return " " + t("joint.noRoom");
+  let note = " " + t("joint.placed", { count: r.connectors, n: nf(r.connectors) });
+  if (r.pins > 0) note += " " + t("joint.pins", { count: r.pins, n: nf(r.pins) });
+  if (r.dowelsInstead) note += " " + t("joint.dowelsInstead");
+  return note;
+}
+
+const applyCut = (call: () => Promise<CutResult>, done: (r: CutResult) => void) => {
+  let result: CutResult | null = null;
+  return apply(async () => (result = await call()).summary, () => result && done(result));
+};
+
 $("#cut-apply").addEventListener("click", () => {
   const s = viewer.getSection();
   if (!s || !summary) return;
   const both = keepOther.checked;
+  const joint = both ? currentJoint() : null;
   measured = [];
-  void apply(() => api.cutModel(s.axis, s.t, !s.flip, both), () => {
+  void applyCut(() => api.cutModel(s.axis, s.t, !s.flip, both, joint), (r) => {
     setSection(null);
     setTool("orbit");
-    toast(t(both ? "cut.doneBoth" : "cut.doneKept"), "ok", { label: t("cut.undo"), run: undoCut });
+    toast(t(both ? "cut.doneBoth" : "cut.doneKept") + jointNote(r, joint), "ok", { label: t("cut.undo"), run: undoCut });
+  });
+});
+
+// Like a large print split for a small printer: equal pieces that each fit, joined back with connectors.
+$("#cut-fit").addEventListener("click", async () => {
+  if (!summary) return;
+  let n: [number, number, number];
+  try {
+    n = await api.piecesToFit();
+  } catch (e) {
+    toast(errText(e), "error");
+    return;
+  }
+  const total = n[0] * n[1] * n[2];
+  if (total <= 1) {
+    toast(t("fit.alreadyFits"));
+    return;
+  }
+  const joint = currentJoint();
+  const ok = await ask(t("fit.confirm", { count: total, n: nf(total), x: n[0], y: n[1], z: n[2] }), {
+    title: t("fit.title"),
+    kind: "info",
+    okLabel: t("fit.apply"),
+    cancelLabel: t("common.cancel"),
+  });
+  if (!ok) return;
+  measured = [];
+  void applyCut(() => api.splitToFit(joint), (r) => {
+    setSection(null);
+    setTool("orbit");
+    toast(t("fit.done", { count: r.pieces, n: nf(r.pieces) }) + jointNote(r, joint), "ok", { label: t("cut.undo"), run: undoCut });
   });
 });
 function undoCut() {

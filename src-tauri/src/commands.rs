@@ -9,7 +9,7 @@ use serde_json::json;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::dto::{self, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary, TurnDto};
+use crate::dto::{self, CutDto, HitDto, JointDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary, TurnDto};
 use crate::error::{in_range, AppError, CmdResult};
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::profiles::Store;
@@ -277,13 +277,48 @@ pub async fn reset_rotation(app: AppHandle) -> CmdResult<TurnDto> {
 /// Cuts the model `t` of the way along `axis` (0 to 1 over the preview) and
 /// keeps the low or the high side; with `keep_other`, the other side too, as an
 /// object of its own beside it.
+/// With `joint`, keeping both sides, connectors join them back.
 #[tauri::command]
-pub async fn cut_model(app: AppHandle, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> CmdResult<Summary> {
+pub async fn cut_model(
+    app: AppHandle,
+    axis: usize,
+    t: f32,
+    keep_low: bool,
+    keep_other: bool,
+    joint: Option<JointDto>,
+) -> CmdResult<CutDto> {
     with_doc(app, move |d, prefs| {
-        if !d.project.cut(axis, t, keep_low, keep_other) {
+        let Some(r) = d.project.cut_joined(axis, t, keep_low, keep_other, joint.map(JointDto::into_core)) else {
             return Err(AppError::new("error.cutMisses"));
-        }
-        Ok(dto::summary(d, prefs))
+        };
+        Ok(dto::cut(d, prefs, r))
+    })
+    .await
+}
+
+/// Room for one piece on the printer: its printable area less the margin, and its height.
+fn piece_room(d: &Document, prefs: &Prefs) -> [f32; 3] {
+    let a = d.printer.printable_area();
+    let m = 2.0 * prefs.plate.margin_mm;
+    [(a.x1 - a.x0 - m).max(1.0), (a.y1 - a.y0 - m).max(1.0), d.printer.max_height_mm()]
+}
+
+/// How many pieces along X, Y and Z the model needs to fit the printer.
+#[tauri::command]
+pub async fn pieces_to_fit(app: AppHandle) -> CmdResult<[usize; 3]> {
+    with_doc(app, |d, prefs| Ok(d.project.pieces_to_fit(piece_room(d, prefs)))).await
+}
+
+/// Splits the model into pieces that each fit the printer, joined with
+/// connectors when `joint` is given. Undone like a cut.
+#[tauri::command]
+pub async fn split_to_fit(app: AppHandle, joint: Option<JointDto>) -> CmdResult<CutDto> {
+    with_doc(app, move |d, prefs| {
+        let room = piece_room(d, prefs);
+        let Some(r) = d.project.split_to_fit(room, joint.map(JointDto::into_core)) else {
+            return Err(AppError::new("error.alreadyFits"));
+        };
+        Ok(dto::cut(d, prefs, r))
     })
     .await
 }

@@ -189,6 +189,62 @@ pub struct RigidDto {
     pub shift: [f32; 3],
 }
 
+/// Connectors for a cut, as the UI sends them.
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct JointDto {
+    /// `plug` or `dowel`.
+    pub kind: String,
+    /// `circle`, `square` or `hexagon`.
+    pub shape: String,
+    pub size_mm: f32,
+    pub depth_mm: f32,
+    pub tolerance_mm: f32,
+    /// 0 places as many as fit the face.
+    pub count: u8,
+}
+
+impl JointDto {
+    pub fn into_core(self) -> bp_core::Joint {
+        use bp_core::{JointKind, JointShape};
+        let clamp = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
+        let d = bp_core::Joint::default();
+        bp_core::Joint {
+            kind: if self.kind == "dowel" { JointKind::Dowel } else { JointKind::Plug },
+            shape: match self.shape.as_str() {
+                "square" => JointShape::Square,
+                "hexagon" => JointShape::Hexagon,
+                _ => JointShape::Circle,
+            },
+            size_mm: clamp(self.size_mm, 1.0, 50.0, d.size_mm),
+            depth_mm: clamp(self.depth_mm, 0.5, 50.0, d.depth_mm),
+            tolerance_mm: clamp(self.tolerance_mm, 0.0, 1.0, d.tolerance_mm),
+            count: self.count.min(8),
+        }
+    }
+}
+
+/// A cut's result: the summary, and what its connectors came to.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CutDto {
+    pub summary: Summary,
+    pub connectors: usize,
+    pub pins: usize,
+    pub pieces: usize,
+    pub dowels_instead: bool,
+}
+
+pub fn cut(doc: &Document, prefs: &Prefs, r: bp_core::CutReport) -> CutDto {
+    CutDto {
+        summary: summary(doc, prefs),
+        connectors: r.connectors,
+        pins: r.pins,
+        pieces: r.pieces,
+        dowels_instead: r.dowels_instead,
+    }
+}
+
 pub fn turn(doc: &Document, prefs: &Prefs, rigid: Option<bp_core::project::RigidMove>) -> TurnDto {
     TurnDto { summary: summary(doc, prefs), rigid: rigid.map(|m| RigidDto { matrix: m.matrix, shift: m.shift }) }
 }

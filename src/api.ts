@@ -1,6 +1,27 @@
 // Typed wrappers over the Rust commands. The UI talks to the backend only through here.
 import { invoke } from "@tauri-apps/api/core";
 
+/** Connectors that join the pieces of a cut. */
+export interface Joint {
+  kind: "plug" | "dowel";
+  shape: "circle" | "square" | "hexagon";
+  sizeMm: number;
+  depthMm: number;
+  toleranceMm: number;
+  /** Per cut face; 0 places as many as fit. */
+  count: number;
+}
+
+export interface CutResult {
+  summary: Summary;
+  connectors: number;
+  pins: number;
+  /** Pieces of the model a split to fit made. */
+  pieces: number;
+  /** Plugs were asked for but dowels used, as both cut faces rest on the plate. */
+  dowelsInstead: boolean;
+}
+
 export type Vec3 = [number, number, number];
 
 export interface Slot { hex: string; triangles: number; nearest: [number, number] | null }
@@ -174,7 +195,12 @@ export const api = {
   rotate: (axis: number, degrees: number) => invoke<TurnResult>("rotate", { axis, degrees }),
   resetRotation: () => invoke<TurnResult>("reset_rotation"),
   /** Cuts `t` of the way along `axis`, keeping the low or high side, and the other as its own object if asked. */
-  cutModel: (axis: number, t: number, keepLow: boolean, keepOther: boolean) => invoke<Summary>("cut_model", { axis, t, keepLow, keepOther }),
+  cutModel: (axis: number, t: number, keepLow: boolean, keepOther: boolean, joint: Joint | null) =>
+    invoke<CutResult>("cut_model", { axis, t, keepLow, keepOther, joint }),
+  /** Pieces along X, Y and Z the model needs to fit the printer. */
+  piecesToFit: () => invoke<[number, number, number]>("pieces_to_fit"),
+  /** Splits the model into pieces that fit the printer, joined with connectors when given. */
+  splitToFit: (joint: Joint | null) => invoke<CutResult>("split_to_fit", { joint }),
   undoCut: () => invoke<Summary>("undo_cut"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),

@@ -41,6 +41,8 @@ pub fn run() {
             commands::reset_rotation,
             commands::cut_model,
             commands::undo_cut,
+            commands::pieces_to_fit,
+            commands::split_to_fit,
             commands::set_mesh_ops,
             commands::analyze_printability,
             commands::fix_mesh,

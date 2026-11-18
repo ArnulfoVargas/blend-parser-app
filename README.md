@@ -32,6 +32,13 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   simplificar la malla y aplanar la base, con estimación de cambios de filamento y purga.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
+- Cortar con conectores: al cortar conservando las dos partes, se colocan solos espigas con su
+  agujero o pasadores (redondos, cuadrados o hexagonales; ancho, profundidad, holgura por lado y
+  cuántos por cara). Van donde la cara tiene sitio y grosor para el agujero, toman el color de
+  la cara y las piezas siguen cerradas. Los pasadores salen como objetos aparte.
+- Dividir para que quepa: corta el modelo en piezas iguales en X, Y y Z para que cada una quepa en
+  la impresora elegida, con los conectores elegidos; cada pieza conserva su pintura y queda como
+  objeto aparte en el 3MF (en Bambu Studio, Organizar las reparte en placas). Se deshace como un corte.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 
@@ -252,6 +259,7 @@ crates/
     estimate    Cambios de filamento por capa, con su sentido
     waste       Desperdicio: purga por par de colores, purga inicial y torre
     split       Una pieza cerrada por color (cáscara o sólido completo)
+    cut         Corte por plano con tapa, conectores (espiga, pasador) y su colocación automática
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario

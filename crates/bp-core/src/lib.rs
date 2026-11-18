@@ -18,8 +18,9 @@ pub mod scene;
 pub mod split;
 pub mod waste;
 
+pub use cut::{Joint, JointKind, JointShape};
 pub use mesh::{MeshOps, RepairReport};
-pub use project::{ColorOps, ExportPart, Mat3, Preview, PrintOps, Project, Stats, IDENTITY};
+pub use project::{ColorOps, CutReport, ExportPart, Mat3, Preview, PrintOps, Project, Stats, IDENTITY};
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;
 pub use waste::{Waste, WasteParams};
