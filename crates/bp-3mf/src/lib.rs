@@ -492,16 +492,18 @@ impl ZipText {
     pub const ES: ZipText = ZipText {
         index_file: "colores.txt",
         columns: ["Ranura", "Color", "Archivo"],
-        solid: "(sólido completo)",
-        footer: "Cada color es una pieza cerrada. Las cáscaras siguen la superficie del modelo hacia dentro;\n\
-                 el sólido completo, si lo hay, es el modelo entero en el color principal.\n",
+        solid: "(cuerpo principal)",
+        footer: "Cada color es una pieza cerrada que sigue los bordes pintados. Las cáscaras siguen la\n\
+                 superficie del modelo hacia dentro; el cuerpo principal, si lo hay, tiene un hueco del\n\
+                 mismo grosor donde encaja cada cáscara, y juntos forman el modelo sin solaparse.\n",
     };
     pub const EN: ZipText = ZipText {
         index_file: "colors.txt",
         columns: ["Slot", "Colour", "File"],
-        solid: "(full solid)",
-        footer: "Each colour is a closed piece. Shells follow the model's surface inwards;\n\
-                 the full solid, if there is one, is the whole model in the main colour.\n",
+        solid: "(main body)",
+        footer: "Each colour is a closed piece that follows the painted borders. Shells follow the model's\n\
+                 surface inwards; the main body, if there is one, has a pocket as deep for each shell to\n\
+                 drop into, and together they make up the model without overlapping.\n",
     };
 
     /// The text for a BCP 47 language tag; Spanish when there is none for it.
@@ -561,7 +563,7 @@ mod color_zip_tests {
         assert_eq!(zip.len(), 3);
         let mut index = String::new();
         zip.by_name("colors.txt").unwrap().read_to_string(&mut index).unwrap();
-        assert!(index.contains("Slot") && index.contains("(full solid)"), "{index}");
+        assert!(index.contains("Slot") && index.contains("(main body)"), "{index}");
         let mut stl = Vec::new();
         zip.by_name("02_spider_E9A462.stl").unwrap().read_to_end(&mut stl).unwrap();
         assert_eq!(stl.len(), 84 + 2 * 50);

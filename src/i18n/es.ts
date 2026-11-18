@@ -384,10 +384,10 @@ export const es = {
   "export.anyway": "Exportar igual",
 
   "zip.title": "Exportar por color",
-  "zip.help": "Un STL cerrado por color en un .zip, para imprimir cada color como pieza aparte.",
+  "zip.help": "Un STL cerrado por color en un .zip, siguiendo los bordes pintados, para imprimir cada color como pieza aparte.",
   "zip.thickness": "Grosor de cada color",
   "zip.thicknessHelp": "Entre {min} y {max} mm.",
-  "zip.mainSolid": "Color principal como sólido completo",
+  "zip.mainSolid": "Color principal como cuerpo con huecos donde encajan los demás",
   "zip.export": "Exportar .zip",
   "zip.saved": { one: "{n} color guardado en {path}", other: "{n} colores guardados en {path}" },
 

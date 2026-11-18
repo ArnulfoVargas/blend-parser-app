@@ -1080,13 +1080,14 @@ impl Project {
             .sum()
     }
 
-    /// One closed piece per colour in final millimetres: shells `thickness_mm`
-    /// deep, or with `main_solid` the colour with most triangles as the whole part.
+    /// One closed piece per colour in final millimetres, following the painted
+    /// borders: shells `thickness_mm` deep, and with `main_solid` the colour
+    /// with most triangles as the body, with a pocket for each shell.
     pub fn color_pieces(&self, thickness_mm: f32, main_solid: bool) -> Vec<ColorPiece> {
-        let labels: Vec<Vec<u8>> = self.trees.iter().map(|n| n.iter().map(Node::dominant).collect()).collect();
         let per = self.stats_per_slot();
         let main = main_solid.then(|| (0..per.len()).max_by_key(|&i| per[i]).unwrap_or(0) as u8);
-        let mut pieces = split::color_pieces(&self.work, &labels, self.palette.len(), thickness_mm / self.scale, main);
+        let mut pieces =
+            split::color_pieces(&self.work, &self.trees, self.palette.len(), thickness_mm / self.scale, main);
         for p in &mut pieces {
             for v in &mut p.positions {
                 *v = geom::scale(*v, self.scale);
@@ -1259,6 +1260,28 @@ mod tests {
         let pieces = p.color_pieces(0.5, false);
         assert_eq!(pieces.len(), 2);
         assert!(pieces.iter().all(|x| !x.solid && !x.tris.is_empty()));
+    }
+
+    #[test]
+    fn colour_pieces_of_a_painted_model_fit_back_together() {
+        let mut p = Project::new(tower(), 2);
+        p.set_height_mm(40.0);
+        let pieces = p.color_pieces(1.0, true);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces.iter().filter(|x| x.solid).count(), 1);
+        let volume = |x: &ColorPiece| -> f32 {
+            x.tris
+                .iter()
+                .map(|t| {
+                    let [a, b, c] = t.map(|v| x.positions[v as usize]);
+                    geom::dot(a, geom::cross(b, c)) / 6.0
+                })
+                .sum()
+        };
+        // In final millimetres: the 10 x 10 x 20 tower at 40 mm tall is 20 x 20 x 40.
+        let total: f32 = pieces.iter().map(volume).sum();
+        assert!((total - 16000.0).abs() < 1.0, "{total}");
+        assert!(pieces.iter().all(|x| volume(x) > 0.0));
     }
 
     #[test]
