@@ -293,12 +293,15 @@ pub fn pieces_of(painted: &Painted, slots: usize, thickness: f32, main: Option<u
             across.insert((t[k], t[(k + 1) % 3]), i as u32);
         }
     }
+    // A body can have complementary pockets only if the original surface
+    // encloses a volume. Open sources get printable shells for every colour.
+    let closed = across.len() == painted.tris.len() * 3 && across.keys().all(|&(a, b)| across.contains_key(&(b, a)));
     let mut out = vec![];
-    for slot in 0..slots.min(256) as u8 {
+    for slot in (0..slots.min(256)).map(|slot| slot as u8) {
         if !labels.contains(&slot) {
             continue;
         }
-        let solid = main == Some(slot);
+        let solid = closed && main == Some(slot);
         // A shell draws its colour; the body everything, its colour on the surface and the rest sunk.
         let kind = |t: usize| if solid { Some(labels[t] != slot) } else { (labels[t] == slot).then_some(false) };
         let mut b = Builder::new(painted, &inner, &across, kind, slot, solid);
@@ -320,9 +323,12 @@ pub fn pieces_of(painted: &Painted, slots: usize, thickness: f32, main: Option<u
                 let (a, c) = (t[k], t[(k + 1) % 3]);
                 // A wall where the neighbour is another colour: round the
                 // shell's patch, or down into a pocket of the body.
-                let Some(&u) = across.get(&(c, a)) else { continue };
-                if labels[u as usize] != slot {
-                    b.wall(ti, k, if solid { u } else { ti });
+                match across.get(&(c, a)).copied() {
+                    Some(u) if labels[u as usize] != slot => b.wall(ti, k, if solid { u } else { ti }),
+                    // An original boundary also needs a wall from the outer face
+                    // to the inner face when it belongs to a colour shell.
+                    None if !solid => b.wall(ti, k, ti),
+                    _ => {}
                 }
             }
         }
@@ -339,20 +345,22 @@ pub fn color_pieces(
     thickness: f32,
     solid_slot: Option<u8>,
 ) -> Vec<ColorPiece> {
-    let mut all: Vec<ColorPiece> = (0..slots)
-        .map(|s| ColorPiece { slot: s as u8, positions: vec![], tris: vec![], solid: Some(s as u8) == solid_slot })
-        .collect();
+    let mut all: Vec<Option<ColorPiece>> = (0..slots.min(256)).map(|_| None).collect();
     for (part, nodes) in mesh.parts.iter().zip(trees) {
         let surface = painted(part, nodes);
         for piece in pieces_of(&surface, slots, thickness, solid_slot) {
-            let into = &mut all[piece.slot as usize];
-            let base = into.positions.len() as u32;
-            into.positions.extend(piece.positions);
-            into.tris.extend(piece.tris.into_iter().map(|t| t.map(|v| v + base)));
+            let entry = &mut all[piece.slot as usize];
+            if let Some(into) = entry {
+                let base = into.positions.len() as u32;
+                into.positions.extend(piece.positions);
+                into.tris.extend(piece.tris.into_iter().map(|t| t.map(|v| v + base)));
+                into.solid &= piece.solid;
+            } else {
+                *entry = Some(piece);
+            }
         }
     }
-    all.retain(|p| !p.tris.is_empty());
-    all
+    all.into_iter().flatten().collect()
 }
 
 #[cfg(test)]
@@ -445,6 +453,28 @@ mod tests {
         assert_eq!(pieces.len(), 2);
         assert!(pieces.iter().all(closed));
         assert!(pieces.iter().all(|p| volume(p) > 0.0));
+    }
+
+    #[test]
+    fn open_painted_surface_exports_closed_shells_even_with_a_main_colour() {
+        let mesh = Mesh {
+            parts: vec![MeshPart {
+                name: "sheet".into(),
+                positions: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]],
+                tris: vec![[0, 1, 2], [0, 2, 3]],
+                origin: None,
+            }],
+            repair: RepairReport::default(),
+        };
+        let trees = vec![vec![leaf(0), leaf(255)]];
+        for main in [None, Some(0)] {
+            let pieces = color_pieces(&mesh, &trees, 256, 0.5, main);
+            assert_eq!(pieces.iter().map(|p| p.slot).collect::<Vec<_>>(), [0, 255]);
+            assert!(pieces.iter().all(|p| !p.solid && closed(p)));
+            for piece in &pieces {
+                assert!((volume(piece) - 25.0).abs() < 1e-3);
+            }
+        }
     }
 
     #[test]
