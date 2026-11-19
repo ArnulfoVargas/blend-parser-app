@@ -1,0 +1,6 @@
+/* Malla: the mesh mode's own tools (repairs, orientation, views). */
+.repairs { display: flex; flex-direction: column; gap: var(--space-2xs); margin: 0; padding: var(--space-xs) 0 0; list-style: none; border-top: 1px dashed var(--color-rule); }
+.repairs li { display: flex; flex-direction: column; }
+.repairs__count { margin: 0 0 var(--space-2xs) calc(18px + var(--space-xs)); font-family: var(--font-outlier); font-size: var(--text-xs); }
+.repairs__count[data-tone="found"] { color: var(--color-warn-ink); }
+.repairs__count[data-tone="fixed"] { color: var(--color-success); }

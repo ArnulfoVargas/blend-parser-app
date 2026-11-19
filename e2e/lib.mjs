@@ -82,9 +82,16 @@ async function sessionOnce(model, { lang = "es" } = {}) {
   await browser.setWindowSize(1440, 900).catch(() => {});
   await browser.setTimeout({ script: 600000 }).catch(() => {});
   // Language and a timing probe on every command, kept across reloads in localStorage.
+  // The mode the last session left open is forgotten: every scenario starts in Modelo.
   await browser.execute((l) => {
     const cur = localStorage.getItem("blendparser.lang");
-    if (cur !== l) { localStorage.setItem("blendparser.lang", l); window.__bpReloading = true; location.reload(); }
+    const tab = localStorage.getItem("blendparser.tab");
+    if (cur !== l || (tab && tab !== "model")) {
+      localStorage.setItem("blendparser.lang", l);
+      localStorage.removeItem("blendparser.tab");
+      window.__bpReloading = true;
+      location.reload();
+    }
   }, lang);
   await browser.waitUntil(() => browser.execute(() => !window.__bpReloading && document.readyState === "complete" && !!window.__TAURI_INTERNALS__), { timeout: 30000, interval: 100 });
   await probe(browser);

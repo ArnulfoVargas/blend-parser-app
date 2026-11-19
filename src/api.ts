@@ -4,7 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 export type Vec3 = [number, number, number];
 
 export interface Slot { hex: string; triangles: number; nearest: [number, number] | null }
-export interface Repair { weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number }
+export interface Repair {
+  weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number;
+  filledHoles: number; flippedTriangles: number; splitVertices: number; droppedPieces: number; finTriangles: number;
+}
+/** What each advanced repair finds on a mesh (see `bp_core::MeshIssues`). */
+export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
 export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
@@ -154,6 +159,8 @@ export function decodePreview(buf: ArrayBuffer): PreviewMesh {
 export const api = {
   analyzePrintability: (params: PrintabilityParams) => invoke<PrintabilityReport>("analyze_printability", { params }),
   fixMesh: (fix: MeshFix) => invoke<Summary>("fix_mesh", { fix }),
+  /** Built without the advanced repairs, and as the mesh is now. */
+  meshIssues: () => invoke<{ before: Issues; after: Issues }>("mesh_issues"),
   orientForPrint: (overhangDeg: number) => invoke<Summary>("orient_for_print", { overhangDeg }),
   setRotation: (rotation: number[][]) => invoke<Summary>("set_rotation", { rotation }),
   blenderStatus: () => invoke<string | null>("blender_status"),

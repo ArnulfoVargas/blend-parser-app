@@ -48,6 +48,7 @@ pub fn run() {
             commands::set_mesh_ops,
             commands::analyze_printability,
             commands::fix_mesh,
+            commands::mesh_issues,
             commands::orient_for_print,
             commands::set_rotation,
             commands::set_color_ops,

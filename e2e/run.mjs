@@ -12,6 +12,9 @@ import {
 } from "./lib.mjs";
 
 const MODEL = process.env.BP_MODEL ?? path.join(HERE, "e2e/fixtures/out/figure.blend");
+/** Suzanne's head alone, open at the eyes and the neck (`fixtures/simple.py`). */
+const HEAD = path.join(HERE, "e2e/fixtures/out/head.blend");
+const invoke = (b, cmd, args = {}) => b.executeAsync((c, a, done) => window.__TAURI_INTERNALS__.invoke(c, a).then((v) => done({ v }), (e) => done({ e: JSON.stringify(e) })), cmd, args);
 const only = process.argv.slice(2);
 const results = [];
 
@@ -209,6 +212,39 @@ const scenarios = {
     return { before: l0, after: l1 };
   },
 
+  // Malla → Reparar: one switch per repair, its count before and after, one undo step each.
+  async repairs(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, '#repair-ops input[data-op="fillHoles"]'))) return check("repairs", "repair switches", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    const line = (op) => text(b, `#repair-ops [data-count="${op}"]`);
+    await b.waitUntil(async () => !/Contando|Counting/.test((await line("fillHoles")) ?? "Contando"), { timeout: 60000, interval: 200 });
+    const found = await line("fillHoles");
+    check("repairs", "the open head shows its holes", /\d+ agujeros?, \d+ aristas abiertas/.test(found ?? ""), found ?? "");
+    const lines = await b.execute(() => [...document.querySelectorAll("#repair-ops [data-count]")].map((el) => `${el.dataset.count}: ${el.textContent}`));
+    check("repairs", "every repair says what it finds", lines.every((l) => l.split(": ")[1]?.length > 0), lines.join(" | "));
+    await shot(b, "12-repairs-before");
+    await click(b, '#repair-ops input[data-op="fillHoles"]');
+    await settle(b);
+    await b.waitUntil(async () => /Ahora|Now/.test((await line("fillHoles")) ?? ""), { timeout: 60000, interval: 200 }).catch(() => {});
+    const after = await line("fillHoles");
+    check("repairs", "Rellenar agujeros closes the head", /Ahora: sin agujeros/.test(after ?? ""), after ?? "");
+    const issues = await invoke(b, "mesh_issues");
+    check("repairs", "no open edge is left", issues.v?.after.openEdges === 0 && issues.v?.before.holes > 0, JSON.stringify(issues.v ?? issues.e));
+    const sum = await b.execute(() => document.querySelector("#undo").title);
+    check("repairs", "the change is the next undo step", /malla|mesh|corrección|fix/i.test(sum), sum);
+    await shot(b, "13-repairs-after");
+    await b.execute(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true })));
+    await settle(b);
+    const back = await b.execute(() => document.querySelector('#repair-ops input[data-op="fillHoles"]').checked);
+    const reopened = await invoke(b, "mesh_issues");
+    check("repairs", "Ctrl+Z opens the holes again and unticks the box", !back && reopened.v?.after.holes > 0, `${reopened.v?.after.holes} holes`);
+    await click(b, '#repair-ops input[data-op="orient"]');
+    await settle(b);
+    const oriented = await line("orient");
+    check("repairs", "each other switch applies on its own", /Antes|Before/.test(oriented ?? "") && !(await b.execute(() => document.querySelector('#repair-ops input[data-op="fillHoles"]').checked)), oriented ?? "");
+  },
+
   async english(b) {
     await waitState(b, "ready");
     const missing = await b.execute(() => [...document.querySelectorAll("[data-i18n]")].filter((el) => el.offsetParent && !el.textContent.trim()).map((el) => el.dataset.i18n));
@@ -218,7 +254,7 @@ const scenarios = {
 };
 
 const plan = [
-  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["english", { lang: "en" }],
+  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["english", { lang: "en" }],
 ];
 
 const metrics = {};
@@ -229,7 +265,7 @@ try {
     console.log(`▸ ${name}`);
     let b;
     try {
-      b = await session(MODEL, opts);
+      b = await session(opts.model ?? MODEL, opts);
     } catch (e) {
       check(name, "app session starts", false, String(e.message ?? e).split("\n")[0]);
       continue;

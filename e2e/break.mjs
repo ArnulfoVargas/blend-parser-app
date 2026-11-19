@@ -109,6 +109,28 @@ const attacks = {
     await attack(b, "mesh", "undo", {});
     await attack(b, "mesh", "orient_for_print", { overhangDeg: -10 });
   },
+  // The repair switches: counted while other commands run, toggled in a burst, undone in a loop.
+  async repairs(b) {
+    await attack(b, "repairs", "mesh_issues", {});
+    for (const fix of [{ fillHoles: true }, { orient: true }, { splitVertices: true }, { dropFloating: true }, { deepClean: true }, { fillHoles: false, orient: false }, { fillHoles: "yes" }, { holes: true }])
+      await attack(b, "repairs", "fix_mesh", { fix });
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 12; i++) {
+        calls.push(I("fix_mesh", { fix: { [["fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"][i % 5]]: i % 2 === 0 } }));
+        calls.push(I("mesh_issues", {}));
+        calls.push(I("undo", {}));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("repairs", "36 concurrent repairs, counts and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+    await click(b, "[role=tab][data-tab=mesh]");
+    for (let i = 0; i < 4; i++) for (const op of ["fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"]) await click(b, `#repair-ops input[data-op="${op}"]`);
+    await settle(b);
+    await attack(b, "repairs", "mesh_issues", {});
+  },
   // Cuts, in each branch's signature (the missing ones report "missing").
   async cuts(b) {
     for (const t of [0, 1, -1, 2, 0.5]) await attack(b, "cuts", "cut_model", { axis: 2, t, keepLow: true, keepOther: true, joint: null });

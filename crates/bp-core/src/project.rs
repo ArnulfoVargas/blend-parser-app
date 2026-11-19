@@ -8,7 +8,7 @@ use crate::encode;
 use crate::estimate::{self, SwapEstimate};
 use crate::field::ColorField;
 use crate::geom::{self, Vec3, ROOT};
-use crate::mesh::{Mesh, MeshOps, RepairReport};
+use crate::mesh::{Mesh, MeshIssues, MeshOps, RepairReport, CLEAN_MM};
 use crate::optimize;
 use crate::paint::{self, Node, PaintParams};
 use crate::palette;
@@ -352,6 +352,26 @@ impl Project {
         previous.undo = history;
         self.set_mesh_ops(ops);
         self.undo.push(UndoEntry::Geometry(Box::new(previous)));
+    }
+
+    /// What the advanced repairs (holes, winding, shared vertices, floating
+    /// pieces, deep clean) find: on the mesh built without any of them, and on
+    /// the current one. The panel shows each as before and after.
+    pub fn mesh_issues(&self) -> (MeshIssues, MeshIssues) {
+        let off = MeshOps {
+            orient: false,
+            fill_holes: false,
+            split_vertices: false,
+            drop_floating: false,
+            deep_clean: false,
+            ..self.mesh_ops
+        };
+        // The tolerances `Mesh::build` gives these repairs.
+        let (clean, float) = (CLEAN_MM / self.scale, 1e-4 / self.scale);
+        let after = self.work.issues(clean, float);
+        let before =
+            if off == self.mesh_ops { after } else { Mesh::build(&self.scene, off, self.scale).1.issues(clean, float) };
+        (before, after)
     }
 
     pub fn rotation(&self) -> Mat3 {
@@ -1195,6 +1215,22 @@ mod tests {
             object: 0,
         };
         Scene { parts: vec![part], ..Default::default() }
+    }
+
+    #[test]
+    fn each_repair_counts_before_and_after_and_undoes_alone() {
+        let mut p = Project::new(scene(), 2);
+        let (before, after) = p.mesh_issues();
+        assert_eq!(before, after);
+        assert_eq!((before.holes, before.open_edges), (1, 6));
+        p.fix_mesh(MeshOps { fill_holes: true, ..p.mesh_ops() });
+        let (before, after) = p.mesh_issues();
+        assert_eq!((before.holes, after.holes, after.open_edges), (1, 0, 0));
+        assert_eq!(p.stats().repair.filled_holes, 1);
+        assert_eq!(p.undo_label(), Some("fix"));
+        assert!(p.undo());
+        assert!(!p.mesh_ops().fill_holes);
+        assert_eq!(p.mesh_issues().1.holes, 1);
     }
 
     #[test]

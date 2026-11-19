@@ -44,6 +44,44 @@ pub struct RepairDto {
     pub duplicate_triangles: usize,
     pub loose_pieces: usize,
     pub loose_triangles: usize,
+    pub filled_holes: usize,
+    pub flipped_triangles: usize,
+    pub split_vertices: usize,
+    pub dropped_pieces: usize,
+    pub fin_triangles: usize,
+}
+
+/// What each advanced repair finds, as [`bp_core::MeshIssues`] counts it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuesDto {
+    pub holes: usize,
+    pub open_edges: usize,
+    pub flipped_triangles: usize,
+    pub shared_vertices: usize,
+    pub floating_pieces: usize,
+    pub stray_triangles: usize,
+}
+
+impl From<bp_core::MeshIssues> for IssuesDto {
+    fn from(i: bp_core::MeshIssues) -> Self {
+        Self {
+            holes: i.holes,
+            open_edges: i.open_edges,
+            flipped_triangles: i.flipped_triangles,
+            shared_vertices: i.shared_vertices,
+            floating_pieces: i.floating_pieces,
+            stray_triangles: i.stray_triangles,
+        }
+    }
+}
+
+/// The mesh built without the advanced repairs, and as it is now.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshIssuesDto {
+    pub before: IssuesDto,
+    pub after: IssuesDto,
 }
 
 #[derive(Serialize)]
@@ -370,6 +408,11 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             duplicate_triangles: stats.repair.duplicate_triangles,
             loose_pieces: stats.repair.loose_pieces,
             loose_triangles: stats.repair.loose_triangles,
+            filled_holes: stats.repair.filled_holes,
+            flipped_triangles: stats.repair.flipped_triangles,
+            split_vertices: stats.repair.split_vertices,
+            dropped_pieces: stats.repair.dropped_pieces,
+            fin_triangles: stats.repair.fin_triangles,
         },
         estimate: EstimateDto {
             layers: stats.swaps.layers,

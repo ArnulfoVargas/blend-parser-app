@@ -215,11 +215,25 @@
 
         <div class="tabpanel" role="tabpanel" id="panel-mesh" aria-labelledby="tab-mesh" hidden>
         <p class="help tabpanel__intro" data-i18n="tabs.meshIntro">Limpia y prepara la geometría. Cada cambio se recalcula al momento y se puede deshacer.</p>
-        <details class="group" id="mesh-group" open>
-          <summary><h2 data-i18n="mesh.title">Malla</h2><span class="group__sum" data-bind="meshSum"></span></summary>
+        <details class="group" id="repair-group" open>
+          <summary><h2 data-i18n="repair.title">Reparar</h2><span class="group__sum" data-bind="repairSum"></span></summary>
           <div class="group__body">
             <label class="check"><input type="checkbox" id="repair" checked> <span data-i18n="mesh.repair">Reparar malla</span></label>
             <p class="help" data-bind="repairOut"></p>
+            <!-- One switch per repair, with what it finds before and after; each change is one undo step. -->
+            <ul class="repairs" id="repair-ops" aria-describedby="repair-ops-help">
+              <li><label class="check"><input type="checkbox" data-op="fillHoles"> <span data-i18n="repair.fillHoles">Rellenar agujeros</span></label><p class="help repairs__count" data-count="fillHoles"></p></li>
+              <li><label class="check"><input type="checkbox" data-op="orient"> <span data-i18n="repair.orient">Orientar caras hacia fuera</span></label><p class="help repairs__count" data-count="orient"></p></li>
+              <li><label class="check"><input type="checkbox" data-op="splitVertices"> <span data-i18n="repair.splitVertices">Separar vértices compartidos por abanicos</span></label><p class="help repairs__count" data-count="splitVertices"></p></li>
+              <li><label class="check"><input type="checkbox" data-op="dropFloating"> <span data-i18n="repair.dropFloating">Bajar piezas que flotan sobre la placa</span></label><p class="help repairs__count" data-count="dropFloating"></p></li>
+              <li><label class="check"><input type="checkbox" data-op="deepClean"> <span data-i18n="repair.deepClean">Limpieza profunda</span></label><p class="help repairs__count" data-count="deepClean"></p></li>
+            </ul>
+            <p class="help" id="repair-ops-help" data-i18n="repair.help">Cada casilla se aplica al momento y es un paso de deshacer (Ctrl+Z).</p>
+          </div>
+        </details>
+        <details class="group" id="mesh-group" open>
+          <summary><h2 data-i18n="mesh.title">Malla</h2><span class="group__sum" data-bind="meshSum"></span></summary>
+          <div class="group__body">
             <div class="field">
               <label for="piece" data-i18n="mesh.loose">Quitar piezas sueltas menores de</label>
               <div class="field__unit"><input class="input" id="piece" name="piece" type="number" inputmode="decimal" min="0" max="100" step="0.5" value="0"><span>mm</span></div>

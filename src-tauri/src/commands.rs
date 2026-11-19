@@ -656,6 +656,17 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
     .await
 }
 
+/// What each advanced repair finds before and after; on request, since it
+/// builds the mesh again without them.
+#[tauri::command]
+pub async fn mesh_issues(app: AppHandle) -> CmdResult<dto::MeshIssuesDto> {
+    with_doc(app, |d, _| {
+        let (before, after) = d.project.mesh_issues();
+        Ok(dto::MeshIssuesDto { before: before.into(), after: after.into() })
+    })
+    .await
+}
+
 /// Turns the model to the orientation with the least overhang; one undoable step.
 #[tauri::command]
 pub async fn orient_for_print(app: AppHandle, overhang_deg: f32) -> CmdResult<Summary> {

@@ -862,6 +862,94 @@ impl Mesh {
 /// printability analysis's default tolerance, so what it flags goes.
 pub const CLEAN_MM: f32 = 0.001;
 
+/// What each advanced repair finds on a mesh, read on welded vertices as the
+/// repairs see it. Each count is what that repair would change.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MeshIssues {
+    /// Boundary loops, and the edges with one face that make them.
+    pub holes: usize,
+    pub open_edges: usize,
+    /// Faces [`Mesh::orient`] would turn over.
+    pub flipped_triangles: usize,
+    /// Extra copies [`Mesh::split_vertices`] would make.
+    pub shared_vertices: usize,
+    /// Pieces [`Mesh::drop_floating`] would lower.
+    pub floating_pieces: usize,
+    /// Slivers, repeats and stray faces [`Mesh::deep_clean`] would take off.
+    pub stray_triangles: usize,
+}
+
+impl Mesh {
+    /// Counts what each advanced repair would change, without changing `self`.
+    /// `clean_tol` and `float_tol` are the deep clean's and the drop's tolerances
+    /// in source units, as [`Mesh::build`] passes them.
+    pub fn issues(&self, clean_tol: f32, float_tol: f32) -> MeshIssues {
+        let mut welded = self.clone();
+        welded.repair = RepairReport::default();
+        welded.repair_all();
+        let mut issues = MeshIssues::default();
+        for part in &welded.parts {
+            let (holes, open) = boundary_loops(part);
+            issues.holes += holes;
+            issues.open_edges += open;
+        }
+        let after = |f: &dyn Fn(&mut Mesh)| {
+            let mut m = welded.clone();
+            m.repair = RepairReport::default();
+            f(&mut m);
+            m.repair
+        };
+        issues.flipped_triangles = after(&|m| m.orient()).flipped_triangles;
+        issues.shared_vertices = after(&|m| m.split_vertices(0.0)).split_vertices;
+        issues.floating_pieces = after(&|m| m.drop_floating(float_tol)).dropped_pieces;
+        let clean = after(&|m| m.deep_clean(clean_tol));
+        issues.stray_triangles = clean.degenerate_triangles + clean.duplicate_triangles + clean.fin_triangles;
+        issues
+    }
+}
+
+/// Holes (loops of edges with one face, joined at their vertices) and open edges of a welded part.
+fn boundary_loops(part: &MeshPart) -> (usize, usize) {
+    let mut edges: Vec<(u32, u32)> = part
+        .tris
+        .iter()
+        .flat_map(|t| (0..3).map(move |k| (t[k].min(t[(k + 1) % 3]), t[k].max(t[(k + 1) % 3]))))
+        .collect();
+    edges.sort_unstable();
+    let mut open = vec![];
+    let mut i = 0;
+    while i < edges.len() {
+        let mut j = i + 1;
+        while j < edges.len() && edges[j] == edges[i] {
+            j += 1;
+        }
+        if j - i == 1 {
+            open.push(edges[i]);
+        }
+        i = j;
+    }
+    let mut parent: HashMap<u32, u32> = HashMap::new();
+    fn find(parent: &mut HashMap<u32, u32>, x: u32) -> u32 {
+        let mut root = x;
+        while let Some(&up) = parent.get(&root).filter(|&&up| up != root) {
+            root = up;
+        }
+        parent.insert(x, root);
+        root
+    }
+    for &(a, b) in &open {
+        parent.entry(a).or_insert(a);
+        parent.entry(b).or_insert(b);
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        if ra != rb {
+            parent.insert(rb, ra);
+        }
+    }
+    let keys: Vec<u32> = parent.keys().copied().collect();
+    let loops: std::collections::HashSet<u32> = keys.into_iter().map(|v| find(&mut parent, v)).collect();
+    (loops.len(), open.len())
+}
+
 /// Which pieces (by bounding box, lowest corner first) have nothing to hold
 /// them up: they do not reach `floor` and do not touch, within `tol`, any piece
 /// that does, directly or through others. Boxes are coarse, so a piece above a
@@ -1043,6 +1131,27 @@ mod tests {
         // Closed and consistent now: orienting changes nothing.
         m.orient();
         assert_eq!(m.repair.flipped_triangles, 0);
+    }
+
+    #[test]
+    fn issues_count_what_each_repair_would_change() {
+        let mut m = closed_cube();
+        // The top open, one side face turned over, the whole cube up off the plate.
+        m.parts[0].tris.drain(2..4);
+        m.parts[0].origin.as_mut().unwrap().drain(2..4);
+        m.parts[0].tris[3].swap(1, 2);
+        let clean = closed_cube().issues(1e-4, 1e-4);
+        assert_eq!(clean, MeshIssues::default());
+        let i = m.issues(1e-4, 1e-4);
+        assert_eq!((i.holes, i.open_edges), (1, 4));
+        assert_eq!(i.flipped_triangles, 1);
+        assert_eq!(i.shared_vertices, 0);
+        // Counting leaves the mesh as it was.
+        assert_eq!(m.parts[0].tris.len(), 10);
+        m.fill_holes();
+        m.orient();
+        let fixed = m.issues(1e-4, 1e-4);
+        assert_eq!((fixed.holes, fixed.open_edges, fixed.flipped_triangles), (0, 0, 0));
     }
 
     #[test]

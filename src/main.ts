@@ -19,6 +19,8 @@ import {
   type Printers,
   type Prefs,
   type Progress,
+  type Issues,
+  type MeshFix,
   type Summary,
   type TurnResult,
   type Vec3,
@@ -473,7 +475,9 @@ function render(s: Summary) {
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
   bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
   // The mesh tab says when something there changes the model.
-  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0);
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || REPAIRS.some((op) => st[op]));
+  renderRepairs(s);
+  void refreshIssues();
   bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
 
   // Filament changes, with what the last change did.
@@ -1104,6 +1108,91 @@ $("#flatten").addEventListener("keydown", (e) => {
   }
 });
 
+// ---- advanced repairs ----------------------------------------------------------------
+
+/** The repairs with a switch of their own in Malla; each is a `MeshFix` field and a setting. */
+const REPAIRS = ["fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"] as const;
+type RepairOp = (typeof REPAIRS)[number];
+const repairGroup = $<HTMLDetailsElement>("#repair-group");
+const repairBox = (op: RepairOp) => $<HTMLInputElement>(`#repair-ops input[data-op="${op}"]`);
+/** What the repairs found, for the geometry `issuesFor` names; refetched when it changes. */
+let issues: { before: Issues; after: Issues } | null = null;
+let issuesFor = "";
+let issuesToken = 0;
+const geometryKey = (s: Summary) => JSON.stringify([s.fileName, s.sourceTriangles, s.triangles, s.sizeMm, s.settings.rotation,
+  s.settings.keepRatio, s.settings.flattenMm, s.settings.repair, s.settings.minPieceMm, ...REPAIRS.map((op) => s.settings[op])]);
+
+/** One repair's finding in words: none, or how many of what. */
+function issueText(op: RepairOp, i: Issues): string {
+  const n = (count: number) => ({ count, n: nf(count) });
+  switch (op) {
+    case "fillHoles": return i.holes ? t("repair.holes", { ...n(i.holes), edges: nf(i.openEdges) }) : t("repair.noHoles");
+    case "orient": return i.flippedTriangles ? t("repair.flipped", n(i.flippedTriangles)) : t("repair.noFlipped");
+    case "splitVertices": return i.sharedVertices ? t("repair.shared", n(i.sharedVertices)) : t("repair.noShared");
+    case "dropFloating": return i.floatingPieces ? t("repair.floating", n(i.floatingPieces)) : t("repair.noFloating");
+    case "deepClean": return i.strayTriangles ? t("repair.stray", n(i.strayTriangles)) : t("repair.noStray");
+  }
+}
+const issueCount = (op: RepairOp, i: Issues) =>
+  ({ fillHoles: i.openEdges, orient: i.flippedTriangles, splitVertices: i.sharedVertices, dropFloating: i.floatingPieces, deepClean: i.strayTriangles })[op];
+
+/** Each switch's line: what it finds, or with it on, what there was and what is left. */
+function renderRepairs(s: Summary | null) {
+  const pending = s !== null && issuesFor !== geometryKey(s);
+  for (const op of REPAIRS) {
+    const box = repairBox(op);
+    box.checked = s?.settings[op] ?? false;
+    box.disabled = !s;
+    const line = $(`#repair-ops [data-count="${op}"]`);
+    if (!s || !issues || pending) {
+      line.textContent = s ? t("repair.counting") : "";
+      line.dataset.tone = "";
+      continue;
+    }
+    const { before, after } = issues;
+    const on = s.settings[op];
+    line.textContent = on ? t("repair.beforeAfter", { before: issueText(op, before), after: issueText(op, after) }) : issueText(op, after);
+    line.dataset.tone = on && issueCount(op, before) > issueCount(op, after) ? "fixed" : issueCount(op, after) > 0 ? "found" : "";
+  }
+  const active = s ? REPAIRS.filter((op) => s.settings[op]).length : 0;
+  bind("repairSum", active ? t("repair.sum", { count: active, n: active }) : "");
+}
+
+/** Counts again when the mesh changed and the switches are in view; a newer request wins. */
+async function refreshIssues() {
+  const s = summary;
+  if (!s || app.dataset.tab !== "mesh" || !repairGroup.open) return;
+  const key = geometryKey(s);
+  if (key === issuesFor) return renderRepairs(s);
+  const mine = ++issuesToken;
+  renderRepairs(s);
+  try {
+    const found = await api.meshIssues();
+    if (mine !== issuesToken) return;
+    issues = found;
+    issuesFor = key;
+  } catch (e) {
+    if (mine === issuesToken) toast(errText(e), "error");
+  }
+  renderRepairs(summary);
+}
+repairGroup.addEventListener("toggle", () => void refreshIssues());
+
+for (const op of REPAIRS) {
+  repairBox(op).addEventListener("change", async () => {
+    const box = repairBox(op);
+    const on = box.checked;
+    // Rebuilding the mesh drops hand painting; Ctrl+Z brings it back.
+    if (summary?.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("repair.title"), kind: "warning" }))) {
+      box.checked = !on;
+      return;
+    }
+    const fix: MeshFix = { [op]: on };
+    await apply(() => api.fixMesh(fix));
+    if (summary) renderRepairs(summary);
+  });
+}
+
 const colorOps = () => void apply(() => api.setColorOps(Number($<HTMLInputElement>("#detail").value), Number($<HTMLInputElement>("#island").value)));
 $("#detail").addEventListener("change", colorOps);
 $("#island").addEventListener("change", colorOps);
@@ -1443,6 +1532,7 @@ function selectTab(tab: Tab, focus = false) {
   }
   $(".side").scrollTo({ top: 0 });
   placeToolOptions(tab);
+  if (tab === "mesh") void refreshIssues();
   // Each mode shows its own tools in the view: the cut opens with its tool, and
   // a tool the new mode does not have hands the view back to orbiting.
   const tool = app.dataset.tool as Tool;
