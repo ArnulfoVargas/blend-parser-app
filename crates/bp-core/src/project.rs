@@ -1482,15 +1482,12 @@ impl Project {
                         }
                     }
                     let (sides, unplaced) = cut::split_plane_with_features(&chunk.part, plane, eps, &features);
-                    if unplaced > 0 {
+                    if unplaced > 0 || !cut::valid_section(&chunk.part, &sides, eps) {
                         return Err(cut::CutError::InvalidGeometry);
                     }
                     for (part, origins) in sides {
                         if part.tris.is_empty() {
                             continue;
-                        }
-                        if !cut::valid_solid(&part, eps) {
-                            return Err(cut::CutError::InvalidGeometry);
                         }
                         let origins = origins.iter().map(|o| o.and_then(|p| chunk.origins[p as usize])).collect();
                         next.push(Chunk { part, from: chunk.from, origins });
@@ -1524,6 +1521,10 @@ impl Project {
                         let (cp, cq) = (cells[i], cells[j]);
                         if p.from != q.from || cp[a] != m || cq[a] != m + 1 || (0..3).any(|k| k != a && cp[k] != cq[k])
                         {
+                            continue;
+                        }
+                        if !cut::valid_solid(&p.part, eps) || !cut::valid_solid(&q.part, eps) {
+                            missing += 1;
                             continue;
                         }
                         // P's cap on this plane: its new faces lying on it, facing the plane's normal.
@@ -2829,6 +2830,31 @@ mod tests {
                 (o, mine[0].plate, geom::sub(hi, lo))
             })
             .collect()
+    }
+
+    #[test]
+    fn an_open_model_can_be_split_across_plates() {
+        let mut source = bar([300.0, 40.0, 30.0]);
+        // Remove one end face. The other end and both cuts should remain intact.
+        let part = &mut source.parts[0];
+        let removable: Vec<usize> =
+            (0..part.tris.len()).filter(|&i| part.corners(i).iter().all(|v| v[0] == 0.0)).collect();
+        assert_eq!(removable.len(), 2);
+        for i in removable.into_iter().rev() {
+            part.tris.remove(i);
+            part.tri_loops.remove(i);
+            part.tri_source.remove(i);
+        }
+        let mut p = Project::new(source, 2);
+        let before = p.preview();
+        let plan = SplitPlan { cuts: p.propose_split(&ROOM), ..Default::default() };
+        let report = p.preview_split(&plan, &ROOM).unwrap();
+        assert!(report.fits());
+        assert_eq!(report.pieces.len(), 3);
+        assert_eq!(p.split_for_printer(&plan, &ROOM, "dowel"), Ok(report));
+        assert_eq!(p.scene.parts.iter().filter(|part| cut::valid_solid(part, 1e-4)).count(), 2);
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before.positions);
     }
 
     #[test]
