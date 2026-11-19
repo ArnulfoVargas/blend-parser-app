@@ -2936,6 +2936,37 @@ mod tests {
     }
 
     #[test]
+    fn arrangement_and_cloning_pack_into_more_plates_without_resizing() {
+        let mut p = Project::new(bar([90.0, 55.0, 30.0]), 2);
+        let target = brush_bar(&mut p);
+        let area = brush_area(&p, target);
+        p.clone_object(0, "copy", 120.0).unwrap();
+        p.clone_object(0, "copy", 120.0).unwrap();
+        let before = p.preview();
+        assert_eq!(p.plate_count(), 1);
+        p.arrange_plates(&ROOM, 120.0).unwrap();
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [2, 1]);
+        let pieces = p.export_parts();
+        let a = &pieces[0].positions;
+        let b = &pieces[1].positions;
+        let a_max_y = a.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+        let b_min_y = b.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        assert!((b_min_y - a_max_y - ROOM.gap_mm).abs() < 1e-3);
+        assert!(object_boxes(&p).iter().all(|(_, _, size)| geom::len(geom::sub(*size, [90.0, 55.0, 30.0])) < 1e-3));
+        assert!((brush_area(&p, target) - 3.0 * area).abs() < 1e-3);
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before.positions);
+        p.clone_and_arrange(0, "copy", &ROOM, 120.0).unwrap();
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [2, 2]);
+        let too_small = fit::Room { area_mm: [40.0; 2], ..ROOM };
+        assert_eq!(p.clone_and_arrange(0, "copy", &too_small, 120.0), Err(PlateEditError::DoesNotFit));
+        assert_eq!(p.object_count(), 4);
+        assert!(p.undo());
+        assert_eq!(p.object_count(), 3);
+        assert_eq!(p.plate_count(), 1);
+    }
+
+    #[test]
     fn a_long_model_is_split_into_pieces_that_fit_and_shared_across_plates() {
         let mut p = Project::new(bar([300.0, 40.0, 30.0]), 2);
         let target = brush_bar(&mut p);

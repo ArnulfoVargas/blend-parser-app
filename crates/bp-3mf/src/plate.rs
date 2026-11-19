@@ -142,7 +142,13 @@ pub fn check_at(printer: &Printer, footprint_mm: [f32; 2], offset_mm: [f32; 2], 
 /// go) that stays inside the margin and clear of excluded zones and the
 /// tower's reserve, as width and depth in millimetres.
 pub fn centred_room(printer: &Printer, reserve: &Reserve) -> [f32; 2] {
+    centred_room_at(printer, reserve, [0.0; 2])
+}
+
+/// The same usable rectangle at the project's current XY offset.
+pub fn centred_room_at(printer: &Printer, reserve: &Reserve, offset_mm: [f32; 2]) -> [f32; 2] {
     let (cx, cy) = printer.plate_centre();
+    let (cx, cy) = (cx + offset_mm[0], cy + offset_mm[1]);
     let usable = printer.printable_area().grow(-reserve.margin_mm.max(0.0));
     let mut half = [(cx - usable.x0).min(usable.x1 - cx).max(0.0), (cy - usable.y0).min(usable.y1 - cy).max(0.0)];
     let tower = reserve.tower.then(|| {

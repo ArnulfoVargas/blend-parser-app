@@ -1,4 +1,5 @@
 use super::{CutPaint, PaintTransfer, Project, UndoEntry, NO_LABEL};
+use crate::fit::{self, Room};
 use crate::geom::{self, Vec3};
 use crate::scene::Part;
 use std::collections::BTreeMap;
@@ -10,6 +11,8 @@ pub enum PlateEditError {
     Plate,
     Object,
     ObjectLimit,
+    NoRoom,
+    DoesNotFit,
 }
 
 impl Project {
@@ -71,6 +74,70 @@ impl Project {
             .collect();
         parts.extend(copies);
         Ok((parts, id, plate))
+    }
+
+    /// Packs whole objects across the printer's plates without changing their scale.
+    pub fn arrange_plates(&mut self, room: &Room, bed_width_mm: f32) -> Result<(), PlateEditError> {
+        let mut parts = self.layout_parts();
+        if !parts.is_empty() {
+            self.pack_layout(&mut parts, room, bed_width_mm)?;
+            self.commit_layout(parts, "arrangePlates");
+        }
+        Ok(())
+    }
+
+    /// Places a copy and reflows the plates as one undoable edit.
+    pub fn clone_and_arrange(
+        &mut self,
+        object: u32,
+        label: &str,
+        room: &Room,
+        bed_width_mm: f32,
+    ) -> Result<(), PlateEditError> {
+        let (mut parts, _, _) = self.cloned_layout(object, label)?;
+        self.pack_layout(&mut parts, room, bed_width_mm)?;
+        self.commit_layout(parts, "cloneObject");
+        Ok(())
+    }
+
+    fn pack_layout(&self, parts: &mut [(Part, usize)], room: &Room, bed_width_mm: f32) -> Result<(), PlateEditError> {
+        if !room.valid() {
+            return Err(PlateEditError::NoRoom);
+        }
+        let unit = self.stretch.map(|axis| axis * self.scale);
+        let mut boxes = BTreeMap::<u32, (Vec3, Vec3)>::new();
+        for (part, _) in parts.iter() {
+            for vertex in &part.positions {
+                let p = std::array::from_fn(|i| vertex[i] * unit[i]);
+                let (lo, hi) = boxes.entry(part.object).or_insert((p, p));
+                for i in 0..3 {
+                    lo[i] = lo[i].min(p[i]);
+                    hi[i] = hi[i].max(p[i]);
+                }
+            }
+        }
+        let footprints: Vec<_> = boxes.values().map(|&(lo, hi)| [hi[0] - lo[0], hi[1] - lo[1]]).collect();
+        let spots = fit::pack(&footprints, room);
+        let placements = boxes
+            .into_iter()
+            .zip(spots)
+            .map(|((id, (lo, hi)), spot)| {
+                let size = geom::sub(hi, lo);
+                let spot = spot.filter(|_| size[2] <= room.height_mm + 1e-3).ok_or(PlateEditError::DoesNotFit)?;
+                Ok((id, (lo, size, spot)))
+            })
+            .collect::<Result<BTreeMap<_, _>, PlateEditError>>()?;
+        for (part, _) in parts.iter_mut() {
+            let &(origin, size, spot) = placements.get(&part.object).ok_or(PlateEditError::Object)?;
+            part.plate = spot.plate as u32;
+            for p in &mut part.positions {
+                let [x, y, z]: Vec3 = std::array::from_fn(|i| p[i] * unit[i] - origin[i]);
+                let [x, y] = if spot.turned { [size[1] - y, x] } else { [x, y] };
+                *p = [(x + spot.at[0]) / unit[0], (y + spot.at[1]) / unit[1], z / unit[2]];
+            }
+        }
+        self.space_plates(parts, bed_width_mm);
+        Ok(())
     }
 
     fn check_plate(&self, plate: u32) -> Result<(), PlateEditError> {

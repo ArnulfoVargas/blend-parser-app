@@ -493,7 +493,7 @@ impl SplitPlanDto {
 
 /// The room every plate has for pieces: centred, clear of the margin, the
 /// excluded zones and the tower, and as tall as the printer prints.
-fn split_room(d: &Document, prefs: &Prefs, gap_mm: f32) -> bp_core::fit::Room {
+fn plate_room(d: &Document, prefs: &Prefs, gap_mm: f32, offset_mm: [f32; 2]) -> bp_core::fit::Room {
     let stats = d.project.stats();
     let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
     let reserve = bp_3mf::Reserve {
@@ -503,7 +503,7 @@ fn split_room(d: &Document, prefs: &Prefs, gap_mm: f32) -> bp_core::fit::Room {
         margin_mm: prefs.plate.margin_mm,
     };
     bp_core::fit::Room {
-        area_mm: bp_3mf::centred_room(&d.printer, &reserve),
+        area_mm: bp_3mf::plate::centred_room_at(&d.printer, &reserve, offset_mm),
         height_mm: d.printer.max_height_mm(),
         gap_mm,
     }
@@ -523,7 +523,7 @@ fn split_error(e: bp_core::SplitError) -> AppError {
 pub async fn propose_split(app: AppHandle, gap_mm: f32) -> CmdResult<dto::SplitProposalDto> {
     in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
     with_doc(app, move |d, prefs| {
-        let room = split_room(d, prefs, gap_mm);
+        let room = plate_room(d, prefs, gap_mm, [0.0; 2]);
         let stats = d.project.stats();
         Ok(dto::SplitProposalDto {
             cuts: d.project.propose_split(&room),
@@ -539,7 +539,8 @@ pub async fn propose_split(app: AppHandle, gap_mm: f32) -> CmdResult<dto::SplitP
 #[tauri::command]
 pub async fn preview_split(app: AppHandle, plan: SplitPlanDto) -> CmdResult<dto::SplitReportDto> {
     let (plan, gap) = plan.core()?;
-    let (project, room) = with_doc(app, move |d, prefs| Ok((d.project.clone(), split_room(d, prefs, gap)))).await?;
+    let (project, room) =
+        with_doc(app, move |d, prefs| Ok((d.project.clone(), plate_room(d, prefs, gap, [0.0; 2])))).await?;
     tauri::async_runtime::spawn_blocking(move || {
         project.preview_split(&plan, &room).map(dto::split_report).map_err(split_error)
     })
@@ -553,7 +554,7 @@ pub async fn split_for_printer(app: AppHandle, plan: SplitPlanDto, dowel_label: 
     let (plan, gap) = plan.core()?;
     let label: String = dowel_label.chars().filter(|c| !c.is_control()).take(32).collect();
     with_doc(app, move |d, prefs| {
-        let room = split_room(d, prefs, gap);
+        let room = plate_room(d, prefs, gap, [0.0; 2]);
         d.project.split_for_printer(&plan, &room, &label).map_err(split_error)?;
         // Each plate's pieces go on its centre.
         d.offset_mm = [0.0; 2];
@@ -567,6 +568,8 @@ fn plate_edit_error(error: bp_core::PlateEditError) -> AppError {
         bp_core::PlateEditError::Plate => "error.plateMissing",
         bp_core::PlateEditError::Object => "error.plateObjectMissing",
         bp_core::PlateEditError::ObjectLimit => "error.plateObjectLimit",
+        bp_core::PlateEditError::NoRoom => "error.noRoom",
+        bp_core::PlateEditError::DoesNotFit => "error.plateArrangeOversize",
     })
 }
 
@@ -589,10 +592,31 @@ pub async fn move_to_plate(app: AppHandle, object: u32, plate: u32) -> CmdResult
 }
 
 #[tauri::command]
-pub async fn clone_object(app: AppHandle, object: u32, label: String) -> CmdResult<Summary> {
+pub async fn clone_object(app: AppHandle, object: u32, label: String, gap_mm: Option<f32>) -> CmdResult<Summary> {
+    if let Some(gap) = gap_mm {
+        in_range(gap, 0.0..=50.0, "error.splitGap")?;
+    }
     let label: String = label.chars().filter(|c| !c.is_control()).take(32).collect();
     with_doc(app, move |d, prefs| {
-        d.project.clone_object(object, &label, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        let width = d.printer.bed_mm().0;
+        if let Some(gap) = gap_mm {
+            let room = plate_room(d, prefs, gap, d.offset_mm);
+            d.project.clone_and_arrange(object, &label, &room, width)
+        } else {
+            d.project.clone_object(object, &label, width)
+        }
+        .map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn arrange_plates(app: AppHandle, gap_mm: f32) -> CmdResult<Summary> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, d.offset_mm);
+        d.project.arrange_plates(&room, d.printer.bed_mm().0).map_err(plate_edit_error)?;
         Ok(dto::summary(d, prefs))
     })
     .await
