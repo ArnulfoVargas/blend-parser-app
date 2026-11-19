@@ -61,9 +61,19 @@ function bind(key: string, text: string) {
 }
 
 /** A backend error in the user's language. */
+/** The line of a Blender log that says what went wrong: the exception at the
+ *  end of a Python traceback, else the last line with "error", else the last line. */
+function blenderCause(log: string): string {
+  const lines = log.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const exc = [...lines].reverse().find((l) => /^[A-Z]\w*(Error|Exception)\b/.test(l));
+  return exc ?? [...lines].reverse().find((l) => /error/i.test(l)) ?? lines[lines.length - 1] ?? "";
+}
+
 function errText(e: unknown): string {
   if (isAppError(e)) {
     const params = { ...e.params };
+    // A whole Python traceback helps no one in the panel: its cause does. The full log stays in the tooltip.
+    if (e.key === "error.blenderFailed" && typeof params.detail === "string") params.detail = blenderCause(params.detail);
     for (const [k, v] of Object.entries(params)) if (typeof v === "number") params[k] = mm(v);
     return tKey(e.key, params, t("error.unknown", { detail: String(e.params?.detail ?? e.key) }));
   }
@@ -75,6 +85,8 @@ function setState(s: State, error?: unknown) {
   app.dataset.state = s;
   if (s === "error") shownError = error ?? shownError;
   bind("error", s === "error" ? errText(shownError) : "");
+  const full = isAppError(shownError) && typeof shownError.params?.detail === "string" ? shownError.params.detail : "";
+  $(".tray__error .label__msg").title = s === "error" ? full : "";
   bind("step", tKey(`progress.${step.key}`, { name: step.name }, step.name));
   $<HTMLButtonElement>("#choose").disabled = s === "converting";
   for (const id of ["#export", "#open-zip"]) $<HTMLButtonElement>(id).setAttribute("aria-disabled", String(s !== "ready"));
@@ -226,6 +238,10 @@ function renderPlace(s: Summary) {
   $<HTMLButtonElement>("#place-centre").disabled = x === 0 && y === 0;
   $<HTMLButtonElement>("#rotate-reset").disabled = !s.plate.rotated;
   $<HTMLButtonElement>("#cut-undo").disabled = !s.plate.canUndoCut;
+  const objects = s.plate.objects;
+  bind("cutCount", objects > 1 ? String(objects) : "");
+  bind("cutObjects", objects > 1 ? t("cut.objects", { n: objects }) : "");
+  syncCutMm();
 }
 $("#place-centre").addEventListener("click", () => void work(() => api.setOffset([0, 0])).then((s) => s && render(s)));
 
@@ -260,12 +276,28 @@ turnStep.addEventListener("change", () => {
 viewer.setTurnStep(Number(turnStep.value));
 
 const cutPos = $<HTMLInputElement>("#cut-pos");
-/** The cut's controls under the view, and the mark on its tool while it is on. */
+const cutMm = $<HTMLInputElement>("#cut-mm");
+/** The model's length along the cut's axis, in millimetres. */
+const cutLength = (axis: Axis) => summary?.sizeMm[axis] ?? 0;
+/** The cut's height in millimetres beside its slider, and which side stays. */
+function syncCutMm() {
+  const s = viewer.getSection() ?? currentCut();
+  const len = cutLength(s.axis);
+  cutMm.max = String(Math.round(len * 10) / 10);
+  if (document.activeElement !== cutMm) cutMm.value = len ? String(Math.round(s.t * len * 10) / 10) : "";
+  const side = t(`cut.side${s.axis}${s.flip ? "High" : "Low"}` as Key);
+  bind("cutPosHelp", keepOther.checked
+    ? t("cut.keepsBoth", { max: nf(len, 1), axis: "XYZ"[s.axis] })
+    : t("cut.keeps", { side, max: nf(len, 1), axis: "XYZ"[s.axis] }));
+}
+/** The cut's controls in its panel, and the mark on its tool while it is on. */
 function syncSection(s: Section | null) {
   $<HTMLButtonElement>('button[data-tool="section"]').dataset.on = String(s !== null);
-  document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) => b.setAttribute("aria-pressed", String(s !== null && Number(b.dataset.cutAxis) === s.axis)));
+  document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) => b.setAttribute("aria-pressed", String(Number(b.dataset.cutAxis) === (s ?? currentCut()).axis)));
   if (s) cutPos.value = String(Math.round(s.t * 1000) / 10);
   $<HTMLButtonElement>("#cut-flip").setAttribute("aria-pressed", String(s?.flip ?? false));
+  $<HTMLButtonElement>("#cut-apply").disabled = s === null;
+  syncCutMm();
 }
 function setSection(s: Section | null) {
   viewer.setSection(s);
@@ -273,15 +305,25 @@ function setSection(s: Section | null) {
 }
 const currentCut = (): Section => viewer.getSection() ?? { axis: 2, t: 0.5, flip: false };
 cutPos.addEventListener("input", () => setSection({ ...currentCut(), t: Number(cutPos.value) / 100 }));
+// A typed height is kept inside the model; an empty or junk value changes nothing.
+cutMm.addEventListener("change", () => {
+  const c = currentCut();
+  const len = cutLength(c.axis);
+  const mm = Number(cutMm.value);
+  if (!len || cutMm.value.trim() === "" || !Number.isFinite(mm)) return syncCutMm();
+  setSection({ ...c, t: Math.min(1, Math.max(0, mm / len)) });
+});
 document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) =>
   b.addEventListener("click", () => setSection({ ...currentCut(), axis: Number(b.dataset.cutAxis) as Axis })));
 $("#cut-flip").addEventListener("click", () => setSection({ ...currentCut(), flip: !currentCut().flip }));
 $("#cut-off").addEventListener("click", () => {
   setSection(null);
   setTool("orbit");
+  selectTab("model");
 });
 // Cutting for real keeps the side the view shows.
 const keepOther = $<HTMLInputElement>("#cut-keep-other");
+keepOther.addEventListener("change", syncCutMm);
 $("#cut-apply").addEventListener("click", () => {
   const s = viewer.getSection();
   if (!s || !summary) return;
@@ -289,7 +331,6 @@ $("#cut-apply").addEventListener("click", () => {
   measured = [];
   void apply(() => api.cutModel(s.axis, s.t, !s.flip, both), () => {
     setSection(null);
-    setTool("orbit");
     toast(t(both ? "cut.doneBoth" : "cut.doneKept"), "ok", { label: t("cut.undo"), run: undoCut });
   });
 });
@@ -430,6 +471,9 @@ function render(s: Summary) {
   ].filter((x): x is string => Boolean(x));
   bind("repairOut", !st.repair && !r.loosePieces ? t("mesh.notRepaired") : fixes.length ? t("mesh.fixed", { list: fixes.join(", ") }) : t("mesh.clean"));
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
+  bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
+  // The mesh tab says when something there changes the model.
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0);
   bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
 
   // Filament changes, with what the last change did.
@@ -1365,6 +1409,8 @@ $("#printer-close").addEventListener("click", () => printerDialog.close());
 // Shortcuts from the filament-change summary to the controls that lower it.
 function reveal(groupSel: string, focusSel: string) {
   const group = $<HTMLDetailsElement>(groupSel);
+  const panel = group.closest<HTMLElement>("[role=tabpanel]");
+  if (panel) selectTab(panel.id.replace("panel-", "") as Tab);
   group.open = true;
   const el = $<HTMLElement>(focusSel);
   el.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -1372,6 +1418,64 @@ function reveal(groupSel: string, focusSel: string) {
 }
 $("#go-reduce").addEventListener("click", () => reveal("#color-group", "#reduce-to"));
 $("#go-islands").addEventListener("click", () => reveal("#color-group", "#island"));
+
+// ---- tabs: model, mesh, cuts -----------------------------------------------------------
+
+type Tab = "model" | "mesh" | "cut";
+const TAB_KEY = "blendparser.tab";
+const tabButtons = [...document.querySelectorAll<HTMLButtonElement>("[role=tab][data-tab]")];
+/** Shows one panel. The cut panel drives the cut tool: opening it turns the cut
+ *  on in the view, and leaving it hands the view back to orbiting (the plane stays). */
+function selectTab(tab: Tab, focus = false) {
+  if (app.dataset.tab === tab) return;
+  app.dataset.tab = tab;
+  for (const b of tabButtons) {
+    const on = b.dataset.tab === tab;
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
+    $(`#${b.getAttribute("aria-controls")}`).hidden = !on;
+    if (on && focus) b.focus();
+  }
+  $(".side").scrollTo({ top: 0 });
+  placeToolOptions(tab);
+  if (tab === "cut") {
+    if (app.dataset.tool !== "section") setTool("section");
+  } else if (app.dataset.tool === "section") setTool("orbit");
+  try {
+    // A cut left open would turn the cut on at the next start: only the others are remembered.
+    localStorage.setItem(TAB_KEY, tab === "cut" ? "model" : tab);
+  } catch {
+    // Not remembered.
+  }
+}
+/** Move and turn keep their options under the view in the model mode; in the
+ *  editing modes, with the AMS column gone, they sit at the top of the side panel. */
+function placeToolOptions(tab: Tab) {
+  const opts = $("#tool-options");
+  const foot = $(".stage__foot");
+  for (const el of document.querySelectorAll<HTMLElement>('.place[data-for="move"], .place[data-for="rotate"]')) {
+    if (tab === "model") foot.insertBefore(el, $("#measure-out"));
+    else opts.append(el);
+  }
+}
+/** Blender's workspace keys: Ctrl+PageDown and Ctrl+PageUp go to the next and previous mode. */
+window.addEventListener("keydown", (e) => {
+  if (!e.ctrlKey || (e.key !== "PageDown" && e.key !== "PageUp") || document.querySelector("dialog[open]")) return;
+  e.preventDefault();
+  const i = tabButtons.findIndex((b) => b.dataset.tab === app.dataset.tab);
+  const next = (i + (e.key === "PageDown" ? 1 : -1) + tabButtons.length) % tabButtons.length;
+  selectTab(tabButtons[next].dataset.tab as Tab, true);
+});
+tabButtons.forEach((b, i) => {
+  b.addEventListener("click", () => selectTab(b.dataset.tab as Tab));
+  // Arrows move between tabs, as in any tab list.
+  b.addEventListener("keydown", (e) => {
+    const to = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : e.key === "Home" ? 0 : e.key === "End" ? tabButtons.length - 1 : null;
+    if (to === null) return;
+    e.preventDefault();
+    selectTab(tabButtons[(to + tabButtons.length) % tabButtons.length].dataset.tab as Tab, true);
+  });
+});
 
 // ---- view, tool, undo ------------------------------------------------------------------
 
@@ -1383,6 +1487,9 @@ function setView(v: View) {
 
 function setTool(tool: Tool) {
   app.dataset.tool = tool;
+  if (tool === "section" && app.dataset.tab !== "cut") selectTab("cut");
+  // The brush paints with the AMS slots, which only the model mode shows.
+  if (tool === "brush" && app.dataset.tab !== "model") selectTab("model");
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
@@ -1639,6 +1746,14 @@ applyStatic();
 bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
 syncLock();
 setState("empty");
+let savedTab: Tab = "model";
+try {
+  const v = localStorage.getItem(TAB_KEY);
+  if (v === "mesh") savedTab = v;
+} catch {
+  // The first panel.
+}
+selectTab(savedTab);
 setTool("orbit");
 void api.printers().then((p) => {
   printers = p;

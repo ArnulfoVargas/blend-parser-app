@@ -40,6 +40,12 @@
         </ul>
       </li>
     </ul>
+    <!-- Modes, as Blender's workspaces: the same model, the panels each job needs. -->
+    <div class="modes" role="tablist" aria-label="Modo de trabajo" data-i18n-attr="aria-label:tabs.label">
+      <button class="modes__tab" type="button" role="tab" id="tab-model" data-tab="model" aria-controls="panel-model" aria-selected="true" data-i18n-attr="title:tabs.modelTitle"><span data-i18n="tabs.model">Modelo</span></button>
+      <button class="modes__tab" type="button" role="tab" id="tab-mesh" data-tab="mesh" aria-controls="panel-mesh" aria-selected="false" tabindex="-1" data-i18n-attr="title:tabs.meshTitle"><span data-i18n="tabs.mesh">Malla</span><i class="modes__dot" id="mesh-dot" hidden></i></button>
+      <button class="modes__tab" type="button" role="tab" id="tab-cut" data-tab="cut" aria-controls="panel-cut" aria-selected="false" tabindex="-1" data-i18n-attr="title:tabs.cutTitle"><span data-i18n="tabs.cut">Cortes</span><b class="modes__count num" data-bind="cutCount"></b></button>
+    </div>
     <button class="version" type="button" id="version" title="Buscar actualizaciones" data-i18n-attr="title:update.check"><span data-bind="version">v…</span><i class="version__dot" aria-hidden="true"></i></button>
     <p class="bar__file" data-bind="fileName"></p>
     <div class="bar__end">
@@ -82,7 +88,13 @@
         <button class="btn btn--quiet" type="button" id="find-blender" hidden data-i18n="tray.findBlender">Buscar blender.exe</button>
       </div>
 
+      <!-- Options of the tool in use while a mode hides the AMS column (move, turn). -->
+      <section class="toolopts" id="tool-options" aria-labelledby="h-toolopts">
+        <h2 id="h-toolopts" data-i18n="tabs.tool">Herramienta</h2>
+      </section>
+
       <form class="settings" id="settings" novalidate>
+        <div class="tabpanel" role="tabpanel" id="panel-model" aria-labelledby="tab-model">
         <details class="group" id="size-group" open>
           <summary><h2 data-i18n="size.title">Tamaño</h2><span class="group__sum num" data-bind="dims"></span></summary>
           <div class="group__body">
@@ -123,15 +135,6 @@
               <button class="btn btn--quiet btn--sm" type="button" id="size-undo" data-i18n="size.undo">Deshacer tamaño</button>
             </div>
             <p class="help" data-i18n="size.precision">Las medidas admiten centésimas de milímetro y se guardan tal como las escribes.</p>
-            <div class="field">
-              <label for="flatten" data-i18n="size.flatten">Aplanar base</label>
-              <div class="field__unit">
-                <input class="input" id="flatten" name="flatten" type="number" inputmode="decimal" min="0" max="50" step="0.2" value="0" aria-describedby="contact-help">
-                <span>mm</span>
-                <button class="btn btn--quiet" type="button" id="flatten-apply" data-i18n="size.flattenApply">Aplanar</button>
-              </div>
-              <p class="help" id="contact-help" data-bind="contact"></p>
-            </div>
           </div>
         </details>
 
@@ -208,7 +211,11 @@
           </div>
         </details>
 
-        <details class="group">
+        </div>
+
+        <div class="tabpanel" role="tabpanel" id="panel-mesh" aria-labelledby="tab-mesh" hidden>
+        <p class="help tabpanel__intro" data-i18n="tabs.meshIntro">Limpia y prepara la geometría. Cada cambio se recalcula al momento y se puede deshacer.</p>
+        <details class="group" id="mesh-group" open>
           <summary><h2 data-i18n="mesh.title">Malla</h2><span class="group__sum" data-bind="meshSum"></span></summary>
           <div class="group__body">
             <label class="check"><input type="checkbox" id="repair" checked> <span data-i18n="mesh.repair">Reparar malla</span></label>
@@ -221,6 +228,20 @@
               <label for="keep"><span data-i18n="mesh.simplify">Simplificar</span> <output for="keep" data-bind="keepOut"></output></label>
               <input class="range" id="keep" name="keep" type="range" min="5" max="100" step="5" value="100">
               <p class="help" data-bind="triangles"></p>
+            </div>
+          </div>
+        </details>
+        <details class="group" id="base-group" open>
+          <summary><h2 data-i18n="mesh.base">Base</h2><span class="group__sum num" data-bind="baseSum"></span></summary>
+          <div class="group__body">
+            <div class="field">
+              <label for="flatten" data-i18n="size.flatten">Aplanar base</label>
+              <div class="field__unit">
+                <input class="input" id="flatten" name="flatten" type="number" inputmode="decimal" min="0" max="50" step="0.2" value="0" aria-describedby="contact-help">
+                <span>mm</span>
+                <button class="btn btn--quiet" type="button" id="flatten-apply" data-i18n="size.flattenApply">Aplanar</button>
+              </div>
+              <p class="help" id="contact-help" data-bind="contact"></p>
             </div>
           </div>
         </details>
@@ -242,6 +263,39 @@
             </details>
           </div>
         </details>
+        </div>
+
+        <div class="tabpanel" role="tabpanel" id="panel-cut" aria-labelledby="tab-cut" hidden>
+          <p class="help tabpanel__intro" data-i18n="tabs.cutIntro">Corta el modelo con un plano: elige el eje y la altura aquí o arrastra las flechas en la vista.</p>
+          <section class="group cutp" aria-labelledby="h-cut">
+            <h2 id="h-cut" class="cutp__head" data-i18n="cut.title">Corte plano</h2>
+            <div class="field">
+              <span class="field__label" id="cut-axis-label" data-i18n="cut.axis">Eje del corte</span>
+              <div class="seg cutp__axes" role="group" aria-labelledby="cut-axis-label">
+                <button type="button" data-cut-axis="0" aria-pressed="false"><i class="cutp__axis cutp__axis--x" aria-hidden="true"></i>X</button>
+                <button type="button" data-cut-axis="1" aria-pressed="false"><i class="cutp__axis cutp__axis--y" aria-hidden="true"></i>Y</button>
+                <button type="button" data-cut-axis="2" aria-pressed="true"><i class="cutp__axis cutp__axis--z" aria-hidden="true"></i>Z</button>
+              </div>
+            </div>
+            <div class="field">
+              <label for="cut-mm" data-i18n="cut.position">Posición del corte</label>
+              <input class="range" id="cut-pos" type="range" min="0" max="100" step="0.5" value="50" aria-label="Posición del corte" data-i18n-attr="aria-label:cut.position" aria-describedby="cut-pos-help">
+              <div class="field__unit">
+                <input class="input" id="cut-mm" type="number" inputmode="decimal" min="0" step="0.1" aria-describedby="cut-pos-help"><span>mm</span>
+                <button class="btn btn--quiet btn--sm" type="button" id="cut-flip" aria-pressed="false" data-i18n="cut.flip">Invertir</button>
+              </div>
+              <p class="help" id="cut-pos-help" data-bind="cutPosHelp"></p>
+            </div>
+            <label class="check" data-i18n-attr="title:cut.keepOtherHelp"><input type="checkbox" id="cut-keep-other"> <span data-i18n="cut.keepOther">Conservar la otra parte</span></label>
+            <p class="help" data-i18n="cut.keepOtherHelp">La parte que el corte oculta queda como un objeto aparte, apoyada en su cara de corte junto al modelo.</p>
+            <button class="btn btn--primary cutp__apply" type="button" id="cut-apply" data-i18n="cut.apply">Cortar aquí</button>
+            <div class="row-actions">
+              <button class="btn btn--quiet btn--sm" type="button" id="cut-undo" disabled data-i18n="cut.undo">Deshacer corte</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.off">Quitar corte</button>
+            </div>
+            <p class="help" data-bind="cutObjects"></p>
+          </section>
+        </div>
       </form>
     </aside>
 
@@ -303,25 +357,6 @@
           <button class="btn btn--quiet btn--sm" type="button" data-turn="1">Y</button>
           <button class="btn btn--quiet btn--sm" type="button" data-turn="2">Z</button>
           <button class="btn btn--quiet btn--sm" type="button" id="rotate-reset" data-i18n="place.resetRotation">Orientación original</button>
-        </div>
-        <div class="place" data-for="section">
-          <div class="place__group">
-            <div class="seg seg--sm" role="group" aria-label="Eje del corte" data-i18n-attr="aria-label:cut.axis">
-              <button type="button" data-cut-axis="0" aria-pressed="false">X</button>
-              <button type="button" data-cut-axis="1" aria-pressed="false">Y</button>
-              <button type="button" data-cut-axis="2" aria-pressed="true">Z</button>
-            </div>
-            <input class="range" id="cut-pos" type="range" min="0" max="100" step="0.5" value="50" aria-label="Posición del corte" data-i18n-attr="aria-label:cut.position">
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-flip" aria-pressed="false" data-i18n="cut.flip">Invertir</button>
-          </div>
-          <div class="place__group">
-            <label class="check" data-i18n-attr="title:cut.keepOtherHelp"><input type="checkbox" id="cut-keep-other"> <span data-i18n="cut.keepOther">Conservar la otra parte</span></label>
-            <button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Cortar aquí</button>
-          </div>
-          <div class="place__group">
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-undo" disabled data-i18n="cut.undo">Deshacer corte</button>
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.off">Quitar corte</button>
-          </div>
         </div>
         <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
         <p class="stage__hint" data-bind="hint"></p>
