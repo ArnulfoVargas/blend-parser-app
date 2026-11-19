@@ -566,6 +566,7 @@ fn plate_edit_error(error: bp_core::PlateEditError) -> AppError {
     AppError::new(match error {
         bp_core::PlateEditError::Plate => "error.plateMissing",
         bp_core::PlateEditError::Object => "error.plateObjectMissing",
+        bp_core::PlateEditError::ObjectLimit => "error.plateObjectLimit",
     })
 }
 
@@ -582,6 +583,16 @@ pub async fn add_plate(app: AppHandle) -> CmdResult<Summary> {
 pub async fn move_to_plate(app: AppHandle, object: u32, plate: u32) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {
         d.project.move_to_plate(object, plate, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clone_object(app: AppHandle, object: u32, label: String) -> CmdResult<Summary> {
+    let label: String = label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        d.project.clone_object(object, &label, d.printer.bed_mm().0).map_err(plate_edit_error)?;
         Ok(dto::summary(d, prefs))
     })
     .await

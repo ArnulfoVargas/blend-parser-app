@@ -2908,6 +2908,34 @@ mod tests {
     }
 
     #[test]
+    fn cloning_copies_all_components_and_paint_as_one_object() {
+        let mut source = bar([25.0, 20.0, 30.0]);
+        let mut component = source.parts[0].clone();
+        for p in &mut component.positions {
+            p[1] += 25.0;
+        }
+        source.parts.push(component);
+        let mut p = Project::new(source, 2);
+        let target = brush_bar(&mut p);
+        let area = brush_area(&p, target);
+        p.add_plate();
+        p.move_to_plate(0, 1, 120.0).unwrap();
+        let before = p.preview();
+        p.clone_object(0, "copy", 120.0).unwrap();
+        let parts = p.export_parts();
+        assert_eq!(
+            parts.iter().map(|part| (part.object, part.plate)).collect::<Vec<_>>(),
+            [(0, 1), (0, 1), (1, 1), (1, 1),]
+        );
+        assert_eq!(parts[0].paint, parts[2].paint);
+        assert_eq!(parts[1].paint, parts[3].paint);
+        assert!((brush_area(&p, target) - 2.0 * area).abs() < 1e-3);
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before.positions);
+        assert_eq!(p.preview().labels, before.labels);
+    }
+
+    #[test]
     fn a_long_model_is_split_into_pieces_that_fit_and_shared_across_plates() {
         let mut p = Project::new(bar([300.0, 40.0, 30.0]), 2);
         let target = brush_bar(&mut p);

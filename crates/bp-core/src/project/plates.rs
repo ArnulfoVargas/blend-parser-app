@@ -3,10 +3,13 @@ use crate::geom::{self, Vec3};
 use crate::scene::Part;
 use std::collections::BTreeMap;
 
+type Layout = Vec<(Part, usize)>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlateEditError {
     Plate,
     Object,
+    ObjectLimit,
 }
 
 impl Project {
@@ -41,6 +44,35 @@ impl Project {
         Ok(())
     }
 
+    /// Copies a whole object, including its components and brush painting.
+    pub fn clone_object(&mut self, object: u32, label: &str, bed_width_mm: f32) -> Result<(), PlateEditError> {
+        let (mut parts, copy, plate) = self.cloned_layout(object, label)?;
+        self.place_beside(&mut parts, copy, plate, bed_width_mm)?;
+        self.commit_layout(parts, "cloneObject");
+        Ok(())
+    }
+
+    fn cloned_layout(&self, object: u32, label: &str) -> Result<(Layout, u32, u32), PlateEditError> {
+        let mut parts = self.layout_parts();
+        let plate = parts.iter().find(|(p, _)| p.object == object).ok_or(PlateEditError::Object)?.0.plate;
+        let id = parts
+            .iter()
+            .map(|(p, _)| p.object)
+            .max()
+            .and_then(|id| id.checked_add(1))
+            .ok_or(PlateEditError::ObjectLimit)?;
+        let copies: Layout = parts
+            .iter()
+            .filter(|(p, _)| p.object == object)
+            .map(|(p, i)| {
+                let name = format!("{} · {label} {}", p.name, u64::from(id) + 1);
+                (Part { object: id, name, ..p.clone() }, *i)
+            })
+            .collect();
+        parts.extend(copies);
+        Ok((parts, id, plate))
+    }
+
     fn check_plate(&self, plate: u32) -> Result<(), PlateEditError> {
         if (plate as usize) < self.plate_count() {
             Ok(())
@@ -49,7 +81,7 @@ impl Project {
         }
     }
 
-    fn layout_parts(&self) -> Vec<(Part, usize)> {
+    fn layout_parts(&self) -> Layout {
         self.scene
             .parts
             .iter()
@@ -106,7 +138,7 @@ impl Project {
         }
     }
 
-    fn commit_layout(&mut self, changes: Vec<(Part, usize)>, kind: &'static str) {
+    fn commit_layout(&mut self, changes: Layout, kind: &'static str) {
         let plate_count = self.plate_count();
         let transfers: Vec<_> = self
             .scene

@@ -818,6 +818,7 @@ function renderPlateControls(s: Summary) {
   setOptions(plateDestination, plates.filter(([i]) => i !== activePlate));
   $<HTMLButtonElement>("#plate-move").disabled = plateObject.disabled || plateDestination.disabled;
   $<HTMLButtonElement>("#plate-clear").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-clone").disabled = plateObject.disabled;
 }
 
 projectPlate.addEventListener("change", () => {
@@ -839,6 +840,10 @@ $("#plate-move").addEventListener("click", () => {
     activePlate = destination;
     return s;
   });
+});
+$("#plate-clone").addEventListener("click", () => {
+  const object = Number(plateObject.value);
+  void apply(() => api.cloneObject(object, t("plates.copy")));
 });
 $("#plate-clear").addEventListener("click", async () => {
   const plate = activePlate;
