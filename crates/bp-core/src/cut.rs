@@ -483,27 +483,61 @@ fn earclip_simple(poly: &[u32], at: &impl Fn(u32) -> [f32; 2]) -> Vec<[u32; 3]> 
 }
 
 /// Reject open, inconsistently wound, non-finite or degenerate results before commit.
+#[cfg(test)]
 pub(crate) fn valid_solid(part: &Part, eps: f32) -> bool {
-    if part.tris.is_empty() || part.positions.iter().flatten().any(|v| !v.is_finite()) {
-        return false;
+    surface_is_closed(part, eps) == Some(true)
+}
+
+/// Accepts a clean clipped surface when its source already had a boundary.
+/// Closed sources must still produce solids, including after the cap is built.
+pub(crate) fn valid_section(source: &Part, sides: &[(Part, Vec<Option<u32>>); 2], eps: f32) -> bool {
+    let mut has_open_side = false;
+    for (part, _) in sides.iter().filter(|(part, _)| !part.tris.is_empty()) {
+        match surface_is_closed(part, eps) {
+            Some(true) => {}
+            Some(false) => has_open_side = true,
+            None => return false,
+        }
     }
-    let mut edges = HashMap::new();
+    !has_open_side || surface_is_closed(source, eps) == Some(false)
+}
+
+/// None for degenerate, nonfinite, or inconsistently wound or shared edges.
+fn surface_is_closed(part: &Part, eps: f32) -> Option<bool> {
+    if part.tris.is_empty() || part.positions.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    // UV/material seams may duplicate positions in the original source.
+    let mut ids = HashMap::new();
+    let canonical: Vec<_> = part
+        .positions
+        .iter()
+        .enumerate()
+        .map(|(i, p)| *ids.entry(p.map(|v| if v == 0.0 { 0 } else { v.to_bits() })).or_insert(i))
+        .collect();
+    let mut edges = HashSet::new();
     let mut volume = 0.0;
     let origin = part.positions[0];
     for (i, t) in part.tris.iter().enumerate() {
         let c = part.corners(i);
-        if geom::area(&c) <= eps * eps {
-            return false;
+        let area = geom::area(&c);
+        if !area.is_finite() || area <= eps * eps {
+            return None;
         }
         volume +=
             geom::dot(geom::sub(c[0], origin), geom::cross(geom::sub(c[1], origin), geom::sub(c[2], origin))) / 6.0;
+        let vertices = t.map(|v| canonical[v as usize]);
         for k in 0..3 {
-            *edges.entry((t[k], t[(k + 1) % 3])).or_insert(0u32) += 1;
+            if !edges.insert((vertices[k], vertices[(k + 1) % 3])) {
+                return None;
+            }
         }
     }
-    volume.is_finite()
-        && volume.abs() > eps.powi(3)
-        && edges.iter().all(|(&(a, b), &n)| n == 1 && edges.get(&(b, a)) == Some(&1))
+    let closed = edges.iter().all(|&(a, b)| edges.contains(&(b, a)));
+    if closed && (!volume.is_finite() || volume.abs() <= eps.powi(3)) {
+        return None;
+    }
+    Some(closed)
 }
 
 /// One side as a part of its own: only the vertices it uses, the original's materials.

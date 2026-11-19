@@ -643,7 +643,7 @@ impl Project {
                 && whole.positions.iter().any(|&v| plane.distance(v) > eps);
             intersects |= crosses;
             let sides = cut::split_plane_with_origins(&whole, plane, eps);
-            if checked && sides.iter().any(|(p, _)| !p.tris.is_empty() && !cut::valid_solid(p, eps)) {
+            if checked && !cut::valid_section(&whole, &sides, eps) {
                 return Err(cut::CutError::InvalidGeometry);
             }
             let [low, high] = sides.map(|(part, origins)| {
@@ -1720,13 +1720,23 @@ mod tests {
                 assert!(!p.can_undo_cut());
             }
         }
-        let mut p = Project::new(self::scene(), 2); // open surface
-        let before = p.preview().positions;
-        assert_eq!(
-            p.cut_plane([0.0, 0.0, 8.0], [0.0, 0.0, 1.0], true, false, false, &[]),
-            Err(cut::CutError::InvalidGeometry)
-        );
-        assert_eq!(p.preview().positions, before);
+    }
+
+    #[test]
+    fn free_plane_splits_an_open_surface_without_inventing_a_cap() {
+        let mut p = Project::new(self::scene(), 2);
+        let before = p.preview();
+        let area = |parts: &[Part]| -> f32 {
+            parts.iter().flat_map(|part| (0..part.tris.len()).map(|i| geom::area(&part.corners(i)))).sum()
+        };
+        let original_area = area(&p.scene.parts);
+        p.cut_plane([0.0, 0.0, 8.0], [0.2, 0.0, 1.0], true, true, false, &[]).unwrap();
+        assert_eq!(p.object_count(), 2);
+        assert!((area(&p.scene.parts) - original_area).abs() < 1e-3);
+        assert!(p.scene.parts.iter().all(|part| !cut::valid_solid(part, 1e-5)));
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before.positions);
+        assert_eq!(p.preview().labels, before.labels);
     }
 
     fn brush_area(p: &Project, target: u8) -> f32 {
