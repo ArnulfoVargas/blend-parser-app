@@ -1422,6 +1422,11 @@ $("#go-islands").addEventListener("click", () => reveal("#color-group", "#island
 // ---- tabs: model, mesh, cuts -----------------------------------------------------------
 
 type Tab = "model" | "mesh" | "cut";
+/** The modes whose view shows `tool`, from its button's data-modes; the first opens when the tool is picked elsewhere. */
+function toolModes(tool: Tool): Tab[] {
+  const b = document.querySelector<HTMLElement>(`.toolbar__btn[data-tool="${tool}"]`);
+  return (b?.dataset.modes?.split(" ") as Tab[] | undefined) ?? ["model", "mesh", "cut"];
+}
 const TAB_KEY = "blendparser.tab";
 const tabButtons = [...document.querySelectorAll<HTMLButtonElement>("[role=tab][data-tab]")];
 /** Shows one panel. The cut panel drives the cut tool: opening it turns the cut
@@ -1438,9 +1443,12 @@ function selectTab(tab: Tab, focus = false) {
   }
   $(".side").scrollTo({ top: 0 });
   placeToolOptions(tab);
+  // Each mode shows its own tools in the view: the cut opens with its tool, and
+  // a tool the new mode does not have hands the view back to orbiting.
+  const tool = app.dataset.tool as Tool;
   if (tab === "cut") {
-    if (app.dataset.tool !== "section") setTool("section");
-  } else if (app.dataset.tool === "section") setTool("orbit");
+    if (tool !== "section") setTool("section");
+  } else if (!toolModes(tool).includes(tab)) setTool("orbit");
   try {
     // A cut left open would turn the cut on at the next start: only the others are remembered.
     localStorage.setItem(TAB_KEY, tab === "cut" ? "model" : tab);
@@ -1487,9 +1495,9 @@ function setView(v: View) {
 
 function setTool(tool: Tool) {
   app.dataset.tool = tool;
-  if (tool === "section" && app.dataset.tab !== "cut") selectTab("cut");
-  // The brush paints with the AMS slots, which only the model mode shows.
-  if (tool === "brush" && app.dataset.tab !== "model") selectTab("model");
+  // A tool from another mode (its key, say) opens that mode first.
+  const modes = toolModes(tool);
+  if (!modes.includes(app.dataset.tab as Tab)) selectTab(modes[0]);
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);

@@ -32,7 +32,6 @@ h2 { font-size: var(--text-lg); }
 .version.has-update { color: var(--color-accent-deep); box-shadow: inset 0 0 0 1px var(--color-accent); }
 .version.has-update .version__dot { display: inline-block; }
 @media (hover: hover) { .version:not(:disabled):hover { color: var(--color-ink); box-shadow: inset 0 0 0 1px var(--color-accent); } }
-.bar__file { min-width: 0; flex: 1; font-size: var(--text-sm); color: var(--color-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bar__end { display: flex; align-items: center; gap: var(--space-sm); }
 
 /* Controles moldeados */
@@ -296,7 +295,6 @@ details.group[open] .group__sum { visibility: hidden; }
 .version.has-update { color: var(--color-accent-deep); box-shadow: inset 0 0 0 1px var(--color-accent); }
 .version.has-update .version__dot { display: inline-block; }
 @media (hover: hover) { .version:not(:disabled):hover { color: var(--color-ink); box-shadow: inset 0 0 0 1px var(--color-accent); } }
-.bar__file { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .progress > span { animation: none; width: 100%; opacity: 0.5; }
@@ -549,15 +547,34 @@ details.group[open] .group__sum { visibility: hidden; }
 .import-warnings li.import-warnings__more { background: none; font-family: var(--font-body); }
 .import-warnings .help { font-size: var(--text-xs); color: inherit; opacity: 0.85; }
 
-/* Modos en la barra, como los espacios de trabajo de Blender: pestañas pegadas al borde inferior de la barra. */
-.modes { display: flex; align-self: stretch; align-items: flex-end; gap: var(--space-3xs); }
-.modes__tab { position: relative; display: inline-flex; align-items: center; gap: var(--space-2xs); min-height: 40px; margin-bottom: -1px; padding: 0 var(--space-md); border: 1px solid transparent; border-bottom: 0; border-radius: 10px 10px 0 0; background: transparent; color: var(--color-muted); font: 500 var(--text-sm)/1 var(--font-body); cursor: pointer; transition: background-color var(--dur-short) var(--ease-out), color var(--dur-short) var(--ease-out); }
-.modes__tab[aria-selected="true"] { border-color: var(--color-rule); background: var(--color-paper); color: var(--color-ink); font-weight: 600; box-shadow: inset 0 2px 0 var(--color-accent); }
-@media (hover: hover) { .modes__tab[aria-selected="false"]:hover { color: var(--color-ink); background: color-mix(in oklab, var(--color-paper-3) 70%, transparent); } }
-.modes__tab:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -3px; }
-.modes__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent); }
+/* Modos en la barra, como los espacios de trabajo de Blender. Van en una canaleta hundida, como las
+ * ranuras del AMS, y el modo activo sale en relieve como los botones moldeados: una sola pieza, no tres botones sueltos. */
+.brand { display: flex; align-items: center; gap: var(--space-sm); flex: none; }
+.bar__spacer { flex: 1; min-width: var(--space-md); }
+.menubar { padding-right: var(--space-md); border-right: 1px solid var(--color-rule); }
+.modes { display: flex; flex: none; align-items: center; gap: var(--space-3xs); padding: 3px; border-radius: 12px; background: color-mix(in oklab, var(--color-paper-3) 75%, transparent); box-shadow: inset 0 1px 3px color-mix(in oklab, var(--color-ink) 16%, transparent), inset 0 -1px 0 var(--glint); }
+.modes__tab { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 var(--space-sm) 0 10px; border: 0; border-radius: 9px; background: transparent; color: var(--color-ink-2); font: 500 var(--text-sm)/1 var(--font-body); white-space: nowrap; cursor: pointer; transition: background-color var(--dur-short) var(--ease-out), color var(--dur-short) var(--ease-out), box-shadow var(--dur-short) var(--ease-out); }
+.modes__tab[aria-selected="true"] { background: var(--color-paper); color: var(--color-ink); font-weight: 600; box-shadow: inset 0 1px 0 var(--glint), 0 0 0 1px var(--color-rule), 0 2px 0 var(--color-rule); }
+@media (hover: hover) { .modes__tab[aria-selected="false"]:hover { color: var(--color-ink); background: color-mix(in oklab, var(--glint) 60%, transparent); } }
+.modes__tab:active { transform: translateY(1px); }
+.modes__tab:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.modes__icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; opacity: 0.75; }
+.modes__tab[aria-selected="true"] .modes__icon { stroke: var(--color-accent-deep); opacity: 1; }
+.modes__tab[aria-selected="true"] .modes__blade { stroke: var(--color-accent); stroke-width: 2; }
+.modes__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); }
 .modes__count:empty { display: none; }
-.modes__count { min-width: 20px; padding: 2px 6px; border-radius: var(--radius-pill); background: var(--color-accent-soft); color: var(--color-accent-deep); font: 600 var(--text-xs)/1.2 var(--font-outlier); }
+.modes__count { min-width: 18px; padding: 2px 5px; border-radius: var(--radius-pill); background: var(--color-accent-soft); color: var(--color-accent-deep); font: 600 var(--text-xs)/1.2 var(--font-outlier); text-align: center; }
+/* Estrecha: los modos se quedan en icono; su nombre sigue en la descripción y para el lector de pantalla. */
+@media (max-width: 82rem) {
+  .modes__tab { padding: 0 10px; }
+  .modes__tab > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+}
+@media (prefers-reduced-motion: reduce) { .modes__tab { transition: none; } .modes__tab:active { transform: none; } }
+
+/* Cada modo, sus herramientas en el visor: Modelo pinta y mide, Malla coloca, Cortes corta. */
+.app[data-tab="model"] .toolbar__btn[data-modes]:not([data-modes~="model"]),
+.app[data-tab="mesh"] .toolbar__btn[data-modes]:not([data-modes~="mesh"]),
+.app[data-tab="cut"] .toolbar__btn[data-modes]:not([data-modes~="cut"]) { display: none; }
 
 /* Modos de edición: sin columna del AMS, el visor se queda su ancho; lo que pinta (pincel) es del modo Modelo. */
 .app:not([data-tab="model"]) .work { grid-template-columns: var(--side-w) minmax(0, 1fr); }
