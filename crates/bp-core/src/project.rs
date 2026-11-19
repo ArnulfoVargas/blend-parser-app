@@ -726,7 +726,11 @@ impl Project {
     /// each slot keeps the colours merged into it; otherwise merges are reset.
     /// Hand painting on slots that no longer exist is dropped.
     pub fn set_palette(&mut self, colors: Vec<Rgb>) {
-        let n = colors.len().clamp(1, 16);
+        // With no colour there is nothing to paint with: keep the slots there are.
+        if colors.is_empty() {
+            return;
+        }
+        let n = colors.len().min(16);
         let colors: Vec<Rgb> = colors.into_iter().take(n).collect();
         if n == self.palette.len() {
             for t in &mut self.targets {
@@ -1140,6 +1144,15 @@ mod tests {
             object: 0,
         };
         Scene { parts: vec![part], ..Default::default() }
+    }
+
+    #[test]
+    fn empty_palette_keeps_the_slots() {
+        let mut p = Project::new(scene(), 2);
+        let before = p.palette().to_vec();
+        p.set_palette(vec![]);
+        assert_eq!(p.palette(), &before[..]);
+        assert_eq!(p.stats().per_slot.iter().sum::<usize>(), 4);
     }
 
     #[test]
