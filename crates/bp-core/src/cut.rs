@@ -3,7 +3,7 @@
 //! layer, and each side's opening is closed with a flat cap, holes included,
 //! so both pieces stay solid.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::geom::Vec3;
 use crate::scene::Part;
@@ -61,7 +61,7 @@ pub fn split(part: &Part, axis: usize, value: f32, eps: f32) -> [Part; 2] {
         .collect();
     let mut loops = Loops::new(part);
     let mut sides: [Vec<Tri>; 2] = [vec![], vec![]];
-    let mut on_edge: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut on_edge: HashMap<(u32, u32), u32> = HashMap::default();
     for (ti, (&t, &l)) in part.tris.iter().zip(&part.tri_loops).enumerate() {
         let src = part.tri_source.get(ti).copied().unwrap_or(0);
         let d = t.map(|v| dist[v as usize]);
@@ -129,7 +129,7 @@ pub fn split(part: &Part, axis: usize, value: f32, eps: f32) -> [Part; 2] {
 /// The cap that closes one side's opening on the plane.
 fn cap(tris: &[Tri], positions: &[Vec3], on_plane: &[bool], axis: usize, faces_up: bool) -> Vec<Tri> {
     // Edges on the plane that only one triangle of this side uses are the opening's rim.
-    let mut edges: HashMap<(u32, u32), (u32, u16)> = HashMap::new();
+    let mut edges: HashMap<(u32, u32), (u32, u16)> = HashMap::default();
     for (t, l, src) in tris {
         for k in 0..3 {
             let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -139,7 +139,7 @@ fn cap(tris: &[Tri], positions: &[Vec3], on_plane: &[bool], axis: usize, faces_u
         }
     }
     // The cap runs each rim edge the other way: from b to a.
-    let mut next: HashMap<u32, (u32, u32, u16)> = HashMap::new();
+    let mut next: HashMap<u32, (u32, u32, u16)> = HashMap::default();
     for (&(a, b), &(corner, src)) in &edges {
         if !edges.contains_key(&(b, a)) {
             next.insert(b, (a, corner, src));
@@ -150,7 +150,7 @@ fn cap(tris: &[Tri], positions: &[Vec3], on_plane: &[bool], axis: usize, faces_u
     let (u, v) = if faces_up { (u, v) } else { (v, u) };
     let at = |i: u32| [positions[i as usize][u], positions[i as usize][v]];
     let mut rings: Vec<(Vec<u32>, u32, u16)> = vec![];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut starts: Vec<u32> = next.keys().copied().collect();
     starts.sort_unstable();
     for start in starts {
@@ -387,7 +387,7 @@ mod tests {
 
     /// Every edge used once each way: a closed, consistently wound surface.
     fn closed(p: &Part) -> bool {
-        let mut e = HashMap::new();
+        let mut e = HashMap::default();
         for t in &p.tris {
             for k in 0..3 {
                 *e.entry((t[k], t[(k + 1) % 3])).or_insert(0) += 1;

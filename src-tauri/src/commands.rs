@@ -455,24 +455,7 @@ pub async fn set_flush(app: AppHandle, from: Option<usize>, to: Option<usize>, m
 /// `u32 leaves, u32 tris | f32 positions[9 * leaves] | u32 offsets[tris + 1] | u8 labels[leaves] | u8 rgb[3 * leaves]`.
 #[tauri::command]
 pub async fn preview_mesh(app: AppHandle) -> CmdResult<Response> {
-    let bytes = with_doc(app, |d, _| {
-        let pv = d.project.preview();
-        let leaves = pv.labels.len();
-        let tris = pv.offsets.len() - 1;
-        let mut out = Vec::with_capacity(8 + leaves * (36 + 4) + tris * 4);
-        out.extend((leaves as u32).to_le_bytes());
-        out.extend((tris as u32).to_le_bytes());
-        for v in &pv.positions {
-            out.extend(v.to_le_bytes());
-        }
-        for o in &pv.offsets {
-            out.extend(o.to_le_bytes());
-        }
-        out.extend(&pv.labels);
-        out.extend(&pv.source_rgb);
-        Ok(out)
-    })
-    .await?;
+    let bytes = with_doc(app, |d, _| Ok(d.project.preview_bytes())).await?;
     Ok(Response::new(bytes))
 }
 
