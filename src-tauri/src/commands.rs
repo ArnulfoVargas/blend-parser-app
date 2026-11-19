@@ -562,6 +562,40 @@ pub async fn split_for_printer(app: AppHandle, plan: SplitPlanDto, dowel_label: 
     .await
 }
 
+fn plate_edit_error(error: bp_core::PlateEditError) -> AppError {
+    AppError::new(match error {
+        bp_core::PlateEditError::Plate => "error.plateMissing",
+        bp_core::PlateEditError::Object => "error.plateObjectMissing",
+    })
+}
+
+#[tauri::command]
+pub async fn add_plate(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, |d, prefs| {
+        d.project.add_plate();
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn move_to_plate(app: AppHandle, object: u32, plate: u32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.move_to_plate(object, plate, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clear_plate(app: AppHandle, plate: u32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.clear_plate(plate).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {
@@ -841,6 +875,9 @@ pub async fn export_color_zip(
     in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
     with_doc(app, move |d, _| {
         let pieces = d.project.color_pieces(thickness_mm, main_solid);
+        if pieces.is_empty() {
+            return Err(AppError::new("error.platesEmpty"));
+        }
         let hexes: Vec<String> =
             pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
         let files: Vec<bp_3mf::ColorFile> = pieces
@@ -861,10 +898,14 @@ pub async fn export_color_zip(
 pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
     with_doc(app, move |d, prefs| {
         let parts = d.project.export_parts();
+        if parts.is_empty() {
+            return Err(AppError::new("error.platesEmpty"));
+        }
         let filaments = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let (volumes_mm3, _) = dto::flush_matrix(d);
         let model = bp_3mf::Model {
+            plate_count: d.project.plate_count(),
             name: &name,
             parts: parts
                 .iter()

@@ -138,6 +138,25 @@
         <details class="group" id="plate-group">
           <summary><h2 data-i18n="plate.title">Placa y torre</h2><span class="group__sum" data-bind="plateSum"></span></summary>
           <div class="group__body">
+            <div class="field">
+              <label for="project-plate" data-i18n="plates.current">Placa</label>
+              <select class="select" id="project-plate"></select>
+            </div>
+            <div class="row-actions">
+              <button type="button" id="plate-add" class="btn btn--sm" data-i18n="plates.add">Añadir placa</button>
+              <button type="button" id="plate-clear" class="btn btn--quiet btn--sm" data-i18n="plates.clear">Vaciar placa</button>
+            </div>
+            <div class="field">
+              <label for="plate-object" data-i18n="plates.object">Objeto de la placa</label>
+              <select class="select" id="plate-object"></select>
+            </div>
+            <div class="field">
+              <label for="plate-destination" data-i18n="plates.destination">Placa de destino</label>
+              <select class="select" id="plate-destination"></select>
+            </div>
+            <div class="row-actions">
+              <button type="button" id="plate-move" class="btn btn--sm" data-i18n="plates.move">Mover objeto</button>
+            </div>
             <svg class="plate" id="plate-view" role="img" aria-labelledby="plate-desc" preserveAspectRatio="xMidYMid meet"></svg>
             <p class="visually-hidden" id="plate-desc" data-bind="plateDesc"></p>
             <ul class="plate__legend" aria-hidden="true">

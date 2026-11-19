@@ -17,6 +17,7 @@ pub struct PartDto {
     pub name: String,
     pub triangles: usize,
     pub object: u32,
+    pub plate: u32,
     pub preview_start: usize,
     pub preview_end: usize,
 }
@@ -320,13 +321,21 @@ pub fn waste_and_plate(
         groups
             .iter()
             .map(|g| {
-                let check =
-                    bp_3mf::plate::check_at(&doc.printer, [g.size_mm[0], g.size_mm[1]], doc.offset_mm, &reserve);
+                let check = if g.objects == 0 {
+                    bp_3mf::plate::check_at(
+                        &doc.printer,
+                        [0.0; 2],
+                        [0.0; 2],
+                        &bp_3mf::Reserve { tower: false, ..reserve },
+                    )
+                } else {
+                    bp_3mf::plate::check_at(&doc.printer, [g.size_mm[0], g.size_mm[1]], doc.offset_mm, &reserve)
+                };
                 PlateGroupDto {
                     objects: g.objects,
                     size_mm: g.size_mm,
                     centre: g.centre,
-                    fits: check.fits(),
+                    fits: g.objects == 0 || check.fits(),
                     fits_height: g.size_mm[2] <= doc.printer.max_height_mm(),
                     check,
                 }
@@ -337,6 +346,7 @@ pub fn waste_and_plate(
     };
     let check = plates
         .iter()
+        .filter(|p| p.objects > 0)
         .min_by(|a, b| a.check.fit_factor.total_cmp(&b.check.fit_factor))
         .map(|p| p.check.clone())
         .unwrap_or_else(|| bp_3mf::plate::check_at(&doc.printer, [size[0], size[1]], doc.offset_mm, &reserve));
@@ -399,6 +409,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
                 name: x.name.clone(),
                 triangles: x.tris.len(),
                 object: x.object,
+                plate: x.plate,
                 preview_start: start,
                 preview_end: end,
             })

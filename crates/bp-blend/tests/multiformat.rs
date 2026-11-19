@@ -70,6 +70,7 @@ fn real_multicolor_imports_and_missing_resources() {
         let project = bp_core::Project::new(scene, 2);
         let parts = project.export_parts();
         let model = bp_3mf::Model {
+            plate_count: 1,
             name: "fixture",
             parts: parts
                 .iter()

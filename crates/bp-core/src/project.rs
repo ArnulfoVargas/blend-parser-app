@@ -19,6 +19,9 @@ use crate::separate;
 use crate::split::{self, ColorPiece};
 use std::collections::HashMap;
 
+mod plates;
+pub use plates::PlateEditError;
+
 /// Colour settings, in final millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorOps {
@@ -242,6 +245,7 @@ enum UndoEntry {
     Stroke(Vec<Change>),
     Slots(Box<SlotSnapshot>),
     Geometry(Box<Project>),
+    AddPlate(usize),
     Cut,
 }
 
@@ -292,6 +296,7 @@ pub struct RigidMove {
 /// What a cut replaced, to undo it.
 #[derive(Clone)]
 struct CutSnapshot {
+    minimum_plates: usize,
     parts: Vec<Part>,
     unrotated: Vec<Vec<Vec3>>,
     painted: Vec<Vec<u8>>,
@@ -475,6 +480,8 @@ pub struct Project {
     placement: Vec3,
     /// Parts before each cut, for undo.
     cut_history: Vec<CutSnapshot>,
+    /// Keeps empty plates in the project alongside plates with assigned objects.
+    minimum_plates: usize,
     mesh_ops: MeshOps,
     color_ops: ColorOps,
     print_ops: PrintOps,
@@ -506,6 +513,7 @@ impl Project {
             rotation: IDENTITY,
             placement: [0.0; 3],
             cut_history: vec![],
+            minimum_plates: 1,
             scene,
             source_positions,
             source_size,
@@ -1077,6 +1085,7 @@ impl Project {
         self.end_stroke();
         let previous = std::mem::replace(&mut self.scene.parts, parts);
         self.cut_history.push(CutSnapshot {
+            minimum_plates: self.minimum_plates,
             parts: previous,
             unrotated: self.unrotated.clone(),
             painted: self.painted.clone(),
@@ -1132,12 +1141,13 @@ impl Project {
     }
 
     pub fn can_undo_cut(&self) -> bool {
-        !self.cut_history.is_empty()
+        !self.undo.iter().any(|e| matches!(e, UndoEntry::AddPlate(_)))
+            && self.cut_history.last().is_some_and(|s| matches!(s.kind, "cut" | "connect" | "separate" | "split"))
     }
 
     /// Printed objects: 1 for the model, more once pieces cut off it are kept.
     pub fn object_count(&self) -> usize {
-        self.scene.parts.iter().map(|p| p.object).collect::<std::collections::HashSet<_>>().len().max(1)
+        self.scene.parts.iter().map(|p| p.object).collect::<std::collections::HashSet<_>>().len()
     }
 
     // ---- separating pieces -------------------------------------------------
@@ -1758,7 +1768,12 @@ impl Project {
 
     /// Puts back what the last cut took, in the orientation the model has now.
     pub fn undo_cut(&mut self) -> bool {
+        self.can_undo_cut() && self.undo_parts()
+    }
+
+    fn undo_parts(&mut self) -> bool {
         let Some(s) = self.cut_history.pop() else { return false };
+        self.minimum_plates = s.minimum_plates;
         self.scene.parts = s.parts;
         self.unrotated = s.unrotated;
         self.place_from_file();
@@ -1908,6 +1923,7 @@ impl Project {
             UndoEntry::Stroke(_) => "stroke",
             UndoEntry::Slots(_) => "merge",
             UndoEntry::Geometry(_) => "fix",
+            UndoEntry::AddPlate(_) => "addPlate",
             UndoEntry::Cut => self.cut_history.last().map_or("cut", |c| c.kind),
         })
     }
@@ -2195,7 +2211,11 @@ impl Project {
         self.end_stroke();
         match self.undo.pop() {
             None => false,
-            Some(UndoEntry::Cut) => self.undo_cut(),
+            Some(UndoEntry::Cut) => self.undo_parts(),
+            Some(UndoEntry::AddPlate(previous)) => {
+                self.minimum_plates = previous;
+                true
+            }
             Some(UndoEntry::Stroke(stroke)) => {
                 for c in stroke.into_iter().rev() {
                     let (p, i) = (c.part as usize, c.tri as usize);
@@ -2353,9 +2373,9 @@ impl Project {
             .collect()
     }
 
-    /// Plates the model prints on: 1 unless it was split across several.
+    /// Includes empty plates and any plates assigned by a split.
     pub fn plate_count(&self) -> usize {
-        self.scene.parts.iter().map(|p| p.plate as usize + 1).max().unwrap_or(1)
+        self.scene.parts.iter().map(|p| p.plate as usize + 1).max().unwrap_or(1).max(self.minimum_plates)
     }
 
     /// What goes on each plate, as the preview shows it.
@@ -2858,6 +2878,36 @@ mod tests {
     }
 
     #[test]
+    fn moving_and_emptying_a_plate_preserve_objects_and_undo() {
+        let mut source = bar([25.0, 20.0, 30.0]);
+        let mut component = source.parts[0].clone();
+        for p in &mut component.positions {
+            p[1] += 25.0;
+        }
+        source.parts.push(component);
+        let mut p = Project::new(source, 2);
+        let target = brush_bar(&mut p);
+        let before = p.preview();
+        p.add_plate();
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [1, 0]);
+        assert_eq!(p.move_to_plate(0, 7, 120.0), Err(PlateEditError::Plate));
+        p.move_to_plate(0, 1, 120.0).unwrap();
+        assert!(p.export_parts().iter().all(|part| part.plate == 1));
+        assert!(brush_area(&p, target) > 0.0);
+        p.clear_plate(1).unwrap();
+        assert_eq!(p.object_count(), 0);
+        assert_eq!(p.plate_count(), 2);
+        assert!(p.preview().positions.is_empty());
+        assert_eq!(p.stats().triangles, 0);
+        assert!(p.undo());
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [0, 1]);
+        assert!(p.undo());
+        assert_eq!(p.preview().labels, before.labels);
+        assert!(p.undo());
+        assert_eq!(p.plate_count(), 1);
+    }
+
+    #[test]
     fn a_long_model_is_split_into_pieces_that_fit_and_shared_across_plates() {
         let mut p = Project::new(bar([300.0, 40.0, 30.0]), 2);
         let target = brush_bar(&mut p);
@@ -2906,7 +2956,9 @@ mod tests {
 
     fn brush_bar(p: &mut Project) -> u8 {
         let target = 1 - p.trees[0][0].dominant();
-        p.paint([-140.0, -50.0, 10.0], [0.0, 1.0, 0.0], 0.01, target).unwrap();
+        let (lo, hi) = p.work.bounds().unwrap();
+        let origin = [lo[0] + (hi[0] - lo[0]) / 30.0, lo[1] - 30.0, lo[2] + (hi[2] - lo[2]) / 3.0];
+        p.paint(origin, [0.0, 1.0, 0.0], 0.01, target).unwrap();
         p.end_stroke();
         assert_eq!(p.painted_count(), 1);
         target
