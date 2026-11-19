@@ -1,0 +1,13 @@
+{
+  "name": "blend-parser-e2e",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end runs of the real Tauri app through tauri-driver (Linux, WebKitGTK).",
+  "scripts": {
+    "fixtures": "blender --background --factory-startup --python fixtures/generate.py -- fixtures/out",
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "webdriverio": "9.4.1"
+  }
+}
