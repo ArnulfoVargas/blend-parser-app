@@ -200,6 +200,8 @@ export const api = {
   export3mf: (path: string) => invoke<void>("export_3mf", { path }),
   exportColorZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
     invoke<number>("export_color_zip", { path, thicknessMm, mainSolid, lang }),
+  exportColorAssembly: (path: string, thicknessMm: number, mainSolid: boolean) =>
+    invoke<number>("export_color_assembly", { path, thicknessMm, mainSolid }),
 };
 
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */
