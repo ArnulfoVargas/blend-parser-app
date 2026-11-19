@@ -5,8 +5,6 @@
 
 use std::collections::HashMap;
 
-use rayon::slice::ParallelSliceMut;
-
 use crate::geom;
 use crate::mesh::MeshPart;
 use crate::paint::Node;
@@ -22,7 +20,7 @@ pub fn adjacency(part: &MeshPart) -> Vec<Vec<(u32, f32)>> {
             edges.push(((a.min(b) as u64) << 32 | a.max(b) as u64, i as u32));
         }
     }
-    edges.par_sort_unstable();
+    edges.sort_unstable();
     let mut adj = vec![Vec::new(); part.tris.len()];
     for run in edges.chunk_by(|x, y| x.0 == y.0) {
         if run.len() < 2 {

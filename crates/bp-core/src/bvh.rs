@@ -99,7 +99,7 @@ impl Bvh {
         }
         let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
         let mut best: Option<RayHit> = None;
-        let mut stack = vec![0usize];
+        let mut stack = Stack::new(0usize);
         while let Some(ni) = stack.pop() {
             let node = self.nodes[ni];
             let tmax = best.map_or(f32::MAX, |h| h.t);
@@ -130,7 +130,7 @@ impl Bvh {
             return;
         }
         let r2 = r * r;
-        let mut stack = vec![0usize];
+        let mut stack = Stack::new(0usize);
         while let Some(ni) = stack.pop() {
             let node = self.nodes[ni];
             if node.bounds.dist2(center) > r2 {
@@ -161,7 +161,7 @@ impl Bvh {
             return None;
         }
         let mut best = (f32::MAX, 0u32, [1.0, 0.0, 0.0]);
-        let mut stack = vec![(0usize, 0.0f32)];
+        let mut stack = Stack::new((0usize, 0.0f32));
         while let Some((ni, d)) = stack.pop() {
             if d >= best.0 {
                 continue;
@@ -191,6 +191,30 @@ impl Bvh {
             }
         }
         (best.0 < f32::MAX).then_some((best.1, best.2))
+    }
+}
+
+/// The nodes still to visit in a query, on the thread's stack: queries run
+/// millions of times from every thread (colour transfer after simplifying),
+/// and a heap vector per query made them contend in the allocator. Every split
+/// halves its range, so a path is at most 32 nodes deep and the stack never
+/// holds more than one pending sibling per level, plus the node in hand.
+struct Stack<T: Copy> {
+    items: [T; 64],
+    len: usize,
+}
+
+impl<T: Copy> Stack<T> {
+    fn new(root: T) -> Self {
+        Self { items: [root; 64], len: 1 }
+    }
+    fn push(&mut self, v: T) {
+        self.items[self.len] = v;
+        self.len += 1;
+    }
+    fn pop(&mut self) -> Option<T> {
+        self.len = self.len.checked_sub(1)?;
+        Some(self.items[self.len])
     }
 }
 
