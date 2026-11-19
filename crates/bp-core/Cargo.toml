@@ -9,3 +9,7 @@ license.workspace = true
 rayon.workspace = true
 meshopt = "0.7"
 serde.workspace = true
+
+[features]
+# Stage timings for the app's benchmark example.
+bench = []

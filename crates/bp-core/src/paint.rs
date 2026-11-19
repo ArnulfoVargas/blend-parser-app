@@ -41,16 +41,22 @@ impl Node {
             Node::Leaf(l) => *l,
             Node::Split(_) => {
                 let mut area = [0.0f32; 256];
-                self.area_by_label(1.0, &mut area);
-                area.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u8)
+                let mut top = 0u8;
+                self.area_by_label(1.0, &mut area, &mut top);
+                // Labels above `top` have no area; ties go to the higher label, as before.
+                area[..=top as usize].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u8)
             }
         }
     }
 
-    fn area_by_label(&self, a: f32, out: &mut [f32; 256]) {
+    /// Adds each leaf's share of `a` to its label; `top` ends at the highest label seen.
+    fn area_by_label(&self, a: f32, out: &mut [f32; 256], top: &mut u8) {
         match self {
-            Node::Leaf(l) => out[*l as usize] += a,
-            Node::Split(k) => k.iter().for_each(|n| n.area_by_label(a * 0.25, out)),
+            Node::Leaf(l) => {
+                out[*l as usize] += a;
+                *top = (*top).max(*l);
+            }
+            Node::Split(k) => k.iter().for_each(|n| n.area_by_label(a * 0.25, out, top)),
         }
     }
 

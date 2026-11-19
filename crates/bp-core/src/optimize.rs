@@ -5,24 +5,33 @@
 
 use std::collections::HashMap;
 
+use rayon::slice::ParallelSliceMut;
+
 use crate::geom;
 use crate::mesh::MeshPart;
 use crate::paint::Node;
 
 /// Triangle neighbours across shared edges, with the shared edge length.
 pub fn adjacency(part: &MeshPart) -> Vec<Vec<(u32, f32)>> {
-    let mut edges: HashMap<(u32, u32), Vec<u32>> = HashMap::with_capacity(part.tris.len() * 3 / 2);
+    // Every edge as (key, triangle), sorted so the triangles sharing an edge sit
+    // together: no map and no list per edge.
+    let mut edges: Vec<(u64, u32)> = Vec::with_capacity(part.tris.len() * 3);
     for (i, t) in part.tris.iter().enumerate() {
         for k in 0..3 {
             let (a, b) = (t[k], t[(k + 1) % 3]);
-            edges.entry((a.min(b), a.max(b))).or_default().push(i as u32);
+            edges.push(((a.min(b) as u64) << 32 | a.max(b) as u64, i as u32));
         }
     }
+    edges.par_sort_unstable();
     let mut adj = vec![Vec::new(); part.tris.len()];
-    for ((a, b), tris) in edges {
-        let l = geom::len(geom::sub(part.positions[a as usize], part.positions[b as usize]));
-        for &x in &tris {
-            for &y in &tris {
+    for run in edges.chunk_by(|x, y| x.0 == y.0) {
+        if run.len() < 2 {
+            continue;
+        }
+        let (a, b) = ((run[0].0 >> 32) as usize, (run[0].0 & 0xffff_ffff) as usize);
+        let l = geom::len(geom::sub(part.positions[a], part.positions[b]));
+        for &(_, x) in run {
+            for &(_, y) in run {
                 if x != y {
                     adj[x as usize].push((y, l));
                 }

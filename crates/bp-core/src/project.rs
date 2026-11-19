@@ -1072,6 +1072,57 @@ impl Project {
         }
     }
 
+    /// Times each stage the commands repeat, on the current state, for the
+    /// benchmark. Rebuilds nothing it keeps.
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn profile_phases(&self) -> Vec<(&'static str, f64)> {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut out = vec![];
+        let mut time = |name, f: &mut dyn FnMut()| {
+            let t = Instant::now();
+            f();
+            out.push((name, t.elapsed().as_secs_f64() * 1000.0));
+        };
+        let mut built = None;
+        time("Mesh::build (shape + work)", &mut || built = Some(Mesh::build(&self.scene, self.mesh_ops, self.scale)));
+        time("adjacency", &mut || drop(black_box(self.work.parts.iter().map(optimize::adjacency).collect::<Vec<_>>())));
+        let mut soup = TriSoup::default();
+        time("soup", &mut || soup = self.work.soup());
+        time("Bvh::build", &mut || drop(black_box(Bvh::build(&soup))));
+        let mut field = None;
+        time("ColorField::new", &mut || field = Some(ColorField::new(&self.scene, &self.shape)));
+        let field = field.unwrap();
+        let cls = Classifier::with_slots(&self.targets);
+        let params = PaintParams {
+            max_depth: self.color_ops.border_detail,
+            min_edge: self.print_ops.nozzle_mm / 2.0 / self.scale,
+        };
+        time("paint::build", &mut || drop(black_box(paint::build(&field, &self.shape, &cls, params))));
+        time("stats: estimate (swaps)", &mut || {
+            black_box(estimate::estimate(
+                &self.work,
+                &self.trees,
+                self.scale,
+                self.print_ops.layer_mm,
+                2.0 * self.print_ops.nozzle_mm * self.print_ops.layer_mm,
+            ));
+        });
+        time("stats: contact_area", &mut || {
+            black_box(self.work.contact_area(0.05 / self.scale));
+        });
+        time("stats: bounds", &mut || {
+            black_box(self.work.bounds());
+        });
+        time("small_islands", &mut || {
+            black_box(self.small_islands(1.0));
+        });
+        time("export_parts", &mut || drop(black_box(self.export_parts())));
+        drop(built);
+        out
+    }
+
     /// Colour islands smaller than `min_mm2`, the ones the nozzle cannot draw cleanly.
     pub fn small_islands(&self, min_mm2: f32) -> usize {
         let min_area = min_mm2 / (self.scale * self.scale);

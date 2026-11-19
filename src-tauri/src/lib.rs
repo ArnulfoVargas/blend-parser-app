@@ -7,6 +7,10 @@ mod prefs;
 mod profiles;
 mod state;
 
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_process::init());

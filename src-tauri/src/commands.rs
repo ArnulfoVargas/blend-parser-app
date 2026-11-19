@@ -32,7 +32,7 @@ async fn with_doc<R: Send + 'static>(
 }
 
 /// What the core prepares for: the nozzle and the layer height it prints at.
-fn print_ops(p: &bp_3mf::Printer, prefs: &Prefs) -> PrintOps {
+pub(crate) fn print_ops(p: &bp_3mf::Printer, prefs: &Prefs) -> PrintOps {
     PrintOps { nozzle_mm: p.nozzle_mm, layer_mm: dto::layer_mm(p, &prefs.waste) }
 }
 
@@ -548,42 +548,44 @@ pub async fn export_color_zip(
 
 #[tauri::command]
 pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
-    with_doc(app, move |d, prefs| {
-        let parts = d.project.export_parts();
-        let filaments = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
-        let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let (volumes_mm3, _) = dto::flush_matrix(d);
-        let model = bp_3mf::Model {
-            name: &name,
-            parts: parts
-                .iter()
-                .map(|p| bp_3mf::Part {
-                    name: &p.name,
-                    positions: &p.positions,
-                    tris: &p.tris,
-                    paint: &p.paint,
-                    object: p.object,
-                })
-                .collect(),
-            filaments,
-            printer: d.printer.clone(),
-            flush: bp_3mf::Flush {
-                volumes_mm3,
-                multiplier: prefs.waste.flush_multiplier,
-                into_infill: prefs.waste.flush_reuse > 0.0,
-                prime_mm3: prefs.waste.prime_mm3,
-            },
-            layer_mm: prefs.waste.layer_mm,
-            offset_mm: d.offset_mm,
-        };
-        let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
-        bp_3mf::write(std::io::BufWriter::new(file), &model)
-            .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
-    })
-    .await
+    with_doc(app, move |d, prefs| write_3mf(d, prefs, &path)).await
 }
 
-fn printability_for_doc(
+/// Writes the document's 3MF to `path`.
+pub(crate) fn write_3mf(d: &Document, prefs: &Prefs, path: &str) -> CmdResult<()> {
+    let parts = d.project.export_parts();
+    let filaments = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+    let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let (volumes_mm3, _) = dto::flush_matrix(d);
+    let model = bp_3mf::Model {
+        name: &name,
+        parts: parts
+            .iter()
+            .map(|p| bp_3mf::Part {
+                name: &p.name,
+                positions: &p.positions,
+                tris: &p.tris,
+                paint: &p.paint,
+                object: p.object,
+            })
+            .collect(),
+        filaments,
+        printer: d.printer.clone(),
+        flush: bp_3mf::Flush {
+            volumes_mm3,
+            multiplier: prefs.waste.flush_multiplier,
+            into_infill: prefs.waste.flush_reuse > 0.0,
+            prime_mm3: prefs.waste.prime_mm3,
+        },
+        layer_mm: prefs.waste.layer_mm,
+        offset_mm: d.offset_mm,
+    };
+    let file = std::fs::File::create(path).map_err(|e| AppError::file(path, e))?;
+    bp_3mf::write(std::io::BufWriter::new(file), &model)
+        .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
+}
+
+pub(crate) fn printability_for_doc(
     d: &Document,
     prefs: &Prefs,
     params: bp_core::printability::Params,
