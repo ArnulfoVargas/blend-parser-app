@@ -133,7 +133,23 @@ pub fn split(part: &Part, axis: usize, value: f32, eps: f32) -> [Part; 2] {
 
 /// [`split`], with connectors on the cut faces when `joint` is given.
 pub fn split_joined(part: &Part, axis: usize, value: f32, eps: f32, joint: Option<&JointAt>) -> Cut {
-    let mut positions = part.positions.clone();
+    // Match geometry across UV/material seams while keeping the independent
+    // face-corner attributes. This lets closed sections form a cap even on
+    // meshes that were imported with duplicate coordinates.
+    let mut positions = Vec::with_capacity(part.positions.len());
+    let mut by_position = HashMap::new();
+    let remap: Vec<u32> = part
+        .positions
+        .iter()
+        .map(|&p| {
+            let key = p.map(|v| if v == 0.0 { 0 } else { v.to_bits() });
+            *by_position.entry(key).or_insert_with(|| {
+                let i = positions.len() as u32;
+                positions.push(p);
+                i
+            })
+        })
+        .collect();
     let mut dist: Vec<f32> = positions
         .iter_mut()
         .map(|p| {
@@ -150,6 +166,10 @@ pub fn split_joined(part: &Part, axis: usize, value: f32, eps: f32, joint: Optio
     let mut sides: [Vec<Tri>; 2] = [vec![], vec![]];
     let mut on_edge: HashMap<(u32, u32), u32> = HashMap::new();
     for (ti, (&t, &l)) in part.tris.iter().zip(&part.tri_loops).enumerate() {
+        let t = t.map(|v| remap[v as usize]);
+        if t[0] == t[1] || t[1] == t[2] || t[2] == t[0] {
+            continue;
+        }
         let src = part.tri_source.get(ti).copied().unwrap_or(0);
         let d = t.map(|v| dist[v as usize]);
         if d.iter().all(|&x| x <= 0.0) {
@@ -856,6 +876,29 @@ mod tests {
             // New corners got their own UVs.
             assert!(low.tri_loops.iter().flatten().all(|&l| (l as usize) < low.uv_layers[0].len()));
         }
+    }
+
+    #[test]
+    fn a_plate_cut_caps_seam_split_geometry_and_preserves_existing_openings() {
+        let mut part = cube([0.0; 3], [10.0; 3]);
+        // An open bottom leaves the low piece open. The high piece still has
+        // a complete section, despite every input triangle owning its vertices.
+        part.tris.drain(..2);
+        part.tri_loops.drain(..2);
+        part.tri_source.drain(..2);
+        let positions = std::mem::take(&mut part.positions);
+        for t in &mut part.tris {
+            *t = t.map(|v| {
+                let i = part.positions.len() as u32;
+                part.positions.push(positions[v as usize]);
+                i
+            });
+        }
+        let [low, high] = split(&part, 2, 5.0, 1e-5);
+        assert!(!closed(&low));
+        assert!(closed(&high));
+        assert!((volume(&high) - 500.0).abs() < 1e-2);
+        assert!(!low.tris.is_empty());
     }
 
     #[test]
