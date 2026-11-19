@@ -483,7 +483,6 @@ fn earclip_simple(poly: &[u32], at: &impl Fn(u32) -> [f32; 2]) -> Vec<[u32; 3]> 
 }
 
 /// Reject open, inconsistently wound, non-finite or degenerate results before commit.
-#[cfg(test)]
 pub(crate) fn valid_solid(part: &Part, eps: f32) -> bool {
     surface_is_closed(part, eps) == Some(true)
 }
@@ -491,15 +490,9 @@ pub(crate) fn valid_solid(part: &Part, eps: f32) -> bool {
 /// Accepts a clean clipped surface when its source already had a boundary.
 /// Closed sources must still produce solids, including after the cap is built.
 pub(crate) fn valid_section(source: &Part, sides: &[(Part, Vec<Option<u32>>); 2], eps: f32) -> bool {
-    let mut has_open_side = false;
-    for (part, _) in sides.iter().filter(|(part, _)| !part.tris.is_empty()) {
-        match surface_is_closed(part, eps) {
-            Some(true) => {}
-            Some(false) => has_open_side = true,
-            None => return false,
-        }
-    }
-    !has_open_side || surface_is_closed(source, eps) == Some(false)
+    let mut pieces = sides.iter().map(|(part, _)| part).filter(|part| !part.tris.is_empty());
+    pieces.clone().all(|part| valid_solid(part, eps))
+        || (surface_is_closed(source, eps) == Some(false) && pieces.all(|part| surface_is_closed(part, eps).is_some()))
 }
 
 /// None for degenerate, nonfinite, or inconsistently wound or shared edges.
