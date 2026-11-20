@@ -242,6 +242,9 @@
               <label for="keep"><span data-i18n="mesh.simplify">Simplificar</span> <output for="keep" data-bind="keepOut"></output></label>
               <input class="range" id="keep" name="keep" type="range" min="5" max="100" step="5" value="100">
               <p class="help" data-bind="triangles"></p>
+              <label class="check" data-i18n-attr="title:mesh.protectColorsHelp"><input type="checkbox" id="protect-colors"> <span data-i18n="mesh.protectColors">Proteger bordes de color</span></label>
+              <label class="check" data-i18n-attr="title:mesh.protectDetailHelp"><input type="checkbox" id="protect-detail"> <span data-i18n="mesh.protectDetail">Proteger detalle</span></label>
+              <p class="help" data-i18n="mesh.protectHelp">Bordes de color: no mueve los vértices donde cambia el filamento. Detalle: reduce menos donde la superficie se curva.</p>
             </div>
           </div>
         </details>

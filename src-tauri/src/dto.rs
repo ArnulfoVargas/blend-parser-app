@@ -181,6 +181,8 @@ pub struct SettingsDto {
     pub split_vertices: bool,
     pub deep_clean: bool,
     pub drop_floating: bool,
+    pub protect_colors: bool,
+    pub protect_detail: bool,
     /// Rows of the rotation applied to the model as loaded.
     pub rotation: bp_core::Mat3,
     pub border_detail: u8,
@@ -211,6 +213,8 @@ pub struct Summary {
     pub small_islands: usize,
     pub min_detail_mm2: f32,
     pub contact_mm2: f32,
+    /// How far simplifying moved the surface at most, in mm; 0 unsimplified.
+    pub deviation_mm: f32,
     pub repair: RepairDto,
     pub estimate: EstimateDto,
     pub settings: SettingsDto,
@@ -375,6 +379,8 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         split_vertices,
         drop_floating,
         deep_clean,
+        protect_colors,
+        protect_detail,
     } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
@@ -415,6 +421,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         small_islands: p.small_islands(min_detail),
         min_detail_mm2: min_detail,
         contact_mm2: stats.contact_mm2,
+        deviation_mm: stats.deviation_mm,
         repair: RepairDto {
             welded_vertices: stats.repair.welded_vertices,
             degenerate_triangles: stats.repair.degenerate_triangles,
@@ -443,6 +450,8 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             split_vertices,
             deep_clean,
             drop_floating,
+            protect_colors,
+            protect_detail,
             rotation: p.rotation(),
             border_detail,
             min_island_mm2,

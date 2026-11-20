@@ -462,7 +462,11 @@ function render(s: Summary) {
   // Mesh.
   bind("triangles", s.triangles === s.sourceTriangles
     ? t("mesh.triangles", { n: nf(s.triangles), split: nf(s.splitTriangles) })
-    : t("mesh.trianglesOf", { n: nf(s.triangles), of: nf(s.sourceTriangles) }));
+    : st.keepRatio < 0.999
+      ? t("mesh.trianglesDeviation", { n: nf(s.triangles), of: nf(s.sourceTriangles), mm: nf(s.deviationMm, 2) })
+      : t("mesh.trianglesOf", { n: nf(s.triangles), of: nf(s.sourceTriangles) }));
+  $<HTMLInputElement>("#protect-colors").checked = st.protectColors;
+  $<HTMLInputElement>("#protect-detail").checked = st.protectDetail;
   bind("contact", st.flattenMm > 0
     ? t("mesh.contactFlat", { mm: nf(st.flattenMm, 1), area: nf(s.contactMm2) })
     : t("mesh.contact", { area: nf(s.contactMm2) }));
@@ -1091,8 +1095,10 @@ const meshOps = () => void apply(() => api.setMeshOps(
   Math.max(0, Number($<HTMLInputElement>("#flatten").value) || 0),
   $<HTMLInputElement>("#repair").checked,
   Math.max(0, Number($<HTMLInputElement>("#piece").value) || 0),
+  $<HTMLInputElement>("#protect-colors").checked,
+  $<HTMLInputElement>("#protect-detail").checked,
 ));
-["#keep", "#repair", "#piece"].forEach((sel) => $(sel).addEventListener("change", meshOps));
+["#keep", "#repair", "#piece", "#protect-colors", "#protect-detail"].forEach((sel) => $(sel).addEventListener("change", meshOps));
 
 // Flattening applies with its button or Enter, so the effect is never a surprise.
 const flatten = () => {

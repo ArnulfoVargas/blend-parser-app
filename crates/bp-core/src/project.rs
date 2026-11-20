@@ -78,6 +78,8 @@ pub struct Stats {
     /// For each slot, the closest other slot and their ΔE.
     pub nearest: Vec<Option<(usize, f32)>>,
     pub repair: RepairReport,
+    /// How far the simplified surface strays from the one before, in final mm.
+    pub deviation_mm: f32,
 }
 
 #[derive(Clone)]
@@ -915,7 +917,9 @@ impl Project {
             || ops.orient != self.mesh_ops.orient
             || ops.fill_holes != self.mesh_ops.fill_holes
             || ops.split_vertices != self.mesh_ops.split_vertices
-            || ops.deep_clean != self.mesh_ops.deep_clean;
+            || ops.deep_clean != self.mesh_ops.deep_clean
+            || ops.protect_colors != self.mesh_ops.protect_colors
+            || ops.protect_detail != self.mesh_ops.protect_detail;
         self.mesh_ops = ops;
         if topology_changes {
             self.rebuild_geometry();
@@ -946,7 +950,7 @@ impl Project {
     }
 
     fn rebuild_geometry_keep_paint(&mut self) {
-        let (shape, work) = Mesh::build(&self.scene, self.mesh_ops, self.scale);
+        let (shape, work) = Mesh::build_with(&self.scene, self.mesh_ops, self.scale, &|m| self.triangle_labels(m));
         self.shape = shape;
         self.work = work;
         self.adjacency = self.work.parts.iter().map(optimize::adjacency).collect();
@@ -963,6 +967,23 @@ impl Project {
                 o
             })
             .collect();
+    }
+
+    /// The slot each triangle of `mesh` takes from the model's colour at its
+    /// centre; empty before there is a palette.
+    fn triangle_labels(&self, mesh: &Mesh) -> Vec<Vec<u8>> {
+        if self.targets.is_empty() {
+            return vec![];
+        }
+        let field = ColorField::new(&self.scene, mesh);
+        let cls = Classifier::with_slots(&self.targets);
+        mesh.parts
+            .iter()
+            .enumerate()
+            .map(|(pi, p)| {
+                (0..p.tris.len()).map(|ti| cls.nearest(field.sample(mesh, pi, ti, [1.0 / 3.0; 3]).lab())).collect()
+            })
+            .collect()
     }
 
     // ---- painting from the model -----------------------------------------
@@ -1119,6 +1140,7 @@ impl Project {
             ),
             nearest: palette::nearest_others(&self.palette),
             repair: self.work.repair,
+            deviation_mm: self.work.deviation * self.scale,
         }
     }
 

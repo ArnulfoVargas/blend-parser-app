@@ -221,7 +221,11 @@ mod tests {
     use crate::mesh::MeshPart;
 
     fn mesh(positions: Vec<[f32; 3]>, tris: Vec<[u32; 3]>) -> Mesh {
-        Mesh { parts: vec![MeshPart { name: "t".into(), positions, tris, origin: None }], repair: Default::default() }
+        Mesh {
+            parts: vec![MeshPart { name: "t".into(), positions, tris, origin: None }],
+            repair: Default::default(),
+            deviation: 0.0,
+        }
     }
 
     #[test]

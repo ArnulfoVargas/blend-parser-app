@@ -104,6 +104,9 @@ const attacks = {
   async mesh(b) {
     for (const [keepRatio, flattenMm, minPieceMm] of [[0, 0, 0], [0.0001, 0, 0], [1, BIG, 0], [1, 0, BIG], [1, 79, 0], [-1, -1, -1]])
       await attack(b, "mesh", "set_mesh_ops", { keepRatio, flattenMm, repair: true, minPieceMm });
+    for (const [protectColors, protectDetail] of [[true, true], [true, false], ["yes", 1], [null, null]])
+      await attack(b, "mesh", "set_mesh_ops", { keepRatio: 0.05, flattenMm: 0, repair: true, minPieceMm: 0, protectColors, protectDetail });
+    await attack(b, "mesh", "set_mesh_ops", { keepRatio: NaN, flattenMm: 0, repair: true, minPieceMm: 0, protectColors: true });
     await attack(b, "mesh", "set_mesh_ops", { keepRatio: 1, flattenMm: 0, repair: true, minPieceMm: 0 });
     await attack(b, "mesh", "fix_mesh", { fix: { repair: true, orient: true, fillHoles: true, splitVertices: true, dropFloating: true, deepClean: true, minPieceMm: 1000, flattenMm: 1000 } });
     await attack(b, "mesh", "undo", {});

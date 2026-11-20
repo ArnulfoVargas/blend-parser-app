@@ -316,21 +316,27 @@ pub async fn merge_slots(app: AppHandle, from: usize, into: usize) -> CmdResult<
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn set_mesh_ops(
     app: AppHandle,
     keep_ratio: f32,
     flatten_mm: f32,
     repair: bool,
     min_piece_mm: f32,
+    protect_colors: Option<bool>,
+    protect_detail: Option<bool>,
 ) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {
         // The settings panel has no say over the printability fixes; keep them.
+        let now = d.project.mesh_ops();
         let ops = MeshOps {
             keep_ratio: keep_ratio.clamp(0.05, 1.0),
             flatten_mm: flatten_mm.max(0.0),
             repair,
             min_piece_mm: min_piece_mm.max(0.0),
-            ..d.project.mesh_ops()
+            protect_colors: protect_colors.unwrap_or(now.protect_colors),
+            protect_detail: protect_detail.unwrap_or(now.protect_detail),
+            ..now
         };
         d.project.set_mesh_ops(ops);
         Ok(dto::summary(d, prefs))

@@ -343,6 +343,29 @@ const scenarios = {
     await shot(b, "18-analysis-thickness");
   },
 
+  // Simplify at 50 % with the colour borders kept: no more filament changes than before, and the deviation shown.
+  async simplify(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#protect-colors"))) return check("simplify", "protect switches", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    const swaps = () => b.execute(() => Number(document.querySelector("[data-bind=swaps]").textContent.replace(/\D/g, "")));
+    const full = await swaps();
+    await setValue(b, "#keep", 50);
+    await settle(b);
+    const plain = await swaps();
+    const plainLine = await text(b, "[data-bind=triangles]");
+    await click(b, "#protect-colors");
+    await settle(b);
+    const kept = await swaps();
+    const line = await text(b, "[data-bind=triangles]");
+    check("simplify", "with Proteger bordes de color the filament changes do not go up", kept <= full, `100 %: ${full}, 50 %: ${plain}, 50 % protegido: ${kept}`);
+    check("simplify", "the maximum deviation is shown beside the triangles", /desviación máx\. [\d,]+ mm/.test(line ?? ""), `${plainLine} | ${line}`);
+    await click(b, "#protect-detail");
+    await settle(b);
+    check("simplify", "Proteger detalle applies too", await b.execute(() => document.querySelector("#protect-detail").checked), await text(b, "[data-bind=triangles]"));
+    await shot(b, "20-simplify-protected");
+  },
+
   async english(b) {
     await waitState(b, "ready");
     const missing = await b.execute(() => [...document.querySelectorAll("[data-i18n]")].filter((el) => el.offsetParent && !el.textContent.trim()).map((el) => el.dataset.i18n));
@@ -352,7 +375,7 @@ const scenarios = {
 };
 
 const plan = [
-  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["english", { lang: "en" }],
+  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["simplify", {}], ["english", { lang: "en" }],
 ];
 
 const metrics = {};

@@ -24,6 +24,41 @@ impl MeshPart {
         [self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize]]
     }
 
+    /// Vertices where the surface bends: some face around them turns more
+    /// than `deg` from their normal. Eyes, fingers and reliefs are made of them.
+    pub fn bent_vertices(&self, deg: f32) -> Vec<bool> {
+        let normals = self.vertex_normals();
+        let limit = deg.to_radians().cos();
+        let mut bent = vec![false; self.positions.len()];
+        for (ti, t) in self.tris.iter().enumerate() {
+            let c = self.corners(ti);
+            let face = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+            if geom::len(face) == 0.0 {
+                continue;
+            }
+            let face = geom::normalize(face);
+            for &v in t {
+                if geom::dot(face, normals[v as usize]) < limit {
+                    bent[v as usize] = true;
+                }
+            }
+        }
+        bent
+    }
+
+    /// Unit normal of each vertex: the area-weighted sum of its faces'.
+    pub fn vertex_normals(&self) -> Vec<Vec3> {
+        let mut n = vec![[0.0f32; 3]; self.positions.len()];
+        for (ti, t) in self.tris.iter().enumerate() {
+            let c = self.corners(ti);
+            let face = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+            for &v in t {
+                n[v as usize] = geom::add(n[v as usize], face);
+            }
+        }
+        n.into_iter().map(|v| if geom::len(v) > 0.0 { geom::normalize(v) } else { v }).collect()
+    }
+
     /// Keeps the triangles marked in `keep` (and their origins), then drops unused vertices.
     pub fn retain(&mut self, keep: &[bool]) {
         let mut it = keep.iter();
@@ -99,6 +134,10 @@ pub struct MeshOps {
     /// Weld and drop slivers at the printability tolerance, and remove stray
     /// faces hanging off the surface by one edge.
     pub deep_clean: bool,
+    /// Simplifying keeps the vertices where the colour changes, so borders stay sharp.
+    pub protect_colors: bool,
+    /// Simplifying weighs the surface's bend, so curved and small details keep more triangles.
+    pub protect_detail: bool,
 }
 
 impl Default for MeshOps {
@@ -113,6 +152,8 @@ impl Default for MeshOps {
             split_vertices: false,
             drop_floating: false,
             deep_clean: false,
+            protect_colors: false,
+            protect_detail: false,
         }
     }
 }
@@ -136,7 +177,14 @@ pub struct RepairReport {
 pub struct Mesh {
     pub parts: Vec<MeshPart>,
     pub repair: RepairReport,
+    /// Farthest any vertex of the mesh before simplifying lies from the simplified
+    /// surface, in source units; 0 when it was not simplified.
+    pub deviation: f32,
 }
+
+/// The filament slot of each triangle of each part, for [`Mesh::build_with`]
+/// to keep colour borders; empty when there is no palette yet.
+pub type Labeller<'a> = &'a dyn Fn(&Mesh) -> Vec<Vec<u8>>;
 
 impl Mesh {
     pub fn from_scene(scene: &Scene) -> Self {
@@ -150,13 +198,19 @@ impl Mesh {
                 origin: Some((0..p.tris.len() as u32).map(|i| (i, ROOT)).collect()),
             })
             .collect();
-        Self { parts, repair: RepairReport::default() }
+        Self { parts, repair: RepairReport::default(), deviation: 0.0 }
     }
 
     /// Builds the working mesh. Returns the shape before flattening (used to look
     /// up colours by position) and the final shape; both have the same triangles.
     /// `scale` converts source millimetres to final millimetres.
     pub fn build(scene: &Scene, ops: MeshOps, scale: f32) -> (Self, Self) {
+        Self::build_with(scene, ops, scale, &|_| vec![])
+    }
+
+    /// [`Self::build`], with `labels` giving the colour of each triangle when
+    /// simplifying has to keep colour borders.
+    pub fn build_with(scene: &Scene, ops: MeshOps, scale: f32, labels: Labeller) -> (Self, Self) {
         let mut shape = Self::from_scene(scene);
         // Holes, winding and fans are read from shared vertices: on an unwelded
         // mesh every seam would look like a hole. Reverting the cleanup alone
@@ -183,7 +237,10 @@ impl Mesh {
             shape.remove_loose_pieces(ops.min_piece_mm / scale);
         }
         if ops.keep_ratio < 0.999 {
-            shape.simplify(ops.keep_ratio);
+            let before = shape.clone();
+            let locks = ops.protect_colors.then(|| shape.border_vertices(&labels(&shape)));
+            shape.simplify_with(ops.keep_ratio, locks.as_deref(), ops.protect_detail);
+            shape.deviation = before.deviation_to(&shape);
         }
         if ops.flatten_mm > 0.0 {
             shape.split_at(shape.bounds().map_or(0.0, |(lo, _)| lo[2]) + ops.flatten_mm / scale);
@@ -705,6 +762,27 @@ impl Mesh {
         self.repair = report;
     }
 
+    /// Farthest a vertex of `self` lies from the surface of `other` (same units),
+    /// over up to 100 000 of them spread evenly.
+    pub fn deviation_to(&self, other: &Mesh) -> f32 {
+        use rayon::prelude::*;
+        let soup = other.soup();
+        if soup.is_empty() {
+            return 0.0;
+        }
+        let bvh = crate::bvh::Bvh::build(&soup);
+        let points: Vec<Vec3> = self.parts.iter().flat_map(|p| p.positions.iter().copied()).collect();
+        let stride = points.len().div_ceil(100_000).max(1);
+        points
+            .par_iter()
+            .step_by(stride)
+            .map(|&q| {
+                bvh.nearest(&soup, q)
+                    .map_or(0.0, |(t, b)| geom::len(geom::sub(q, geom::at(&soup.corners[t as usize], b))))
+            })
+            .reduce(|| 0.0, f32::max)
+    }
+
     pub fn triangle_count(&self) -> usize {
         self.parts.iter().map(|p| p.tris.len()).sum()
     }
@@ -719,7 +797,38 @@ impl Mesh {
 
     /// Quadric simplification (meshoptimizer) of every part to `keep` of its triangles.
     pub fn simplify(&mut self, keep: f32) {
-        for part in &mut self.parts {
+        self.simplify_with(keep, None, false);
+    }
+
+    /// Vertices of each part where triangles of different `labels` meet: the colour borders.
+    pub fn border_vertices(&self, labels: &[Vec<u8>]) -> Vec<Vec<bool>> {
+        self.parts
+            .iter()
+            .enumerate()
+            .map(|(pi, part)| {
+                let mut first = vec![u8::MAX; part.positions.len()];
+                let mut border = vec![false; part.positions.len()];
+                let Some(labels) = labels.get(pi).filter(|l| l.len() == part.tris.len()) else { return border };
+                for (t, &l) in part.tris.iter().zip(labels) {
+                    for &v in t {
+                        let f = &mut first[v as usize];
+                        if *f == u8::MAX {
+                            *f = l;
+                        } else if *f != l {
+                            border[v as usize] = true;
+                        }
+                    }
+                }
+                border
+            })
+            .collect()
+    }
+
+    /// [`Self::simplify`] keeping the vertices `locks` marks in place, and with
+    /// `detail`, giving priority to the vertices where the surface bends (see
+    /// [`MeshPart::bent_vertices`]) so details lose fewer triangles than flat areas.
+    pub fn simplify_with(&mut self, keep: f32, locks: Option<&[Vec<bool>]>, detail: bool) {
+        for (pi, part) in self.parts.iter_mut().enumerate() {
             let indices: Vec<u32> = part.tris.iter().flatten().copied().collect();
             let target = ((part.tris.len() as f32 * keep) as usize).max(4) * 3;
             let Ok(adapter) = meshopt::VertexDataAdapter::new(
@@ -729,7 +838,34 @@ impl Mesh {
             ) else {
                 continue;
             };
-            let out = meshopt::simplify(&indices, &adapter, target, 0.02, meshopt::SimplifyOptions::None, None);
+            let lock = locks.and_then(|l| l.get(pi)).filter(|l| l.len() == part.positions.len());
+            let out = if lock.is_none() && !detail {
+                meshopt::simplify(&indices, &adapter, target, 0.02, meshopt::SimplifyOptions::None, None)
+            } else {
+                use meshopt::SimplifyVertex as V;
+                let bent = if detail { part.bent_vertices(DETAIL_DEG) } else { vec![] };
+                let flags: Vec<V> = (0..part.positions.len())
+                    .map(|v| {
+                        let mut f = V::None;
+                        if lock.is_some_and(|l| l[v]) {
+                            f |= V::Lock;
+                        }
+                        if bent.get(v).copied().unwrap_or(false) {
+                            f |= V::Priority;
+                        }
+                        f
+                    })
+                    .collect();
+                meshopt::simplify_with_locks(
+                    &indices,
+                    &adapter,
+                    &flags,
+                    target,
+                    0.02,
+                    meshopt::SimplifyOptions::None,
+                    None,
+                )
+            };
             if out.len() < 3 {
                 continue;
             }
@@ -857,6 +993,10 @@ impl Mesh {
         s
     }
 }
+
+/// How far a face may turn from its vertex's normal before "Proteger detalle"
+/// counts the vertex as part of a detail worth keeping.
+pub const DETAIL_DEG: f32 = 12.0;
 
 /// Weld and sliver size of the deep clean, in final millimetres: the
 /// printability analysis's default tolerance, so what it flags goes.
@@ -987,7 +1127,11 @@ mod tests {
         ];
         let tris = vec![[0, 2, 1], [0, 3, 2], [0, 4, 3], [0, 1, 4], [5, 1, 2], [5, 2, 3], [5, 3, 4], [5, 4, 1]];
         let origin = Some((0..8).map(|i| (i, ROOT)).collect());
-        Mesh { parts: vec![MeshPart { name: "o".into(), positions, tris, origin }], repair: RepairReport::default() }
+        Mesh {
+            parts: vec![MeshPart { name: "o".into(), positions, tris, origin }],
+            repair: RepairReport::default(),
+            deviation: 0.0,
+        }
     }
 
     fn closed_cube() -> Mesh {
@@ -1016,7 +1160,11 @@ mod tests {
             [3, 4, 7],
         ];
         let origin = Some((0..tris.len() as u32).map(|i| (i, ROOT)).collect());
-        Mesh { parts: vec![MeshPart { name: "cube".into(), positions, tris, origin }], repair: RepairReport::default() }
+        Mesh {
+            parts: vec![MeshPart { name: "cube".into(), positions, tris, origin }],
+            repair: RepairReport::default(),
+            deviation: 0.0,
+        }
     }
 
     fn signed_volume(m: &Mesh) -> f32 {
@@ -1054,6 +1202,7 @@ mod tests {
         let mut m = Mesh {
             parts: vec![MeshPart { name: "bow".into(), positions, tris: vec![[0, 1, 2], [0, 3, 4]], origin: None }],
             repair: RepairReport::default(),
+            deviation: 0.0,
         };
         m.split_vertices(0.01);
         assert_eq!(m.repair.split_vertices, 1);
@@ -1237,9 +1386,94 @@ mod tests {
         let mut m = Mesh {
             parts: vec![MeshPart { name: "g".into(), positions, tris, origin: None }],
             repair: RepairReport::default(),
+            deviation: 0.0,
         };
         let before = m.triangle_count();
         m.simplify(0.25);
         assert!(m.triangle_count() < before / 2, "{} -> {}", before, m.triangle_count());
+    }
+
+    /// A bumpy 41 × 41 grid, its left half one colour and its right half another.
+    fn two_colour_grid() -> (Mesh, Vec<Vec<u8>>) {
+        let n = 40;
+        let id = |x: u32, y: u32| y * (n + 1) + x;
+        let mut positions = vec![];
+        for y in 0..=n {
+            for x in 0..=n {
+                let (fx, fy) = (x as f32, y as f32);
+                positions.push([fx, fy, (fx * 0.3).sin() * (fy * 0.2).cos()]);
+            }
+        }
+        let (mut tris, mut labels) = (vec![], vec![]);
+        for y in 0..n {
+            for x in 0..n {
+                let l = u8::from(x >= n / 2);
+                tris.push([id(x, y), id(x + 1, y), id(x + 1, y + 1)]);
+                tris.push([id(x, y), id(x + 1, y + 1), id(x, y + 1)]);
+                labels.extend([l, l]);
+            }
+        }
+        let m = Mesh {
+            parts: vec![MeshPart { name: "g".into(), positions, tris, origin: None }],
+            repair: RepairReport::default(),
+            deviation: 0.0,
+        };
+        (m, vec![labels])
+    }
+
+    #[test]
+    fn protected_simplify_keeps_the_colour_border_and_reports_its_deviation() {
+        let (m, labels) = two_colour_grid();
+        let border = m.border_vertices(&labels);
+        let on_border: Vec<Vec3> =
+            m.parts[0].positions.iter().zip(&border[0]).filter(|(_, &b)| b).map(|(p, _)| *p).collect();
+        // The column where the colours meet, x = 20.
+        assert_eq!(on_border.len(), 41);
+        assert!(on_border.iter().all(|p| p[0] == 20.0));
+        let mut free = m.clone();
+        free.simplify(0.3);
+        let mut kept = m.clone();
+        kept.simplify_with(0.3, Some(&border), false);
+        assert!(kept.triangle_count() < m.triangle_count() / 2);
+        let has = |mesh: &Mesh, q: Vec3| mesh.parts[0].positions.contains(&q);
+        assert!(on_border.iter().all(|&q| has(&kept, q)), "every border vertex stays");
+        assert!(!on_border.iter().all(|&q| has(&free, q)), "unprotected, some go");
+        // A bumpy surface simplified strays a little; the same mesh does not stray at all.
+        let d = m.deviation_to(&free);
+        assert!(d > 0.0 && d < 1.0, "{d}");
+        assert_eq!(m.deviation_to(&m), 0.0);
+    }
+
+    #[test]
+    fn protecting_detail_keeps_the_peaks_of_a_relief() {
+        // Flat on the left half, a sharp relief on the right half.
+        let n = 40u32;
+        let id = |x: u32, y: u32| y * (n + 1) + x;
+        let mut positions = vec![];
+        for y in 0..=n {
+            for x in 0..=n {
+                let z = if x > n / 2 && (x + y) % 4 == 0 { 0.6 } else { 0.0 };
+                positions.push([x as f32, y as f32, z]);
+            }
+        }
+        let mut tris = vec![];
+        for y in 0..n {
+            for x in 0..n {
+                tris.push([id(x, y), id(x + 1, y), id(x + 1, y + 1)]);
+                tris.push([id(x, y), id(x + 1, y + 1), id(x, y + 1)]);
+            }
+        }
+        let m = Mesh {
+            parts: vec![MeshPart { name: "r".into(), positions, tris, origin: None }],
+            repair: RepairReport::default(),
+            deviation: 0.0,
+        };
+        // Hard pressed, the plain quadric flattens peaks; with priority more of them stay.
+        let peaks = |mesh: &Mesh| mesh.parts[0].positions.iter().filter(|p| p[2] > 0.5).count();
+        let mut plain = m.clone();
+        plain.simplify_with(0.1, None, false);
+        let mut detail = m.clone();
+        detail.simplify_with(0.1, None, true);
+        assert!(peaks(&detail) > peaks(&plain), "{} vs {}", peaks(&detail), peaks(&plain));
     }
 }

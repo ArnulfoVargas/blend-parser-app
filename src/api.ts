@@ -12,7 +12,7 @@ export interface Repair {
 export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -122,6 +122,8 @@ export interface Summary {
   smallIslands: number;
   minDetailMm2: number;
   contactMm2: number;
+  /** How far simplifying moved the surface at most, in mm; 0 unsimplified. */
+  deviationMm: number;
   repair: Repair;
   estimate: Estimate;
   settings: Settings;
@@ -190,8 +192,8 @@ export const api = {
   undoCut: () => invoke<Summary>("undo_cut"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),
-  setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number) =>
-    invoke<Summary>("set_mesh_ops", { keepRatio, flattenMm, repair, minPieceMm }),
+  setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number, protectColors?: boolean, protectDetail?: boolean) =>
+    invoke<Summary>("set_mesh_ops", { keepRatio, flattenMm, repair, minPieceMm, protectColors, protectDetail }),
   setColorOps: (borderDetail: number, minIslandMm2: number) => invoke<Summary>("set_color_ops", { borderDetail, minIslandMm2 }),
   printers: () => invoke<Printers>("printers"),
   /** Null while no file is open; the pick is remembered either way. */
