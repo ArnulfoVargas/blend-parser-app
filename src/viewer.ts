@@ -11,6 +11,31 @@ import type { Hit, PaintResult, Plate, PreviewMesh, Vec3 } from "./api";
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
+/** What the mesh mode paints over the model: nothing, overhangs, wall thickness or flagged edges. */
+export type Analysis = "none" | "overhang" | "thickness" | "edges";
+/** What each analysis view paints with, in preview units. */
+export interface AnalysisData {
+  /** Faces looking down more than this (degrees) overhang; faces on the plate do not. */
+  overhangDeg: number;
+  /** How far above the lowest point a face still rests on the plate. */
+  plateTol: number;
+  /** Measured wall thickness at sample points (millimetres), and the minimum it should reach. */
+  thickness?: { points: Vec3[]; mm: (number | null)[]; threshold: number };
+  /** Open edges, and edges shared by more than two faces or by two that disagree. */
+  edges?: { open: [Vec3, Vec3][]; bad: [Vec3, Vec3][] };
+}
+
+/** Analysis colours (sRGB bytes): the model in neutral grey, then a warm ramp for the problem. */
+const NEUTRAL: [number, number, number] = [196, 198, 192];
+const UNKNOWN: [number, number, number] = [150, 152, 150];
+const RAMP: [number, number, number][] = [[214, 48, 32], [236, 150, 40], [232, 208, 74], [96, 178, 110]];
+/** A point on RAMP, 0 (worst) to 1 (fine). */
+function ramp(t: number): [number, number, number] {
+  const x = Math.min(1, Math.max(0, t)) * (RAMP.length - 1);
+  const i = Math.min(RAMP.length - 2, Math.floor(x));
+  const f = x - i;
+  return [0, 1, 2].map((k) => Math.round(RAMP[i][k] + (RAMP[i + 1][k] - RAMP[i][k]) * f)) as [number, number, number];
+}
 export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section";
 export type Axis = 0 | 1 | 2;
 
@@ -79,6 +104,11 @@ export class Viewer {
   private plate: THREE.Mesh;
   private tape = new THREE.Group();
   private findings = new THREE.Group();
+  /** The analysis view: its colours per leaf, and the flagged edges drawn over the model. */
+  private analysis: Analysis = "none";
+  private analysisData: AnalysisData | null = null;
+  private analysisRgb: Uint8Array | null = null;
+  private edgeLines = new THREE.Group();
   /** The faces a proposed turn would rest on the plate, tinted over the model. */
   private resting: THREE.Mesh | null = null;
   private tapePoints: Vec3[] = [];
@@ -140,6 +170,8 @@ export class Viewer {
     this.controls.addEventListener("change", () => this.requestRender());
 
     this.scene.add(this.findings);
+    this.edgeLines.renderOrder = 25;
+    this.scene.add(this.edgeLines);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f86, 1.6));
     const key = new THREE.DirectionalLight(0xffffff, 1.6);
     key.position.set(0.6, -1, 1.4);
@@ -382,6 +414,7 @@ export class Viewer {
     const inside = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: cssColor("--color-ink-2"), side: THREE.BackSide }));
     this.mesh.add(inside);
     this.scene.add(this.mesh);
+    this.buildAnalysis();
     this.recolorAll();
     this.reshaped();
     if (frame) this.frameAll();
@@ -534,9 +567,12 @@ export class Viewer {
   private colorLeaves(from: number, to: number) {
     const { labels, sourceRgb } = this.data!;
     const c = this.colors!;
+    const a = this.analysisRgb;
     for (let l = from; l < to; l++) {
       let r: number, g: number, b: number;
-      if (this.view === "texture") {
+      if (a) {
+        r = a[l * 3]; g = a[l * 3 + 1]; b = a[l * 3 + 2];
+      } else if (this.view === "texture") {
         r = sourceRgb[l * 3]; g = sourceRgb[l * 3 + 1]; b = sourceRgb[l * 3 + 2];
       } else {
         [r, g, b] = this.palette[labels[l]] ?? [200, 200, 200];
@@ -1323,6 +1359,96 @@ export class Viewer {
     this.requestRender();
   }
 
+  // ---- analysis views ---------------------------------------------------------
+
+  /** Paints the model with an analysis, or with "none" its colours again. Nothing is measured here
+   *  but the faces' slope: thickness and edges come from the printability report. */
+  setAnalysis(mode: Analysis, data: AnalysisData | null) {
+    this.analysis = mode;
+    this.analysisData = data;
+    this.buildAnalysis();
+    this.recolorAll();
+  }
+
+  getAnalysis(): Analysis {
+    return this.analysis;
+  }
+
+  /** Colours per leaf and edge lines for the current analysis and mesh. */
+  private buildAnalysis() {
+    for (const child of this.edgeLines.children) {
+      const line = child as THREE.LineSegments;
+      line.geometry.dispose();
+      (line.material as THREE.Material).dispose();
+    }
+    this.edgeLines.clear();
+    this.analysisRgb = null;
+    const d = this.analysisData;
+    if (this.analysis === "none" || !d || !this.data) return;
+    const p = this.data.positions;
+    const leaves = this.data.labels.length;
+    const rgb = new Uint8Array(leaves * 3);
+    const put = (l: number, c: [number, number, number]) => rgb.set(c, l * 3);
+    if (this.analysis === "overhang") {
+      let floor = Infinity;
+      for (let i = 2; i < p.length; i += 3) floor = Math.min(floor, p[i]);
+      const limit = THREE.MathUtils.clamp(d.overhangDeg, 0, 89.9);
+      for (let l = 0; l < leaves; l++) {
+        const i = l * 9;
+        const ux = p[i + 3] - p[i], uy = p[i + 4] - p[i + 1], uz = p[i + 5] - p[i + 2];
+        const vx = p[i + 6] - p[i], vy = p[i + 7] - p[i + 1], vz = p[i + 8] - p[i + 2];
+        const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        const len = Math.hypot(nx, ny, nz);
+        const onPlate = p[i + 2] <= floor + d.plateTol && p[i + 5] <= floor + d.plateTol && p[i + 8] <= floor + d.plateTol;
+        // How far past the limit the face looks down, as the analysis measures it: asin(-nz).
+        const angle = len > 0 && nz < 0 ? THREE.MathUtils.radToDeg(Math.asin(Math.min(1, -nz / len))) : -1;
+        put(l, onPlate || angle <= limit ? NEUTRAL : ramp(0.66 * (1 - (angle - limit) / (90 - limit))));
+      }
+    } else if (this.analysis === "thickness" && d.thickness) {
+      const { points, mm, threshold } = d.thickness;
+      const nearest = nearestIndex(points);
+      for (let l = 0; l < leaves; l++) {
+        const i = l * 9;
+        const at: Vec3 = [(p[i] + p[i + 3] + p[i + 6]) / 3, (p[i + 1] + p[i + 4] + p[i + 7]) / 3, (p[i + 2] + p[i + 5] + p[i + 8]) / 3];
+        const k = nearest(at);
+        const v = k < 0 ? null : mm[k];
+        // Red under the minimum, through amber and yellow up to green at twice it.
+        put(l, v === null ? UNKNOWN : v < threshold ? RAMP[0] : ramp(0.33 + 0.67 * Math.min(1, (v - threshold) / threshold)));
+      }
+    } else {
+      for (let l = 0; l < leaves; l++) put(l, NEUTRAL);
+      const lines = (segments: [Vec3, Vec3][], colour: string) => {
+        if (!segments.length) return;
+        const geo = new THREE.BufferGeometry().setFromPoints(segments.flatMap(([a, b]) => [new THREE.Vector3(...a), new THREE.Vector3(...b)]));
+        const mat = new THREE.LineBasicMaterial({ color: cssColor(colour), depthTest: false, transparent: true });
+        const seg = new THREE.LineSegments(geo, mat);
+        seg.renderOrder = 25;
+        this.edgeLines.add(seg);
+      };
+      lines(d.edges?.open ?? [], "--color-error");
+      lines(d.edges?.bad ?? [], "--color-warn");
+    }
+    this.analysisRgb = rgb;
+  }
+
+  /** Brings `points` (preview units) into view: the camera keeps its angle and comes close enough to see them. */
+  frameOn(points: Vec3[]) {
+    if (!points.length) return;
+    const box = new THREE.Box3().setFromPoints(points.map((q) => new THREE.Vector3(...q)));
+    const centre = box.getCenter(new THREE.Vector3());
+    const model = this.mesh?.geometry.boundingSphere?.radius ?? 1;
+    // Never closer than a fifth of the model, so the zone is seen in its place.
+    const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, model * 0.2);
+    const dist = (radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.2;
+    const dir = this.camera.position.clone().sub(this.controls.target).normalize();
+    this.controls.target.copy(centre);
+    this.camera.position.copy(centre).addScaledVector(dir, dist);
+    this.camera.near = Math.min(this.camera.near, dist / 100);
+    this.camera.updateProjectionMatrix();
+    this.controls.update();
+    this.requestRender();
+  }
+
   /**
    * Tints the faces that would rest on the plate if the model were turned so
    * `down` (preview axes, as the model stands now) faced it: the lowest along
@@ -1430,4 +1556,53 @@ export class Viewer {
     this.painting = false;
     this.handlers.endStroke();
   }
+}
+
+/** Nearest of `points` to a query, through a uniform grid; -1 with no points. */
+function nearestIndex(points: Vec3[]): (q: Vec3) => number {
+  if (!points.length) return () => -1;
+  const lo = [0, 1, 2].map((k) => Math.min(...points.map((q) => q[k])));
+  const hi = [0, 1, 2].map((k) => Math.max(...points.map((q) => q[k])));
+  const span = Math.max(...hi.map((v, k) => v - lo[k]), 1e-6);
+  // About two points per cell along the longest side.
+  const n = Math.max(1, Math.min(64, Math.round(Math.cbrt(points.length) / 1.3)));
+  const size = span / n;
+  const dims = hi.map((v, k) => Math.max(1, Math.ceil((v - lo[k]) / size) + 1));
+  const cell = (q: Vec3) => q.map((v, k) => Math.min(dims[k] - 1, Math.max(0, Math.floor((v - lo[k]) / size))));
+  const grid = new Map<number, number[]>();
+  const key = (c: number[]) => (c[0] * dims[1] + c[1]) * dims[2] + c[2];
+  points.forEach((q, i) => {
+    const k = key(cell(q));
+    const list = grid.get(k);
+    if (list) list.push(i);
+    else grid.set(k, [i]);
+  });
+  const reach = Math.max(...dims);
+  return (q) => {
+    const c = cell(q);
+    let best = -1;
+    let bestD = Infinity;
+    // Rings of cells outwards until no closer point can be further out.
+    for (let r = 0; r <= reach; r++) {
+      if (best >= 0 && (r - 1) * size > Math.sqrt(bestD)) break;
+      for (let x = c[0] - r; x <= c[0] + r; x++) {
+        if (x < 0 || x >= dims[0]) continue;
+        for (let y = c[1] - r; y <= c[1] + r; y++) {
+          if (y < 0 || y >= dims[1]) continue;
+          for (let z = c[2] - r; z <= c[2] + r; z++) {
+            if (z < 0 || z >= dims[2]) continue;
+            if (Math.max(Math.abs(x - c[0]), Math.abs(y - c[1]), Math.abs(z - c[2])) !== r) continue;
+            for (const i of grid.get(key([x, y, z])) ?? []) {
+              const d = (points[i][0] - q[0]) ** 2 + (points[i][1] - q[1]) ** 2 + (points[i][2] - q[2]) ** 2;
+              if (d < bestD) {
+                bestD = d;
+                best = i;
+              }
+            }
+          }
+        }
+      }
+    }
+    return best;
+  };
 }

@@ -22,6 +22,7 @@ import {
   type Issues,
   type MeshFix,
   type OrientationPlan,
+  type PrintabilityReport,
   type Summary,
   type TurnResult,
   type Vec3,
@@ -33,7 +34,7 @@ import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { setupPrintability } from "./printability";
-import { Viewer, type Axis, type Section, type Tool, type View } from "./viewer";
+import { Viewer, type Analysis, type AnalysisData, type Axis, type Section, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -1270,6 +1271,77 @@ orientBest.addEventListener("click", async () => {
 });
 $("#orient-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
 
+// ---- analysis views: the printability problems painted on the model -------------------
+
+/** The report the printability panel shows; the thickness and edge views paint from it. */
+let paReport: PrintabilityReport | null = null;
+const analysisButtons = [...document.querySelectorAll<HTMLButtonElement>("button[data-analysis]")];
+const toPreview = (q: Vec3) => q.map((v) => v / (summary?.size.previewScale ?? 1)) as Vec3;
+/** The thickness a wall needs: the printability check's own threshold. */
+const wallMin = (r: PrintabilityReport) => Math.max(r.params.wallMm, r.params.extrusionMm * r.params.perimeters);
+const overhangDeg = () => paReport?.params.overhangDeg ?? (Number(document.querySelector<HTMLInputElement>("#pa-overhangDeg")?.value) || 45);
+
+function analysisData(): AnalysisData {
+  const r = paReport;
+  const k = summary?.size.previewScale ?? 1;
+  return {
+    overhangDeg: overhangDeg(),
+    // The analysis's own tolerance for resting on the plate.
+    plateTol: (r?.params.toleranceMm ?? 0.001) / k,
+    thickness: r ? { points: r.thickness.map((x) => toPreview(x.point)), mm: r.thickness.map((x) => x.mm), threshold: wallMin(r) } : undefined,
+    edges: r ? {
+      open: r.edges.open.map(([a, b]) => [toPreview(a), toPreview(b)] as [Vec3, Vec3]),
+      bad: [...r.edges.nonManifold, ...r.edges.winding].map(([a, b]) => [toPreview(a), toPreview(b)] as [Vec3, Vec3]),
+    } : undefined,
+  };
+}
+
+/** The legend: what each colour means, with the threshold that decides it. */
+function renderLegend(mode: Analysis) {
+  const legend = $("#analysis-legend");
+  legend.hidden = mode === "none";
+  if (mode === "none") return;
+  const r = paReport;
+  const keys: [string, string][] = mode === "overhang"
+    ? [["#d63020", t("analysis.overhangSteep")], ["#e8d04a", t("analysis.overhangJust", { deg: nf(overhangDeg()) })], ["#c4c6c0", t("analysis.overhangOk")]]
+    : mode === "thickness" && r
+      ? [["#d63020", t("analysis.thin", { mm: mm(wallMin(r)), lines: r.params.perimeters, nozzle: mm(summary?.settings.nozzleMm ?? 0.4) })],
+        ["#e8d04a", t("analysis.thicknessNear")], ["#60b26e", t("analysis.thick", { mm: mm(wallMin(r) * 2) })], ["#969896", t("analysis.unmeasured")]]
+      : r ? [["var(--color-error)", t("analysis.open", { count: r.edges.open.length, n: nf(r.edges.open.length) })],
+        ["var(--color-warn)", t("analysis.bad", { count: r.edges.nonManifold.length + r.edges.winding.length, n: nf(r.edges.nonManifold.length + r.edges.winding.length) })]] : [];
+  bind("analysisTitle", t(`analysis.${mode}Title` as Key, { deg: nf(overhangDeg()) }));
+  $("#analysis-keys").replaceChildren(...keys.map(([colour, label]) => {
+    const li = document.createElement("li");
+    const sw = document.createElement("i");
+    sw.style.background = colour;
+    li.append(sw, label);
+    return li;
+  }));
+}
+
+/** Paints the model with one analysis. Thickness and edges need a report: without one, it is made first. */
+async function showAnalysis(mode: Analysis) {
+  if (mode !== "none" && mode !== "overhang" && !paReport) {
+    const group = $<HTMLDetailsElement>("#printability");
+    group.open = true;
+    await printability.run();
+    if (!paReport) return;
+  }
+  if (mode === "thickness" && paReport && !paReport.thickness.length) {
+    toast(t("analysis.noThickness"), "error");
+    mode = "none";
+  }
+  analysisButtons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.analysis === mode)));
+  viewer.setAnalysis(mode, mode === "none" ? null : analysisData());
+  renderLegend(mode);
+}
+analysisButtons.forEach((b) => b.addEventListener("click", () => void showAnalysis(b.dataset.analysis as Analysis)));
+
+/** Which view shows each printability check. */
+const VIEW_OF: Record<string, Analysis> = {
+  overhang: "overhang", thinWalls: "thickness", openEdges: "edges", nonManifoldEdges: "edges", winding: "edges",
+};
+
 const colorOps = () => void apply(() => api.setColorOps(Number($<HTMLInputElement>("#detail").value), Number($<HTMLInputElement>("#island").value)));
 $("#detail").addEventListener("change", colorOps);
 $("#island").addEventListener("change", colorOps);
@@ -1610,6 +1682,8 @@ function selectTab(tab: Tab, focus = false) {
   $(".side").scrollTo({ top: 0 });
   placeToolOptions(tab);
   if (tab === "mesh") void refreshIssues();
+  // The analysis views belong to Malla: elsewhere the model shows its colours, and the brush paints them.
+  else if (viewer.getAnalysis() !== "none") void showAnalysis("none");
   void refreshPlan();
   // Each mode shows its own tools in the view: the cut opens with its tool, and
   // a tool the new mode does not have hands the view back to orbiting.
@@ -1877,6 +1951,7 @@ onLangChange(() => {
   syncOutputs();
   bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
   if (summary) render(summary);
+  renderLegend(viewer.getAnalysis());
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });
@@ -1914,6 +1989,18 @@ const printability = setupPrintability({
   resize: (mm) => apply(() => api.setSize(mm)),
   confirm: (message) => ask(message, { title: t("printability.title"), kind: "warning" }),
   error: e => toast(errText(e), "error"),
+  report: (r) => {
+    paReport = r;
+    // A view painted from a report that no longer describes the model goes; the slope one stays.
+    const mode = viewer.getAnalysis();
+    if (!r && (mode === "thickness" || mode === "edges")) void showAnalysis("none");
+    else if (r && mode !== "none") void showAnalysis(mode);
+  },
+  view: (code, points) => {
+    const mode = VIEW_OF[code];
+    if (mode) void showAnalysis(mode).then(() => viewer.frameOn(points.map(toPreview)));
+    else viewer.frameOn(points.map(toPreview));
+  },
 });
 
 // ---- start -------------------------------------------------------------------------------

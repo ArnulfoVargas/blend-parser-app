@@ -149,6 +149,10 @@ export function setupPrintability(options: {
   resize(mm: Vec3): Promise<unknown>;
   confirm(message: string): Promise<boolean>;
   error(error: unknown): void;
+  /** The report the panel shows, or null when it no longer describes the model. */
+  report?(r: PrintabilityReport | null): void;
+  /** A card was picked: show the model as that check sees it and bring its places into view. */
+  view?(code: string, points: Vec3[]): void;
 }) {
   const FIXES = makeFixes(options);
   const panel = document.querySelector<HTMLElement>("#printability")!;
@@ -239,6 +243,7 @@ export function setupPrintability(options: {
     token++;
     outdated = outdated || report !== null;
     report = null;
+    options.report?.(null);
     markers(null, []);
     // A fix in progress redraws the results once it has analysed again; emptying
     // them meanwhile collapses the panel and the sidebar jumps back to the top.
@@ -340,10 +345,23 @@ export function setupPrintability(options: {
       const locate = el("button", "link", t("printability.locate"));
       locate.type = "button";
       locate.setAttribute("aria-pressed", "false");
-      locate.addEventListener("click", () => shown === locate ? markers(null, []) : markers(locate, c.locations));
+      locate.addEventListener("click", () => {
+        if (shown === locate) return markers(null, []);
+        markers(locate, c.locations);
+        options.view?.(c.code, c.locations);
+      });
       actions.append(locate);
     }
     if (actions.childElementCount) row.append(actions);
+    // A click anywhere else on a card with places shows the model as that check sees it.
+    if (c.locations.length && c.severity !== "pass" && options.view) {
+      row.classList.add("is-viewable");
+      row.title = t("printability.viewCard");
+      row.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement).closest("button, a")) return;
+        options.view!(c.code, c.locations);
+      });
+    }
     return row;
   }
 
@@ -397,6 +415,7 @@ export function setupPrintability(options: {
   function show(r: PrintabilityReport, message = "", tone: Tone = "ok") {
     report = r;
     outdated = false;
+    options.report?.(r);
     markers(null, []);
     const s = options.summary();
     const checks = [...r.checks].sort((a, b) => RANK[a.severity] - RANK[b.severity]);
@@ -611,5 +630,5 @@ export function setupPrintability(options: {
   });
   labels();
   reset();
-  return { update };
+  return { update, run, report: () => report };
 }

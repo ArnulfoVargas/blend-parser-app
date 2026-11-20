@@ -14,6 +14,8 @@ import {
 const MODEL = process.env.BP_MODEL ?? path.join(HERE, "e2e/fixtures/out/figure.blend");
 /** Suzanne's head alone, open at the eyes and the neck (`fixtures/simple.py`). */
 const HEAD = path.join(HERE, "e2e/fixtures/out/head.blend");
+/** A closed cylinder, 44 × 45 mm (`fixtures/simple.py`). */
+const CYLINDER = path.join(HERE, "e2e/fixtures/out/cylinder.blend");
 const invoke = (b, cmd, args = {}) => b.executeAsync((c, a, done) => window.__TAURI_INTERNALS__.invoke(c, a).then((v) => done({ v }), (e) => done({ e: JSON.stringify(e) })), cmd, args);
 const only = process.argv.slice(2);
 const results = [];
@@ -283,6 +285,64 @@ const scenarios = {
     check("orient", "Orientación original is at hand", await b.execute(() => document.querySelector("#orient-reset").disabled), "disabled once back");
   },
 
+  // Malla → Mostrar: overhangs and edges painted on the model from the analysis, without measuring again.
+  async analysis(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "button[data-analysis]"))) return check("analysis", "analysis views", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    const pressed = () => b.execute(() => document.querySelector("button[data-analysis][aria-pressed=true]")?.dataset.analysis);
+    const legend = () => b.execute(() => { const el = document.querySelector("#analysis-legend"); return el && !el.hidden ? el.textContent.trim() : ""; });
+    const cards = () => b.execute(() => document.querySelectorAll(".pa-results .pa-check").length);
+    await click(b, 'button[data-analysis="overhang"]');
+    await settle(b);
+    check("analysis", "Voladizos paints at once, from the faces alone, with the angle in the legend", (await pressed()) === "overhang" && /45°/.test(await legend()) && (await cards()) === 0, await legend());
+    await shot(b, "16-analysis-overhang");
+    // Edges need a report: picking the view runs the analysis.
+    await click(b, 'button[data-analysis="edges"]');
+    await b.waitUntil(async () => (await pressed()) === "edges", { timeout: 120000, interval: 200 }).catch(() => {});
+    check("analysis", "Bordes analyses and draws the open edges", (await pressed()) === "edges" && (await cards()) > 0 && /\d+ aristas abiertas/.test(await legend()), await legend());
+    await shot(b, "17-analysis-edges");
+    // A new analysis would replace the cards: a mark on one tells whether it ran again.
+    await b.execute(() => (document.querySelector(".pa-results .pa-check").dataset.mark = "1"));
+    await click(b, 'button[data-analysis="overhang"]');
+    const picked = await b.execute(() => {
+      const card = [...document.querySelectorAll(".pa-check.is-viewable")].find((c) => /abiert/i.test(c.textContent));
+      card?.querySelector(".pa-check__title").click();
+      return !!card;
+    });
+    await settle(b);
+    check("analysis", "a click on the open-edges card switches to Bordes", picked && (await pressed()) === "edges");
+    check("analysis", "switching views measures nothing again", await b.execute(() => !!document.querySelector('.pa-results .pa-check[data-mark="1"]')));
+    await click(b, '#repair-ops input[data-op="fillHoles"]');
+    await settle(b);
+    check("analysis", "a change to the mesh drops the edges view (its report is old)", (await pressed()) === "none");
+    await click(b, 'button[data-analysis="overhang"]');
+    await click(b, "[role=tab][data-tab=model]");
+    check("analysis", "leaving Malla shows the colours again", (await pressed()) === "none" && !(await legend()));
+    await click(b, "#slots li:nth-child(2) button");
+    await key(b, "b");
+    const canvas = await b.$("#viewport");
+    await b.action("pointer").move({ origin: canvas, x: -20, y: 0 }).down().move({ origin: canvas, x: 20, y: 10, duration: 300 }).up().perform().catch(() => {});
+    await settle(b);
+    const undo = await b.execute(() => document.querySelector("#undo").title);
+    check("analysis", "the brush paints after coming back to Modelo", /trazo|stroke/.test(undo), undo);
+    await shot(b, "19-analysis-brush");
+    await key(b, "o");
+  },
+
+  // Grosor on a closed model: the closed cylinder of `simple.py`.
+  async thickness(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, 'button[data-analysis="thickness"]'))) return check("thickness", "thickness view", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    await click(b, 'button[data-analysis="thickness"]');
+    const pressed = () => b.execute(() => document.querySelector("button[data-analysis][aria-pressed=true]")?.dataset.analysis);
+    await b.waitUntil(async () => (await pressed()) === "thickness", { timeout: 120000, interval: 200 }).catch(() => {});
+    const leg = await b.execute(() => document.querySelector("#analysis-legend").textContent.trim());
+    check("thickness", "Grosor colours the walls against two nozzle lines", (await pressed()) === "thickness" && /Más fina que [\d,]+ mm \(2 líneas de la boquilla de 0,4 mm\)/.test(leg), leg);
+    await shot(b, "18-analysis-thickness");
+  },
+
   async english(b) {
     await waitState(b, "ready");
     const missing = await b.execute(() => [...document.querySelectorAll("[data-i18n]")].filter((el) => el.offsetParent && !el.textContent.trim()).map((el) => el.dataset.i18n));
@@ -292,7 +352,7 @@ const scenarios = {
 };
 
 const plan = [
-  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["english", { lang: "en" }],
+  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["english", { lang: "en" }],
 ];
 
 const metrics = {};

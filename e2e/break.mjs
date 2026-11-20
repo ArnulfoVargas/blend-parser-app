@@ -135,6 +135,18 @@ const attacks = {
     await settle(b);
     await attack(b, "repairs", "mesh_issues", {});
   },
+  // The analysis views: picked in quick succession while the analysis runs, and across modes.
+  async views(b) {
+    await click(b, "[role=tab][data-tab=mesh]");
+    for (let i = 0; i < 5; i++) for (const v of ["thickness", "edges", "overhang", "none"]) await click(b, `button[data-analysis="${v}"]`);
+    await click(b, "[role=tab][data-tab=model]");
+    await click(b, "[role=tab][data-tab=mesh]");
+    await click(b, 'button[data-analysis="edges"]');
+    await click(b, '#repair-ops input[data-op="fillHoles"]');
+    await settle(b);
+    const h = await health(b);
+    log("views", "analysis views clicked 20 times and across modes", h.alive && !h.errors.length ? "ok" : "BROKEN", `${h.why} ${h.errors[0] ?? ""}`.slice(0, 200));
+  },
   // Cuts, in each branch's signature (the missing ones report "missing").
   async cuts(b) {
     for (const t of [0, 1, -1, 2, 0.5]) await attack(b, "cuts", "cut_model", { axis: 2, t, keepLow: true, keepOther: true, joint: null });

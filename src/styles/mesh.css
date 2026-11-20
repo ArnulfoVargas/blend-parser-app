@@ -8,3 +8,10 @@
 .orient__legend { display: flex; align-items: center; gap: var(--space-xs); }
 .sw--rest { display: inline-block; width: 12px; height: 12px; border-radius: 3px; background: var(--color-rest); box-shadow: 0 0 0 1px var(--color-rule); }
 :root { --color-rest: oklch(70% 0.17 150); }
+/* The analysis views: only in Malla, a legend over the view's corner. */
+.app:not([data-tab="mesh"]) .analysis { display: none; }
+.analysis-legend { position: absolute; left: var(--space-md); bottom: var(--space-md); z-index: 2; max-width: min(22rem, 60%); padding: var(--space-xs) var(--space-sm); border-radius: var(--radius-input); background: color-mix(in oklch, var(--color-paper) 92%, transparent); box-shadow: 0 0 0 1px var(--color-rule); font-size: var(--text-xs); color: var(--color-ink-2); }
+.analysis-legend__title { margin: 0 0 var(--space-2xs); font-weight: 600; color: var(--color-ink); }
+.analysis-legend__keys { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.analysis-legend__keys li { display: flex; align-items: center; gap: var(--space-xs); }
+.analysis-legend__keys i { flex: none; width: 14px; height: 10px; border-radius: 2px; box-shadow: 0 0 0 1px var(--color-rule); }

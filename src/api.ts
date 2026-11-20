@@ -232,4 +232,6 @@ export interface PrintabilityReport {
   params: PrintabilityParams; checks: PrintabilityCheck[]; triangles: number; sizeMm: Vec3;
   printer: string | null; nozzleMm: number | null; layerMm: number | null;
   thickness: { point: Vec3; mm: number | null }[];
+  /** Flagged edges as their two ends, in mm. */
+  edges: { open: [Vec3, Vec3][]; nonManifold: [Vec3, Vec3][]; winding: [Vec3, Vec3][] };
 }

@@ -111,12 +111,27 @@ pub struct Report {
     pub params: Params,
     pub checks: Vec<Check>,
     pub thickness: Vec<ThicknessSample>,
+    /// Every flagged edge as its two ends, for the view to draw: open edges,
+    /// and edges shared by more than two faces or by two that disagree.
+    pub edges: EdgeMap,
     pub triangles: usize,
     pub printer: Option<String>,
     pub nozzle_mm: Option<f32>,
     pub layer_mm: Option<f32>,
     pub size_mm: Vec3,
 }
+
+/// Flagged edges in final millimetres, up to [`MAX_EDGES`] of each kind.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeMap {
+    pub open: Vec<[Vec3; 2]>,
+    pub non_manifold: Vec<[Vec3; 2]>,
+    pub winding: Vec<[Vec3; 2]>,
+}
+
+/// Enough to see where the problems are, without sending a broken scan's every edge.
+pub const MAX_EDGES: usize = 20_000;
 
 fn center(c: &[Vec3; 3]) -> Vec3 {
     geom::at(c, [1.0 / 3.0; 3])
@@ -135,6 +150,7 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
     let (lo, hi) = bounds.unwrap_or(([0.0; 3], [0.0; 3]));
     let size_mm = geom::sub(hi, lo);
     let mut open = vec![];
+    let mut edge_map = EdgeMap::default();
     let mut nonmanifold = vec![];
     let mut winding = vec![];
     let mut nonmanifold_vertices = vec![];
@@ -217,18 +233,27 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
             }
         }
         let mut closed = true;
-        for entries in edges.values() {
+        for (&(a, b), entries) in &edges {
             let at = center(&part.corners(entries[0].0));
+            let ends = [welded.positions[a as usize], welded.positions[b as usize]];
+            let flag = |list: &mut Vec<[Vec3; 2]>| {
+                if list.len() < MAX_EDGES {
+                    list.push(ends);
+                }
+            };
             if entries.len() == 1 {
                 open.push(at);
+                flag(&mut edge_map.open);
                 closed = false;
             }
             if entries.len() > 2 {
                 nonmanifold.push(at);
+                flag(&mut edge_map.non_manifold);
                 closed = false;
             }
             if entries.len() == 2 && entries[0].1 == entries[1].1 {
                 winding.push(at);
+                flag(&mut edge_map.winding);
                 closed = false;
             }
         }
@@ -443,6 +468,7 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         params,
         checks,
         thickness,
+        edges: edge_map,
         triangles: mesh.triangle_count(),
         printer: None,
         nozzle_mm: None,
@@ -516,6 +542,10 @@ mod tests {
         b.tris.drain(2..4);
         let r = analyze(&mesh(b), params());
         assert_eq!(check(&r, "openEdges").count, 4);
+        // The view gets the open edges themselves: the rim of the missing face, 10 mm each.
+        assert_eq!(r.edges.open.len(), 4);
+        assert!(r.edges.open.iter().all(|[a, b]| (geom::len(geom::sub(*a, *b)) - 10.0).abs() < 1e-4 && a[2] == b[2]));
+        assert!(r.edges.non_manifold.is_empty() && r.edges.winding.is_empty());
         assert_eq!(check(&r, "volume").evidence, "notEvaluated");
         assert_eq!(check(&r, "thinWalls").evidence, "notEvaluated");
     }
