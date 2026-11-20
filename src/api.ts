@@ -204,6 +204,8 @@ export interface PaintResult extends Hit { tris: number[] }
 /** The region selection: global preview triangle ids, and how many separate regions they make. */
 export interface Selection { tris: number[]; count: number; regions: number }
 export type SelectionOp = "grow" | "connected" | "smooth" | "invert" | "clear" | "get";
+/** A region suggested from a rough painted selection: out to the sharp edges, the main colour's area, or the whole piece. */
+export interface Suggestion { kind: "edges" | "colour" | "piece"; tris: number[]; count: number }
 /** How a cut region is closed: a shell `mm` thick, the piece `clearanceMm` smaller than its pocket; or a cap `mm` deep (negative bulges out). */
 export type Closure = { kind: "shell"; mm: number; clearanceMm?: number } | { kind: "cap"; mm: number };
 /** The region goes, or each connected region becomes an object of its own (with `group`, all one object). */
@@ -308,6 +310,8 @@ export const api = {
   selectRegion: (origin: Vec3, dir: Vec3, radiusMm: number, add: boolean, through: boolean) =>
     invoke<PaintResult | null>("select_region", { origin, dir, radiusMm, add, through }),
   selectionOp: (op: SelectionOp) => invoke<Selection>("selection_op", { op }),
+  suggestRegions: () => invoke<Suggestion[]>("suggest_regions"),
+  setSelection: (tris: number[]) => invoke<Selection>("set_selection", { tris }),
   previewRegion: (closure: Closure, action: RegionAction) => invoke<RegionPreview>("preview_region", { closure, action }),
   applyRegion: (closure: Closure, action: RegionAction) => invoke<Summary>("apply_region", { closure, action }),
   /** Selects (or with `add` false, deselects) the faces the same colour as preview triangle `seed`; with `base`, starting from that selection. */

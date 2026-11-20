@@ -33,7 +33,7 @@ pub use mesh::{MeshIssues, MeshOps, RepairReport};
 pub use project::{
     CloneReport, ColorOps, ColourMatch, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, OrientationPlan,
     PlateEditError, PlateGroup, Preview, PrintOps, Project, RefineFailure, RegionAction, RegionFailure, RegionPreview,
-    SeparateError, SplitError, SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
+    SeparateError, SplitError, SplitPiece, SplitPlan, SplitReport, Stats, SuggestionKind, IDENTITY,
 };
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use snapshot::SnapshotError;

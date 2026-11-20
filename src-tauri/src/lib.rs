@@ -74,6 +74,8 @@ pub fn run() {
             commands::propose_cuts,
             commands::select_region,
             commands::selection_op,
+            commands::suggest_regions,
+            commands::set_selection,
             commands::preview_region,
             commands::apply_region,
             commands::select_by_colour,

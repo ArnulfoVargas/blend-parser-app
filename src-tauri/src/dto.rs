@@ -1050,3 +1050,12 @@ pub struct Cloned {
     pub on_new_plate: usize,
     pub dropped: usize,
 }
+
+/// A region suggested from the painted selection: what it follows and its preview triangles.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestionDto {
+    pub kind: &'static str,
+    pub tris: Vec<u32>,
+    pub count: usize,
+}

@@ -869,6 +869,37 @@ pub async fn selection_op(app: AppHandle, op: String) -> CmdResult<dto::Selectio
     .await
 }
 
+/// Regions worth cutting out, read from the painted selection (see [`bp_core::Project::suggest_regions`]).
+#[tauri::command]
+pub async fn suggest_regions(app: AppHandle) -> CmdResult<Vec<dto::SuggestionDto>> {
+    with_doc(app, move |d, _| {
+        Ok(d.project
+            .suggest_regions(30.0)
+            .into_iter()
+            .map(|(kind, tris)| dto::SuggestionDto {
+                kind: match kind {
+                    bp_core::SuggestionKind::Edges => "edges",
+                    bp_core::SuggestionKind::Colour => "colour",
+                    bp_core::SuggestionKind::Piece => "piece",
+                },
+                count: tris.len(),
+                tris,
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Replaces the selection with these preview triangles (a suggestion taken).
+#[tauri::command]
+pub async fn set_selection(app: AppHandle, tris: Vec<u32>) -> CmdResult<dto::SelectionDto> {
+    with_doc(app, move |d, _| {
+        d.project.set_selection(&tris);
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
 fn closure(c: dto::ClosureDto) -> CmdResult<bp_core::region::Closure> {
     let (dto::ClosureDto::Shell { mm, .. } | dto::ClosureDto::Cap { mm }) = c;
     in_range(mm, CLOSURE_RANGE, "error.closureRange")?;

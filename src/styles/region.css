@@ -84,3 +84,12 @@
   .reg-foot { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) { .reg-controls * { transition: none; } }
+/* Whole regions read from a rough stroke; hovering one shows it in blue on the model. */
+.reg-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2xs) var(--space-xs); width: 100%; }
+.reg-suggest[hidden] { display: none; }
+.reg-suggest__label { font-size: var(--text-xs); font-weight: 600; color: var(--color-ink); }
+.reg-suggest__list { display: flex; flex-wrap: wrap; gap: var(--space-2xs); }
+.reg-suggestion { display: inline-flex; align-items: baseline; gap: var(--space-2xs); min-height: 28px; padding: 0 var(--space-sm); border: 1px solid rgb(30 144 255); border-radius: var(--radius-pill); background: color-mix(in oklab, rgb(30 144 255) 18%, var(--color-paper)); color: var(--color-ink); font: 500 var(--text-xs)/1 var(--font-body); cursor: pointer; }
+.reg-suggestion small { color: var(--color-muted); font-size: var(--text-xs); }
+.reg-suggestion:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+@media (hover: hover) { .reg-suggestion:hover { background: color-mix(in oklab, rgb(30 144 255) 32%, var(--color-paper)); } }

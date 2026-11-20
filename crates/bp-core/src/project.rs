@@ -26,7 +26,7 @@ mod plates;
 pub use plates::{CloneReport, PlateEditError, MAX_COPIES};
 
 mod selection;
-pub use selection::{ColourMatch, RefineFailure, RegionAction, RegionFailure, RegionPreview};
+pub use selection::{ColourMatch, RefineFailure, RegionAction, RegionFailure, RegionPreview, SuggestionKind};
 
 /// Colour settings, in final millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]
