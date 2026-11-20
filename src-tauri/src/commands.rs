@@ -488,6 +488,49 @@ pub async fn pick(app: AppHandle, origin: [f32; 3], dir: [f32; 3]) -> CmdResult<
         .await
 }
 
+/// The wall where the ray lands, as the thickness check reads it. `mm` is None
+/// with nothing across (an open surface).
+#[tauri::command]
+pub async fn measure_thickness(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    tolerance_mm: f32,
+) -> CmdResult<Option<dto::WallDto>> {
+    if !tolerance_mm.is_finite() || !(0.00001..=0.1).contains(&tolerance_mm) {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, _| {
+        Ok(d.project.wall_at(origin, dir, tolerance_mm).map(|(point, across, mm)| dto::WallDto { point, across, mm }))
+    })
+    .await
+}
+
+/// The working mesh's edges, each once, as one binary blob:
+/// `u32 vertices, u32 edges | f32 positions[3 * vertices] | u32 ends[2 * edges]`.
+#[tauri::command]
+pub async fn wire_mesh(app: AppHandle) -> CmdResult<Response> {
+    let bytes = with_doc(app, |d, _| {
+        let (positions, edges) = d.project.wire();
+        let mut out = Vec::with_capacity(8 + positions.len() * 12 + edges.len() * 8);
+        out.extend((positions.len() as u32).to_le_bytes());
+        out.extend((edges.len() as u32).to_le_bytes());
+        for p in &positions {
+            for v in p {
+                out.extend(v.to_le_bytes());
+            }
+        }
+        for e in &edges {
+            for v in e {
+                out.extend(v.to_le_bytes());
+            }
+        }
+        Ok(out)
+    })
+    .await?;
+    Ok(Response::new(bytes))
+}
+
 #[tauri::command]
 pub async fn paint(
     app: AppHandle,

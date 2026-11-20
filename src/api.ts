@@ -140,6 +140,8 @@ export interface Summary {
 }
 
 export interface Hit { point: Vec3; normal: Vec3 }
+/** A wall: where it was measured, the point across, and its thickness in mm (null with nothing across). */
+export interface Wall { point: Vec3; across: Vec3; mm: number | null }
 export interface PaintResult extends Hit { tris: number[] }
 
 /** The paintable mesh, decoded from the binary preview payload. */
@@ -217,6 +219,15 @@ export const api = {
   setFlush: (from: number | null, to: number | null, mm3: number | null) => invoke<Summary>("set_flush", { from, to, mm3 }),
   previewMesh: async () => decodePreview(await invoke<ArrayBuffer>("preview_mesh")),
   pick: (origin: Vec3, dir: Vec3) => invoke<Hit | null>("pick", { origin, dir }),
+  /** The wall where the ray lands, as the thickness check reads it; null off the model. */
+  measureThickness: (origin: Vec3, dir: Vec3, toleranceMm: number) => invoke<Wall | null>("measure_thickness", { origin, dir, toleranceMm }),
+  /** The mesh's edges, each once: positions (3 per vertex) and vertex pairs. */
+  wireMesh: async () => {
+    const buf = await invoke<ArrayBuffer>("wire_mesh");
+    const head = new DataView(buf, 0, 8);
+    const [vertices, edges] = [head.getUint32(0, true), head.getUint32(4, true)];
+    return { positions: new Float32Array(buf, 8, vertices * 3), ends: new Uint32Array(buf, 8 + vertices * 12, edges * 2) };
+  },
   paint: (origin: Vec3, dir: Vec3, radiusMm: number, slot: number) => invoke<PaintResult | null>("paint", { origin, dir, radiusMm, slot }),
   endStroke: () => invoke<Summary>("end_stroke"),
   undo: () => invoke<Summary>("undo"),

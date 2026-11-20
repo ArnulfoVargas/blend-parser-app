@@ -121,6 +121,20 @@ pub struct Report {
     pub size_mm: Vec3,
 }
 
+/// Into the solid from a face: against its outward normal.
+pub fn inward(c: &[Vec3; 3]) -> Vec3 {
+    geom::normalize(geom::cross(geom::sub(c[2], c[0]), geom::sub(c[1], c[0])))
+}
+
+/// The wall at `at`: how far, going `inward`, to the surface across. The ray
+/// starts twice `tolerance` in, so it does not hit the face it leaves. The
+/// thickness check and the measuring tool both read walls with this.
+pub fn wall_at(bvh: &Bvh, soup: &crate::bvh::TriSoup, at: Vec3, inward: Vec3, tolerance: f32) -> Option<f32> {
+    let offset = tolerance * 2.0;
+    let hit = bvh.raycast(soup, geom::add(at, geom::scale(inward, offset)), inward);
+    hit.map(|h| h.t + offset).filter(|v| v.is_finite() && *v > offset)
+}
+
 /// Flagged edges in final millimetres, up to [`MAX_EDGES`] of each kind.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -485,10 +499,7 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         let threshold = params.wall_mm.max(params.extrusion_mm * params.perimeters as f32);
         for c in soup.corners.iter().step_by(stride) {
             let at = center(c);
-            let inward = geom::normalize(geom::cross(geom::sub(c[2], c[0]), geom::sub(c[1], c[0])));
-            let offset = params.tolerance_mm * 2.0;
-            let hit = bvh.raycast(&soup, geom::add(at, geom::scale(inward, offset)), inward);
-            let mm = hit.map(|h| h.t + offset).filter(|v| v.is_finite() && *v > offset);
+            let mm = wall_at(&bvh, &soup, at, inward(c), params.tolerance_mm);
             if let Some(mm) = mm {
                 minimum = minimum.min(mm);
                 if mm < threshold {
