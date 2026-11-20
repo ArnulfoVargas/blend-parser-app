@@ -687,6 +687,7 @@ fn plate_edit_error(error: bp_core::PlateEditError) -> AppError {
         bp_core::PlateEditError::ObjectLimit => "error.plateObjectLimit",
         bp_core::PlateEditError::NoRoom => "error.noRoom",
         bp_core::PlateEditError::DoesNotFit => "error.plateArrangeOversize",
+        bp_core::PlateEditError::Count => "error.cloneCount",
     })
 }
 
@@ -739,10 +740,40 @@ pub async fn arrange_plates(app: AppHandle, gap_mm: f32) -> CmdResult<Summary> {
     .await
 }
 
+/// `count` copies of `object`: its plate is laid out again with them, what does
+/// not fit goes to one new plate and the rest are not made (the report says so).
+#[tauri::command]
+pub async fn clone_copies(
+    app: AppHandle,
+    object: u32,
+    count: u32,
+    label: String,
+    gap_mm: f32,
+) -> CmdResult<dto::Cloned> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    let label: String = label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, d.offset_mm);
+        let report = d
+            .project
+            .clone_copies(object, count as usize, &label, &room, d.printer.bed_mm().0)
+            .map_err(plate_edit_error)?;
+        Ok(dto::Cloned {
+            summary: dto::summary(d, prefs),
+            plate: report.plate,
+            on_plate: report.on_plate,
+            new_plate: report.new_plate,
+            on_new_plate: report.on_new_plate,
+            dropped: report.dropped,
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn clear_plate(app: AppHandle, plate: u32) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {
-        d.project.clear_plate(plate).map_err(plate_edit_error)?;
+        d.project.clear_plate(plate, d.printer.bed_mm().0).map_err(plate_edit_error)?;
         Ok(dto::summary(d, prefs))
     })
     .await

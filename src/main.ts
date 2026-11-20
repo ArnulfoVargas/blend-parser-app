@@ -36,6 +36,7 @@ import {
   type TurnResult,
   type Vec3,
   type WastePrefs,
+  type Cloned,
 } from "./api";
 import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, onLangChange, setLang, t, tKey, volume, type Key, type Lang } from "./i18n";
 import { menubar } from "./menubar";
@@ -201,6 +202,8 @@ const apply = (call: () => Promise<Summary | null>, done?: () => void) =>
 let measured: Vec3[] = [];
 
 const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
+  contextMenu: (at, object, plate) => openContextMenu(at, object, plate),
+  plateClick: (plate) => setActivePlate(plate),
   pick: (o, d) => api.pick(o, d),
   paint: async (o, d) => {
     if (!summary) return null;
@@ -1055,88 +1058,186 @@ $("#size-undo").addEventListener("click", () => void apply(() => api.undoSize())
 // ---- plate and tower --------------------------------------------------------------------
 
 const plateSvg = $<SVGSVGElement & HTMLElement>("#plate-view");
-const projectPlate = $<HTMLSelectElement>("#project-plate");
-const plateObject = $<HTMLSelectElement>("#plate-object");
-const plateDestination = $<HTMLSelectElement>("#plate-destination");
 let activePlate = 0;
 
 const plateName = (index: number) => t("plates.name", { n: nf(index + 1) });
-
-function setOptions(select: HTMLSelectElement, values: [number, string][], preferred = select.value) {
-  select.replaceChildren(...values.map(([id, label]) => new Option(label, String(id))));
-  if (values.some(([id]) => String(id) === preferred)) select.value = preferred;
-  select.disabled = values.length === 0;
+const plateCount = (s: Summary) => Math.max(1, s.plate.plates.length);
+/** Objects on each plate, by the parts they are made of. */
+function plateObjects(s: Summary): Map<number, number>[] {
+  const out = Array.from({ length: plateCount(s) }, () => new Map<number, number>());
+  s.parts.forEach((p) => out[p.plate]?.set(p.object, (out[p.plate].get(p.object) ?? 0) + 1));
+  return out;
 }
+const objectName = (s: Summary, object: number) => s.parts.find((p) => p.object === object)?.name ?? t("plates.unnamedObject", { n: nf(object + 1) });
 
-function renderPlateControls(s: Summary) {
-  const count = Math.max(1, s.plate.plates.length);
-  activePlate = Math.min(activePlate, count - 1);
-  const plates: [number, string][] = Array.from({ length: count }, (_, i) => [i, plateName(i)]);
-  setOptions(projectPlate, plates, String(activePlate));
-
-  const objects = new Map<number, string>();
-  for (const part of s.parts) {
-    if (part.plate === activePlate && !objects.has(part.object)) objects.set(part.object, part.name);
-  }
-  const options: [number, string][] = [...objects].map(([id, name], index) => [
-    id, name ? t("plates.namedObject", { n: nf(index + 1), name }) : t("plates.unnamedObject", { n: nf(index + 1) }),
-  ]);
-  setOptions(plateObject, options);
-  setOptions(plateDestination, plates.filter(([i]) => i !== activePlate));
-  $<HTMLButtonElement>("#plate-move").disabled = plateObject.disabled || plateDestination.disabled;
-  $<HTMLButtonElement>("#plate-clear").disabled = plateObject.disabled;
-  $<HTMLButtonElement>("#plate-clone").disabled = plateObject.disabled;
-  $<HTMLButtonElement>("#plate-arrange").disabled = s.parts.length === 0;
-}
-
-projectPlate.addEventListener("change", () => {
-  activePlate = Number(projectPlate.value);
+/** The plate the side panel shows and the view frames brighter. */
+function setActivePlate(plate: number) {
+  activePlate = plate;
+  viewer.setActivePlate(plate);
   if (summary) renderPlate(summary);
-});
-$("#plate-add").addEventListener("click", () => {
-  void apply(async () => {
-    const s = await api.addPlate();
-    activePlate = Math.max(0, s.plate.plates.length - 1);
-    return s;
-  });
-});
-$("#plate-move").addEventListener("click", () => {
-  const object = Number(plateObject.value);
-  const destination = Number(plateDestination.value);
-  void apply(async () => {
-    const s = await api.moveToPlate(object, destination);
-    activePlate = destination;
-    return s;
-  });
-});
-function readPlateGap(): number | null {
-  const input = $<HTMLInputElement>("#plate-arrange-gap");
-  const n = input.valueAsNumber;
-  const valid = n >= 0 && n <= 50;
-  input.setAttribute("aria-invalid", String(!valid));
-  if (valid) return n;
-  input.focus();
-  toast(t("error.splitGap", { min: nf(0), max: nf(50) }), "error");
-  return null;
+}
+function renderPlateControls(s: Summary) {
+  const count = plateCount(s);
+  activePlate = Math.min(activePlate, count - 1);
+  viewer.setActivePlate(activePlate);
+  bind("activePlate", count > 1 ? t("plates.active", { n: nf(activePlate + 1), of: nf(count) }) : plateName(0));
 }
 
-$("#plate-clone").addEventListener("click", () => {
-  const object = Number(plateObject.value);
-  const gap = $<HTMLInputElement>("#plate-arrange-clones").checked ? readPlateGap() : undefined;
-  if (gap === null) return;
-  void apply(() => api.cloneObject(object, t("plates.copy"), gap), () => viewer.frameAll());
-});
-$("#plate-arrange").addEventListener("click", () => {
-  const gap = readPlateGap();
-  if (gap === null) return;
-  void apply(() => api.arrangePlates(gap), () => viewer.frameAll());
-});
-$("#plate-clear").addEventListener("click", async () => {
-  const plate = activePlate;
-  if (await ask(t("plates.confirmClear", { plate: plateName(plate) }), { title: t("plates.clear"), kind: "warning" })) {
-    await apply(() => api.clearPlate(plate));
+// ---- right click on the view: clone, move between plates, make plates ---------------
+
+const ctxMenu = $<HTMLElement>("#ctx-menu");
+const ctxItems = [...ctxMenu.querySelectorAll<HTMLButtonElement>("[data-ctx]")];
+/** What the open menu acts on: an object (null on an empty spot) and a plate. */
+let ctxFor: { object: number | null; plate: number } | null = null;
+
+function openContextMenu(at: { x: number; y: number }, object: number | null, plate: number | null) {
+  const s = summary;
+  if (!s || app.dataset.state !== "ready") return;
+  const count = plateCount(s);
+  const on = plate ?? activePlate;
+  ctxFor = { object, plate: on };
+  if (on !== activePlate) setActivePlate(on);
+  viewer.highlightObject(object);
+  const objects = plateObjects(s);
+  const enable: Record<string, boolean> = {
+    clone: object !== null,
+    move: object !== null && count > 1,
+    moveNew: object !== null,
+    addPlate: true,
+    arrange: s.parts.length > 0,
+    clear: (objects[on]?.size ?? 0) > 0,
+  };
+  for (const item of ctxItems) {
+    const kind = item.dataset.ctx!;
+    item.disabled = !enable[kind];
+    item.hidden = object === null && (kind === "clone" || kind === "move" || kind === "moveNew");
+    item.title = kind === "move" && object !== null && count < 2 ? t("ctx.moveOnlyOne") : "";
+  }
+  ctxMenu.querySelector<HTMLElement>(".ctx__sep")!.hidden = object === null;
+  $("#ctx-title").textContent = object !== null ? `${objectName(s, object)} · ${plateName(on)}` : plateName(on);
+  ctxMenu.showPopover();
+  // Inside the window, beside the pointer.
+  const r = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = `${Math.max(4, Math.min(at.x, innerWidth - r.width - 4))}px`;
+  ctxMenu.style.top = `${Math.max(4, Math.min(at.y, innerHeight - r.height - 4))}px`;
+  ctxItems.find((i) => !i.disabled && !i.hidden)?.focus({ preventScroll: true });
+}
+function closeContextMenu(keepFor = false) {
+  if (ctxMenu.matches(":popover-open")) ctxMenu.hidePopover();
+  viewer.highlightObject(null);
+  if (!keepFor) ctxFor = null;
+}
+document.addEventListener("pointerdown", (e) => {
+  if (ctxMenu.matches(":popover-open") && !ctxMenu.contains(e.target as Node)) closeContextMenu();
+}, true);
+ctxMenu.addEventListener("keydown", (e) => {
+  const items = ctxItems.filter((i) => !i.disabled && !i.hidden);
+  const at = items.indexOf(document.activeElement as HTMLButtonElement);
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeContextMenu(); }
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    items[(at + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus({ preventScroll: true });
   }
 });
+window.addEventListener("blur", () => closeContextMenu());
+
+const ARRANGE_GAP_MM = 5;
+for (const item of ctxItems) item.addEventListener("click", () => {
+  const target = ctxFor;
+  closeContextMenu();
+  const s = summary;
+  if (!target || !s) return;
+  const { object, plate } = target;
+  switch (item.dataset.ctx) {
+    case "clone": if (object !== null) void cloneDialog(object); break;
+    case "move": if (object !== null) void moveDialog(object, plate); break;
+    case "moveNew":
+      if (object !== null) {
+        const fresh = plateCount(s);
+        void apply(() => api.moveToPlate(object, fresh), () => setActivePlate(fresh));
+      }
+      break;
+    case "addPlate": {
+      const fresh = plateCount(s);
+      void apply(() => api.addPlate(), () => {
+        setActivePlate(fresh);
+        toast(t("plates.added", { plate: plateName(fresh) }));
+      });
+      break;
+    }
+    case "arrange": void apply(() => api.arrangePlates(ARRANGE_GAP_MM), () => viewer.frameAll()); break;
+    case "clear":
+      void ask(t("plates.confirmClear", { plate: plateName(plate) }), { title: t("plates.clear"), kind: "warning" })
+        .then((ok) => { if (ok) void apply(() => api.clearPlate(plate)); });
+      break;
+  }
+});
+
+/** Opens a dialog and resolves with the button it was closed with. */
+function dialogResult(d: HTMLDialogElement): Promise<string> {
+  return new Promise((resolve) => {
+    d.addEventListener("close", () => resolve(d.returnValue), { once: true });
+    d.returnValue = "";
+    d.showModal();
+  });
+}
+
+async function cloneDialog(object: number) {
+  const s = summary;
+  if (!s) return;
+  const d = $<HTMLDialogElement>("#clone-dialog");
+  const count = $<HTMLInputElement>("#clone-count");
+  const gap = $<HTMLInputElement>("#clone-gap");
+  bind("cloneWhat", t("clone.what", { name: objectName(s, object), plate: plateName(s.parts.find((p) => p.object === object)?.plate ?? 0) }));
+  count.value = "1";
+  requestAnimationFrame(() => count.select());
+  if ((await dialogResult(d)) !== "ok") return;
+  const n = Math.round(count.valueAsNumber);
+  const g = gap.valueAsNumber;
+  if (!(n >= 1 && n <= 500)) return toast(t("error.cloneCount", { max: nf(500) }), "error");
+  if (!(g >= 0 && g <= 50)) return toast(t("error.splitGap", { min: nf(0), max: nf(50) }), "error");
+  let made: Cloned | null = null;
+  await apply(async () => {
+    made = await api.cloneCopies(object, n, t("plates.copy"), g);
+    return made.summary;
+  }, () => {
+    const r = made as Cloned | null;
+    if (!r) return;
+    viewer.frameAll();
+    const parts = [t("clone.onPlate", { count: r.onPlate, n: nf(r.onPlate), plate: plateName(r.plate) })];
+    if (r.newPlate !== null && r.onNewPlate) parts.push(t("clone.onNew", { count: r.onNewPlate, n: nf(r.onNewPlate), plate: plateName(r.newPlate) }));
+    if (r.dropped) {
+      toast(t("clone.dropped", { made: parts.join(t("clone.and")), count: r.dropped, n: nf(r.dropped) }), "error");
+    } else {
+      toast(t("clone.done", { made: parts.join(t("clone.and")) }));
+    }
+  });
+}
+
+async function moveDialog(object: number, from: number) {
+  const s = summary;
+  if (!s) return;
+  const d = $<HTMLDialogElement>("#move-dialog");
+  const box = $<HTMLFieldSetElement>("#move-plates");
+  const objects = plateObjects(s);
+  const count = plateCount(s);
+  bind("moveWhat", t("move.what", { name: objectName(s, object), plate: plateName(from) }));
+  box.querySelectorAll("label").forEach((l) => l.remove());
+  const choices = [...Array.from({ length: count }, (_, i) => i).filter((i) => i !== from), count];
+  choices.forEach((i, k) => {
+    const label = document.createElement("label");
+    label.className = "move-plate";
+    const input = Object.assign(document.createElement("input"), { type: "radio", name: "move-plate", value: String(i), checked: k === 0 });
+    const n = objects[i]?.size ?? 0;
+    const text = i === count ? t("move.newPlate") : `${plateName(i)} · ${t("move.objects", { count: n, n: nf(n) })}`;
+    label.append(input, Object.assign(document.createElement("span"), { textContent: text }));
+    box.append(label);
+  });
+  if ((await dialogResult(d)) !== "ok") return;
+  const to = Number(box.querySelector<HTMLInputElement>("input:checked")?.value ?? NaN);
+  if (!Number.isInteger(to)) return;
+  await apply(() => api.moveToPlate(object, to), () => setActivePlate(to));
+}
 
 function renderPlate(s: Summary) {
   renderPlateControls(s);

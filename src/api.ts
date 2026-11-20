@@ -13,6 +13,8 @@ export interface Repair {
   filledHoles: number; flippedTriangles: number; splitVertices: number; droppedPieces: number; finTriangles: number;
   hiddenPieces: number; hiddenTriangles: number;
 }
+/** What cloning made: how many copies went to the object's plate and to a new one, and how many did not fit. */
+export interface Cloned { summary: Summary; plate: number; onPlate: number; newPlate: number | null; onNewPlate: number; dropped: number }
 /** What each advanced repair finds on a mesh (see `bp_core::MeshIssues`). */
 export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number; hiddenPieces: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
@@ -291,6 +293,8 @@ export const api = {
   addPlate: () => invoke<Summary>("add_plate"),
   moveToPlate: (object: number, plate: number) => invoke<Summary>("move_to_plate", { object, plate }),
   cloneObject: (object: number, label: string, gapMm?: number) => invoke<Summary>("clone_object", { object, label, gapMm }),
+  /** `count` copies: the plate is laid out again; what does not fit goes to one new plate, the rest are not made. */
+  cloneCopies: (object: number, count: number, label: string, gapMm: number) => invoke<Cloned>("clone_copies", { object, count, label, gapMm }),
   arrangePlates: (gapMm: number) => invoke<Summary>("arrange_plates", { gapMm }),
   clearPlate: (plate: number) => invoke<Summary>("clear_plate", { plate }),
   suggestConnectors: (point: Vec3, normal: Vec3, selected: number[], connectors: Connectors) =>

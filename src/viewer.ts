@@ -50,6 +50,10 @@ export function sectionNormal(s: Section): Vec3 {
 }
 
 export interface BrushHandlers {
+  /** A right click (not a drag) on the view: the object under the pointer and the plate it is on, or the plate clicked. */
+  contextMenu?(at: { x: number; y: number }, object: number | null, plate: number | null): void;
+  /** A plate's number tag was clicked. */
+  plateClick?(plate: number): void;
   pick(origin: Vec3, dir: Vec3): Promise<Hit | null>;
   paint(origin: Vec3, dir: Vec3): Promise<PaintResult | null>;
   endStroke(): void;
@@ -210,6 +214,13 @@ export class Viewer {
   private settling = false;
   private bed = new THREE.Group();
   private bedPlate: { plate: Plate; scale: number } | null = null;
+  /** The plate the side panel shows and new things go to; drawn brighter, with its number. */
+  private activePlate = 0;
+  private plateTags: HTMLButtonElement[] = [];
+  private plateLayer: HTMLDivElement;
+  /** Each plate's rectangle on the view's floor, in preview units. */
+  private plateRects: { x0: number; y0: number; x1: number; y1: number; z: number }[] = [];
+  private rightDown: { x: number; y: number } | null = null;
   private showBed = false;
   private overlay: HTMLDivElement;
   private tapeLabel: HTMLDivElement;
@@ -451,6 +462,9 @@ export class Viewer {
     });
     this.placeLabel = Object.assign(document.createElement("div"), { className: "tape-label is-live", hidden: true });
     this.overlay.append(this.tapeLabel, this.wallLabel, this.heightLabel, this.placeLabel, ...this.sizeChips);
+    // Plate numbers sit over the view and can be clicked to make a plate the active one.
+    this.plateLayer = Object.assign(document.createElement("div"), { className: "plate-tags" });
+    this.overlay.after(this.plateLayer);
 
     // Shift changes the tape while the pointer rests, so listen to the key itself too.
     const onShift = (e: KeyboardEvent) => {
@@ -476,6 +490,19 @@ export class Viewer {
     canvas.addEventListener("pointerdown", (e) => this.grab(e), { capture: true });
     window.addEventListener("pointerup", (e) => this.onUp(e));
     canvas.addEventListener("pointercancel", () => this.cancelPlace());
+    // The right button still orbits or pans when dragged; a click opens the object's menu.
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+    canvas.addEventListener("pointerdown", (e) => {
+      this.rightDown = e.button === 2 ? { x: e.clientX, y: e.clientY } : null;
+    });
+    window.addEventListener("pointerup", (e) => {
+      const d = this.rightDown;
+      if (e.button !== 2 || !d) return;
+      this.rightDown = null;
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5 || !this.mesh || this.sectionLine.active) return;
+      const { object, plate } = this.pickObject(e.clientX, e.clientY);
+      this.handlers.contextMenu?.({ x: e.clientX, y: e.clientY }, object, plate);
+    });
     canvas.addEventListener("lostpointercapture", () => {
       if (this.moveDrag || this.turnDrag || this.planeDrag) this.cancelPlace();
     });
@@ -1785,23 +1812,64 @@ export class Viewer {
   private buildBed() {
     this.bed.clear();
     this.bed.position.set(0, 0, 0);
+    this.plateRects = [];
     const box = this.mesh?.geometry.boundingBox;
     const on = (this.showBed || this.tool === "move") && this.bedPlate !== null && box !== undefined && box !== null;
     this.bed.visible = on;
     this.plate.visible = !on && this.mesh !== null;
-    if (!on) return this.requestRender();
+    if (!on) {
+      this.syncPlateTags(0);
+      return this.requestRender();
+    }
     const { plate, scale } = this.bedPlate!;
     // Each plate's pieces have their centre on the plate's centre, as the 3MF places them.
-    const groups = plate.plates.length
-      ? plate.plates.filter((g) => g.objects > 0).map((g) => ({ check: g, c: new THREE.Vector3(...g.centre) }))
-      : [{ check: plate as Plate | Plate["plates"][number], c: box.getCenter(new THREE.Vector3()) }];
+    // An empty plate takes the place it keeps in the row, after the plate before it.
+    const checks: (Plate | Plate["plates"][number])[] = plate.plates.length ? plate.plates : [plate];
+    const bedW = (plate.area.x1 - plate.area.x0) / scale;
+    const occupied = checks.map((g) => !("objects" in g) || g.objects > 0);
+    const first = occupied.indexOf(true);
+    const span = (i: number) => Math.max(bedW, "sizeMm" in checks[i] ? (checks[i] as Plate["plates"][number]).sizeMm[0] / scale : 0);
+    const centreOf = (i: number) => ("centre" in checks[i] && checks[i].objects > 0 ? new THREE.Vector3(...(checks[i] as Plate["plates"][number]).centre) : box.getCenter(new THREE.Vector3()));
+    const centres: THREE.Vector3[] = new Array(checks.length);
+    if (first < 0) {
+      checks.forEach((_, i) => (centres[i] = box.getCenter(new THREE.Vector3()).setX(i * bedW * 1.2)));
+    } else {
+      centres[first] = centreOf(first);
+      for (let i = first + 1; i < checks.length; i++) {
+        const prev = centres[i - 1];
+        centres[i] = occupied[i] ? centreOf(i) : new THREE.Vector3(prev.x + span(i - 1) / 2 + bedW * 0.2 + bedW / 2, prev.y, prev.z);
+      }
+      for (let i = first - 1; i >= 0; i--) {
+        const next = centres[i + 1];
+        centres[i] = new THREE.Vector3(next.x - span(i + 1) / 2 - bedW * 0.2 - bedW / 2, next.y, next.z);
+      }
+    }
     const z = box.min.z - 0.02 / scale;
-    for (const { check, c } of groups) this.buildPlate(check, c, z, scale, plate.prefs.towerGapMm);
+    const active = Math.min(this.activePlate, checks.length - 1);
+    checks.forEach((check, i) => this.buildPlate(check, centres[i], z, scale, plate.prefs.towerGapMm, checks.length > 1 && i === active));
+    this.syncPlateTags(checks.length);
     this.requestRender();
   }
 
+  /** One numbered tag per plate, at its front left corner, when there is more than one. */
+  private syncPlateTags(count: number) {
+    const shown = count > 1 ? count : 0;
+    while (this.plateTags.length < shown) {
+      const i = this.plateTags.length;
+      const tag = Object.assign(document.createElement("button"), { type: "button", className: "plate-tag" });
+      tag.addEventListener("click", () => this.handlers.plateClick?.(i));
+      this.plateLayer.append(tag);
+      this.plateTags.push(tag);
+    }
+    this.plateTags.forEach((tag, i) => {
+      tag.hidden = i >= shown;
+      tag.textContent = String(i + 1);
+      tag.setAttribute("aria-pressed", String(i === this.activePlate));
+    });
+  }
+
   /** One plate under the pieces whose centre is `c`. */
-  private buildPlate(plate: Pick<Plate, "area" | "excluded" | "tower" | "model">, c: THREE.Vector3, z: number, scale: number, towerGap: number) {
+  private buildPlate(plate: Pick<Plate, "area" | "excluded" | "tower" | "model">, c: THREE.Vector3, z: number, scale: number, towerGap: number, active = false) {
     const mx = (plate.model.x0 + plate.model.x1) / 2;
     const my = (plate.model.y0 + plate.model.y1) / 2;
     const flat = (r: { x0: number; y0: number; x1: number; y1: number }, color: string, opacity: number, lift: number) => {
@@ -1821,7 +1889,27 @@ export class Viewer {
       edge.position.copy(mesh.position);
       this.bed.add(edge);
     };
-    flat(plate.area, "--color-paper-3", 0.9, 0);
+    const a = plate.area;
+    const ax = c.x + ((a.x0 + a.x1) / 2 - mx) / scale;
+    const ay = c.y + ((a.y0 + a.y1) / 2 - my) / scale;
+    const [hw, hd] = [(a.x1 - a.x0) / scale / 2, (a.y1 - a.y0) / scale / 2];
+    this.plateRects.push({ x0: ax - hw, y0: ay - hd, x1: ax + hw, y1: ay + hd, z });
+    flat(plate.area, active ? "--color-accent-soft" : "--color-paper-3", 0.9, 0);
+    if (active) {
+      // A thicker frame round the active plate, slightly outside its edge.
+      const r = 0.012 * Math.max(hw, hd);
+      const pts = [[-hw - r, -hd - r], [hw + r, -hd - r], [hw + r, hd + r], [-hw - r, hd + r], [-hw - r, -hd - r]]
+        .map(([x, y]) => new THREE.Vector3(ax + x, ay + y, z + 0.005 / scale));
+      for (let k = 0; k < 3; k++) {
+        const o = (k - 1) * r * 0.35;
+        const line = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(pts.map((p) => p.clone().add(new THREE.Vector3(Math.sign(p.x - ax) * o, Math.sign(p.y - ay) * o, 0)))),
+          new THREE.LineBasicMaterial({ color: cssColor("--color-accent-deep") }),
+        );
+        line.renderOrder = 2;
+        this.bed.add(line);
+      }
+    }
     plate.excluded.forEach((e) => flat(e, "--color-ink-2", 0.35, 0.01));
     if (plate.tower) {
       const g = towerGap;
@@ -1829,6 +1917,40 @@ export class Viewer {
       flat({ x0: t.x0 - g, y0: t.y0 - g, x1: t.x1 + g, y1: t.y1 + g }, "--color-warn", 0.25, 0.02);
       flat(t, "--color-warn", 0.85, 0.03);
     }
+  }
+
+  /** The object under a point of the window, and its plate; or with no object there, the plate under it. */
+  pickObject(clientX: number, clientY: number): { object: number | null; plate: number | null } {
+    const rect = this.canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    this.ray.setFromCamera(ndc, this.camera);
+    const hit = this.mesh ? this.ray.intersectObject(this.mesh, false).find((h) => this.kept(h.point)) : undefined;
+    const part = hit?.faceIndex != null ? this.cutParts.find((p) => hit.faceIndex! >= p.previewStart && hit.faceIndex! < p.previewEnd) : undefined;
+    if (part) return { object: part.object, plate: part.plate };
+    const z = this.plateRects[0]?.z ?? 0;
+    const floor = this.ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -z), new THREE.Vector3());
+    const plate = floor ? this.plateRects.findIndex((r) => floor.x >= r.x0 && floor.x <= r.x1 && floor.y >= r.y0 && floor.y <= r.y1) : -1;
+    return { object: null, plate: plate >= 0 ? plate : null };
+  }
+
+  /** Lights up the faces of `object` (while its menu is open, say); null puts the colours back. */
+  highlightObject(object: number | null) {
+    if (!this.data) return;
+    if (object === null) return this.setTriangleTint(null);
+    const accent = cssColor("--color-accent");
+    const rgb: Vec3 = [accent.r * 255, accent.g * 255, accent.b * 255].map(Math.round) as Vec3;
+    const tint: (Vec3 | null)[] = new Array(this.data.offsets.length - 1).fill(null);
+    for (const p of this.cutParts.filter((p) => p.object === object && p.previewEnd > p.previewStart)) {
+      for (let t = this.triangleOf(p.previewStart), end = this.triangleOf(p.previewEnd - 1); t <= end; t++) tint[t] = rgb;
+    }
+    this.setTriangleTint(tint, 0.45);
+  }
+
+  /** Which plate is the active one. */
+  setActivePlate(plate: number) {
+    if (plate === this.activePlate) return;
+    this.activePlate = plate;
+    this.buildBed();
   }
 
   /** The shown mesh's box in preview units, or null before a model is loaded. */
@@ -1887,6 +2009,14 @@ export class Viewer {
       el.hidden = at === null;
       if (at) el.style.transform = `translate(${at.x}px, ${at.y}px) translate(-50%, -50%)`;
     };
+    // Plate numbers at each plate's front left corner; hidden while that corner is off screen.
+    this.plateTags.forEach((tag, i) => {
+      const r = this.plateRects[i];
+      if (tag.hidden && !r) return;
+      const at = r ? screen(new THREE.Vector3(r.x0, r.y0, r.z)) : null;
+      const inside = at && at.x >= 0 && at.y >= 0 && at.x <= w && at.y <= h ? at : null;
+      if (r && this.plateRects.length > 1) put(tag, inside); else tag.hidden = true;
+    });
     const labelPoints = this.cutExtent && this.planeTool() && !this.sectionLine.active && !this.pickingPart
       ? [this.cutExtent.low, this.cutExtent.high].map((box) => box.isEmpty() ? null : screen(box.getCenter(new THREE.Vector3()))) : [null, null];
     if (labelPoints[0] && labelPoints[1] && Math.hypot(labelPoints[0].x - labelPoints[1].x, labelPoints[0].y - labelPoints[1].y) < 70) {

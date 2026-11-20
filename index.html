@@ -146,35 +146,7 @@
         <details class="group" id="plate-group">
           <summary><h2 data-i18n="plate.title">Placa y torre</h2><span class="group__sum" data-bind="plateSum"></span></summary>
           <div class="group__body">
-            <div class="field">
-              <label for="project-plate" data-i18n="plates.current">Placa</label>
-              <select class="select" id="project-plate"></select>
-            </div>
-            <div class="row-actions">
-              <button type="button" id="plate-add" class="btn btn--sm" data-i18n="plates.add">Añadir placa</button>
-              <button type="button" id="plate-clear" class="btn btn--quiet btn--sm" data-i18n="plates.clear">Vaciar placa</button>
-            </div>
-            <div class="field">
-              <label for="plate-object" data-i18n="plates.object">Objeto de la placa</label>
-              <select class="select" id="plate-object"></select>
-            </div>
-            <div class="field">
-              <label for="plate-destination" data-i18n="plates.destination">Placa de destino</label>
-              <select class="select" id="plate-destination"></select>
-            </div>
-            <div class="row-actions">
-              <button type="button" id="plate-move" class="btn btn--sm" data-i18n="plates.move">Mover objeto</button>
-              <button type="button" id="plate-clone" class="btn btn--sm" data-i18n="plates.clone">Clonar objeto</button>
-            </div>
-            <label class="check">
-              <input type="checkbox" id="plate-arrange-clones" checked>
-              <span data-i18n="plates.arrangeClones">Acomodar las placas al clonar</span>
-            </label>
-            <div class="field">
-              <label for="plate-arrange-gap" data-i18n="plates.gap">Separación entre objetos</label>
-              <div class="field__unit"><input class="input" id="plate-arrange-gap" type="number" min="0" max="50" step="0.5" value="5"><span>mm</span></div>
-            </div>
-            <button type="button" id="plate-arrange" class="btn btn--sm" data-i18n="plates.arrange">Acomodar todas las placas</button>
+            <p class="plates-active"><span class="plates-active__chip" data-bind="activePlate"></span><span class="help" data-i18n="plates.menuHelp">Clic derecho sobre un objeto en la vista para clonarlo o moverlo de placa.</span></p>
             <svg class="plate" id="plate-view" role="img" aria-labelledby="plate-desc" preserveAspectRatio="xMidYMid meet"></svg>
             <p class="visually-hidden" id="plate-desc" data-bind="plateDesc"></p>
             <ul class="plate__legend" aria-hidden="true">
@@ -726,6 +698,50 @@
       </section>
     </aside>
   </main>
+
+  <!-- Right click on the view: what can be done with the object under the pointer and its plate. -->
+  <div class="ctx" id="ctx-menu" role="menu" popover="manual" data-i18n-attr="aria-label:ctx.label">
+    <p class="ctx__title" id="ctx-title"></p>
+    <button class="ctx__item" type="button" role="menuitem" data-ctx="clone" data-i18n="ctx.clone">Clonar…</button>
+    <button class="ctx__item" type="button" role="menuitem" data-ctx="move" data-i18n="ctx.move">Mover a placa…</button>
+    <button class="ctx__item" type="button" role="menuitem" data-ctx="moveNew" data-i18n="ctx.moveNew">Mover a una placa nueva</button>
+    <hr class="ctx__sep">
+    <button class="ctx__item" type="button" role="menuitem" data-ctx="addPlate" data-i18n="ctx.addPlate">Crear placa de impresión</button>
+    <button class="ctx__item" type="button" role="menuitem" data-ctx="arrange" data-i18n="ctx.arrange">Acomodar todas las placas</button>
+    <button class="ctx__item ctx__item--danger" type="button" role="menuitem" data-ctx="clear" data-i18n="ctx.clear">Vaciar esta placa</button>
+  </div>
+
+  <dialog class="dialog" id="clone-dialog" aria-labelledby="h-clone">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-clone" data-i18n="clone.title">Clonar objeto</h2>
+      <p class="help" data-bind="cloneWhat"></p>
+      <div class="field">
+        <label for="clone-count" data-i18n="clone.count">Número de copias</label>
+        <input class="input" id="clone-count" type="number" inputmode="numeric" min="1" max="500" step="1" value="1" aria-describedby="clone-help">
+      </div>
+      <div class="field">
+        <label for="clone-gap" data-i18n="plates.gap">Separación entre objetos</label>
+        <div class="field__unit"><input class="input" id="clone-gap" type="number" inputmode="decimal" min="0" max="50" step="0.5" value="5"><span>mm</span></div>
+      </div>
+      <p class="help" id="clone-help" data-i18n="clone.help">Las copias se acomodan en la placa del objeto. Las que no quepan van a una placa nueva; si tampoco caben ahí, no se crean y se te avisa.</p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="submit" value="ok" data-i18n="clone.ok">Clonar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="move-dialog" aria-labelledby="h-move">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-move" data-i18n="move.title">Mover a placa</h2>
+      <p class="help" data-bind="moveWhat"></p>
+      <fieldset class="move-plates" id="move-plates"><legend class="visually-hidden" data-i18n="move.title">Mover a placa</legend></fieldset>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="submit" value="ok" data-i18n="move.ok">Mover</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog class="dialog" id="prefs-dialog" aria-labelledby="h-prefs">
     <form method="dialog" class="dialog__body">

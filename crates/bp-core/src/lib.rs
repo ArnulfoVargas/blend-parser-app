@@ -31,9 +31,9 @@ pub mod waste;
 pub use kit::Kit;
 pub use mesh::{MeshIssues, MeshOps, RepairReport};
 pub use project::{
-    ColorOps, ColourMatch, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, OrientationPlan, PlateEditError,
-    PlateGroup, Preview, PrintOps, Project, RefineFailure, RegionAction, RegionFailure, RegionPreview, SeparateError,
-    SplitError, SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
+    CloneReport, ColorOps, ColourMatch, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, OrientationPlan,
+    PlateEditError, PlateGroup, Preview, PrintOps, Project, RefineFailure, RegionAction, RegionFailure, RegionPreview,
+    SeparateError, SplitError, SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
 };
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use snapshot::SnapshotError;

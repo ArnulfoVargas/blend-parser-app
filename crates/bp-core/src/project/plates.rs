@@ -13,6 +13,24 @@ pub enum PlateEditError {
     ObjectLimit,
     NoRoom,
     DoesNotFit,
+    /// Copies are asked for one at least, and not more than [`MAX_COPIES`].
+    Count,
+}
+
+/// The most copies one clone may ask for.
+pub const MAX_COPIES: usize = 500;
+
+/// Where [`Project::clone_copies`] put the copies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CloneReport {
+    /// The plate the object is on, and how many copies went there.
+    pub plate: u32,
+    pub on_plate: usize,
+    /// The plate made for the copies that did not fit, and how many went there.
+    pub new_plate: Option<u32>,
+    pub on_new_plate: usize,
+    /// Copies that fit neither plate and were not made.
+    pub dropped: usize,
 }
 
 impl Project {
@@ -24,8 +42,11 @@ impl Project {
     }
 
     /// Moves every component of the object together, beside the destination's contents.
+    /// `plate` one past the last makes a new plate for it.
     pub fn move_to_plate(&mut self, object: u32, plate: u32, bed_width_mm: f32) -> Result<(), PlateEditError> {
-        self.check_plate(plate)?;
+        if plate as usize != self.plate_count() {
+            self.check_plate(plate)?;
+        }
         let part = self.scene.parts.iter().find(|p| p.object == object).ok_or(PlateEditError::Object)?;
         if part.plate == plate {
             return Ok(());
@@ -37,14 +58,114 @@ impl Project {
     }
 
     /// Deletes every object on the plate, keeping the plate itself.
-    pub fn clear_plate(&mut self, plate: u32) -> Result<(), PlateEditError> {
+    pub fn clear_plate(&mut self, plate: u32, bed_width_mm: f32) -> Result<(), PlateEditError> {
         self.check_plate(plate)?;
         if self.scene.parts.iter().any(|p| p.plate == plate) {
             let mut parts = self.layout_parts();
             parts.retain(|(part, _)| part.plate != plate);
+            // The emptied plate keeps its place in the view.
+            self.space_plates(&mut parts, bed_width_mm);
             self.commit_layout(parts, "clearPlate");
         }
         Ok(())
+    }
+
+    /// Makes `count` copies of `object` (all its components and painting) and
+    /// lays its plate out again with them. Copies that do not fit go to one
+    /// new plate, never more: what fits neither is not made, and the report
+    /// says how many. One undoable step.
+    pub fn clone_copies(
+        &mut self,
+        object: u32,
+        count: usize,
+        label: &str,
+        room: &Room,
+        bed_width_mm: f32,
+    ) -> Result<CloneReport, PlateEditError> {
+        if count == 0 || count > MAX_COPIES {
+            return Err(PlateEditError::Count);
+        }
+        if !room.valid() {
+            return Err(PlateEditError::NoRoom);
+        }
+        let mut parts = self.layout_parts();
+        let plate = parts.iter().find(|(p, _)| p.object == object).ok_or(PlateEditError::Object)?.0.plate;
+        let first = parts
+            .iter()
+            .map(|(p, _)| p.object)
+            .max()
+            .and_then(|id| id.checked_add(1))
+            .filter(|id| id.checked_add(count as u32).is_some())
+            .ok_or(PlateEditError::ObjectLimit)?;
+        let originals: Vec<(Part, usize)> = parts.iter().filter(|(p, _)| p.object == object).cloned().collect();
+        for k in 0..count as u32 {
+            for (p, i) in &originals {
+                let name = format!("{} · {label} {}", p.name, k + 1);
+                parts.push((Part { object: first + k, name, ..p.clone() }, *i));
+            }
+        }
+        // What the plate holds: its objects as they were, then the copies.
+        let unit = self.stretch.map(|axis| axis * self.scale);
+        let mut boxes = BTreeMap::<u32, (Vec3, Vec3)>::new();
+        for (part, _) in parts.iter().filter(|(p, _)| p.plate == plate) {
+            for vertex in &part.positions {
+                let p = std::array::from_fn(|i| vertex[i] * unit[i]);
+                let (lo, hi) = boxes.entry(part.object).or_insert((p, p));
+                for i in 0..3 {
+                    lo[i] = lo[i].min(p[i]);
+                    hi[i] = hi[i].max(p[i]);
+                }
+            }
+        }
+        let footprints: Vec<_> = boxes.values().map(|&(lo, hi)| [hi[0] - lo[0], hi[1] - lo[1]]).collect();
+        let spots = fit::pack(&footprints, room);
+        let new_plate = self.plate_count() as u32;
+        let mut report = CloneReport { plate, new_plate: None, ..Default::default() };
+        let mut placements = BTreeMap::new();
+        let mut dropped = std::collections::HashSet::new();
+        for ((id, (lo, hi)), spot) in boxes.into_iter().zip(spots) {
+            let size = geom::sub(hi, lo);
+            let copy = id >= first;
+            let spot = match spot.filter(|_| size[2] <= room.height_mm + 1e-3) {
+                Some(s) => s,
+                None => return Err(PlateEditError::DoesNotFit),
+            };
+            let target = match spot.plate {
+                0 => plate,
+                1 => new_plate,
+                // Never more than one new plate: the rest of the copies are not made.
+                _ if copy => {
+                    dropped.insert(id);
+                    continue;
+                }
+                _ => return Err(PlateEditError::DoesNotFit),
+            };
+            if copy {
+                if target == plate {
+                    report.on_plate += 1;
+                } else {
+                    report.on_new_plate += 1;
+                }
+            }
+            if target == new_plate {
+                report.new_plate = Some(new_plate);
+            }
+            placements.insert(id, (lo, size, spot, target));
+        }
+        report.dropped = dropped.len();
+        parts.retain(|(p, _)| !dropped.contains(&p.object));
+        for (part, _) in parts.iter_mut() {
+            let Some(&(origin, size, spot, target)) = placements.get(&part.object) else { continue };
+            part.plate = target;
+            for p in &mut part.positions {
+                let [x, y, z]: Vec3 = std::array::from_fn(|i| p[i] * unit[i] - origin[i]);
+                let [x, y] = if spot.turned { [size[1] - y, x] } else { [x, y] };
+                *p = [(x + spot.at[0]) / unit[0], (y + spot.at[1]) / unit[1], z / unit[2]];
+            }
+        }
+        self.space_plates(&mut parts, bed_width_mm);
+        self.commit_layout(parts, "cloneObject");
+        Ok(report)
     }
 
     /// Copies a whole object, including its components and brush painting.
@@ -193,7 +314,13 @@ impl Project {
         }
         let bed = bed_width_mm / (self.scale * self.stretch[0]);
         let mut left = 0.0;
-        for (lo, hi) in columns.values_mut() {
+        // Every plate has its column, an empty one too, so they stay in order in the view.
+        let last = columns.keys().next_back().map_or(0, |&p| p as usize + 1).max(self.plate_count());
+        for plate in 0..last as u32 {
+            let Some((lo, hi)) = columns.get_mut(&plate) else {
+                left += bed * 1.2;
+                continue;
+            };
             let span = (*hi - *lo).max(bed);
             *lo = left + (span - (*hi - *lo)) / 2.0 - *lo;
             left += span + bed * 0.2;

@@ -23,7 +23,8 @@ use std::collections::HashMap;
 
 mod bake;
 mod plates;
-pub use plates::PlateEditError;
+pub use plates::{CloneReport, PlateEditError, MAX_COPIES};
+
 mod selection;
 pub use selection::{ColourMatch, RefineFailure, RegionAction, RegionFailure, RegionPreview};
 
@@ -3878,6 +3879,28 @@ mod tests {
     }
 
     #[test]
+    fn clone_copies_fill_the_plate_spill_to_one_new_plate_and_drop_the_rest() {
+        // 25 × 25 mm footprints, 5 mm apart, on a 120 × 120 mm room: 4 × 4 = 16 per plate.
+        let room = fit::Room { area_mm: [120.0, 120.0], height_mm: 150.0, gap_mm: 5.0 };
+        let mut p = Project::new(bar([25.0, 25.0, 10.0]), 2);
+        let report = p.clone_copies(0, 20, "copy", &room, 256.0).unwrap();
+        // The original plus 15 copies fill the plate; 5 go to a new one.
+        assert_eq!((report.on_plate, report.on_new_plate, report.dropped), (15, 5, 0));
+        assert_eq!(report.new_plate, Some(1));
+        assert_eq!(p.object_count(), 21);
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [16, 5]);
+        assert!(p.plate_groups().iter().all(|g| g.size_mm[0] <= 120.0 + 1e-2 && g.size_mm[1] <= 120.0 + 1e-2));
+        assert!(p.undo());
+        assert_eq!(p.object_count(), 1);
+        assert_eq!(p.plate_count(), 1);
+        // Too many for two plates: one full, one more, and the rest are not made.
+        let report = p.clone_copies(0, 40, "copy", &room, 256.0).unwrap();
+        assert_eq!((report.on_plate, report.on_new_plate, report.dropped), (15, 16, 9));
+        assert_eq!(p.plate_count(), 2);
+        assert_eq!(p.clone_copies(0, 0, "copy", &room, 256.0), Err(PlateEditError::Count));
+    }
+
+    #[test]
     fn moving_and_emptying_a_plate_preserve_objects_and_undo() {
         let mut source = bar([25.0, 20.0, 30.0]);
         let mut component = source.parts[0].clone();
@@ -3894,7 +3917,7 @@ mod tests {
         p.move_to_plate(0, 1, 120.0).unwrap();
         assert!(p.export_parts().iter().all(|part| part.plate == 1));
         assert!(brush_area(&p, target) > 0.0);
-        p.clear_plate(1).unwrap();
+        p.clear_plate(1, 256.0).unwrap();
         assert_eq!(p.object_count(), 0);
         assert_eq!(p.plate_count(), 2);
         assert!(p.preview().positions.is_empty());

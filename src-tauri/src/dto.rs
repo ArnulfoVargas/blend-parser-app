@@ -1038,3 +1038,15 @@ impl From<ColourMatchDto> for bp_core::ColourMatch {
         }
     }
 }
+
+/// What cloning made, beside the new summary.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cloned {
+    pub summary: Summary,
+    pub plate: u32,
+    pub on_plate: usize,
+    pub new_plate: Option<u32>,
+    pub on_new_plate: usize,
+    pub dropped: usize,
+}
