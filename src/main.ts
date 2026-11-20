@@ -33,7 +33,7 @@ import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
-import { setupPrintability } from "./printability";
+import { setupPrintability, wallTarget } from "./printability";
 import { Viewer, type Analysis, type AnalysisData, type Axis, type Section, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
@@ -481,10 +481,11 @@ function render(s: Summary) {
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
   bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
   // The mesh tab says when something there changes the model.
-  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || REPAIRS.some((op) => st[op]));
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || st.thickenMm > 0 || REPAIRS.some((op) => st[op]));
   renderRepairs(s);
   syncSmoothForm(s);
   syncHollowForm(s);
+  renderThicken(s);
   void refreshIssues();
   void refreshPlan();
   bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
@@ -1423,6 +1424,52 @@ $("#smooth-apply").addEventListener("click", async () => {
   if (summary.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("smooth.title"), kind: "warning" }))) return;
   await apply(() => api.smoothMesh(want.subdivide, want.smooth, want.crease, want.cap), () => toast(t("smooth.done"), "ok", { label: t("stage.undo"), run: () => void undo() }));
 });
+
+// ---- thickening thin details ----------------------------------------------------------
+
+const thickenMm = $<HTMLInputElement>("#thicken-mm");
+/** Typed by the user; until then the field follows what printability asks of a wall. */
+let thickenTyped = false;
+thickenMm.addEventListener("input", () => (thickenTyped = true));
+/** What printability asks of a wall, from its parameters as the panel has them. */
+function paramWallTarget(): number {
+  const v = (id: string, d: number) => Number(document.querySelector<HTMLInputElement>(`#pa-${id}`)?.value) || d;
+  const nozzle = summary?.settings.nozzleMm ?? 0.4;
+  return wallTarget({ wallMm: v("wallMm", nozzle * 2.2), extrusionMm: v("extrusionMm", nozzle * 1.1), perimeters: v("perimeters", 2) } as Parameters<typeof wallTarget>[0]);
+}
+function readThicken(): number | null {
+  const v = Number(thickenMm.value);
+  const ok = thickenMm.value.trim() !== "" && v >= 0.1 && v <= 10;
+  thickenMm.setAttribute("aria-invalid", String(!ok));
+  return ok ? v : null;
+}
+/** How far thickening went and over how much surface. */
+function renderThicken(s: Summary | null) {
+  const st = s?.settings;
+  if (document.activeElement !== thickenMm && (st?.thickenMm || !thickenTyped)) thickenMm.value = String(st?.thickenMm || paramWallTarget());
+  const r = s?.thicken;
+  bind("thickenResult", !st?.thickenMm || !r ? "" : r.movedVertices
+    ? t("thicken.result", { area: nf(r.areaMm2 / 100, 2), mm: nf(r.maxOffsetMm, 2), count: r.movedVertices, n: nf(r.movedVertices) })
+    : t("thicken.nothing", { mm: mm(st.thickenMm) }));
+  bind("thickenSum", st?.thickenMm ? t("thicken.sum", { mm: mm(st.thickenMm) }) : "");
+  const want = readThicken();
+  $<HTMLButtonElement>("#thicken-apply").disabled = !s || want === null || want === st?.thickenMm;
+  $<HTMLButtonElement>("#thicken-off").disabled = !st?.thickenMm;
+}
+$("#thicken-group").addEventListener("input", () => renderThicken(summary));
+async function thickenTo(v: number) {
+  if (!summary) return;
+  await apply(() => api.fixMesh({ thickenMm: v }), () => {
+    if (v > 0) toast(t("thicken.done"), "ok", { label: t("stage.undo"), run: () => void undo() });
+  });
+}
+$("#thicken-apply").addEventListener("click", () => {
+  const v = readThicken();
+  if (v !== null) void thickenTo(v);
+});
+$("#thicken-off").addEventListener("click", () => void thickenTo(0));
+// The thin zones as the thickness view paints them: what thickening would change.
+$("#thicken-show").addEventListener("click", () => void showAnalysis("thickness"));
 
 // ---- hollowing -------------------------------------------------------------------------
 

@@ -277,6 +277,22 @@
             </div>
           </div>
         </details>
+        <details class="group" id="thicken-group">
+          <summary><h2 data-i18n="thicken.title">Engrosar</h2><span class="group__sum" data-bind="thickenSum"></span></summary>
+          <div class="group__body">
+            <div class="field">
+              <label for="thicken-mm" data-i18n="thicken.min">Grosor mínimo</label>
+              <div class="field__unit"><input class="input" id="thicken-mm" type="number" inputmode="decimal" min="0.1" max="10" step="0.05" aria-describedby="thicken-help"><span>mm</span></div>
+              <p class="help" id="thicken-help" data-i18n="thicken.help">Empuja hacia fuera, por su normal, solo las paredes y detalles más finos que esto (dedos, orejas, antenas). Lo demás no se mueve.</p>
+            </div>
+            <p class="help thicken__result" data-bind="thickenResult" aria-live="polite"></p>
+            <div class="row-actions">
+              <button class="btn btn--primary btn--sm" type="button" id="thicken-apply" data-i18n="thicken.apply" disabled>Engrosar</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="thicken-show" data-i18n="thicken.show">Ver zonas finas</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="thicken-off" data-i18n="thicken.off" disabled>Quitar</button>
+            </div>
+          </div>
+        </details>
         <details class="group" id="hollow-group">
           <summary><h2 data-i18n="hollow.title">Vaciar</h2><span class="group__sum" data-bind="hollowSum"></span></summary>
           <div class="group__body">

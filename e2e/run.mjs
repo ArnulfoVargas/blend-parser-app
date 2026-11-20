@@ -18,6 +18,8 @@ const MODEL = process.env.BP_MODEL ?? path.join(HERE, "e2e/fixtures/out/figure.b
 const HEAD = path.join(HERE, "e2e/fixtures/out/head.blend");
 /** A closed cylinder, 44 × 45 mm (`fixtures/simple.py`). */
 const CYLINDER = path.join(HERE, "e2e/fixtures/out/cylinder.blend");
+/** A 20 mm block with a 0.5 mm fin and a 0.6 mm pin on it (`fixtures/simple.py`). */
+const THIN = path.join(HERE, "e2e/fixtures/out/thin.blend");
 /** The `3D/Objects/*.model` files of a 3MF, as text. */
 function objectModels(file) {
   const buf = readFileSync(file);
@@ -482,6 +484,45 @@ const scenarios = {
     check("hollow", "Rellenar gives the solid back", await b.execute(() => document.querySelector("[data-bind=hollowResult]").textContent === ""));
   },
 
+  // Engrosar from the thin-walls card: the fin and the pin reach the minimum, the block does not move.
+  async thicken(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#thicken-apply"))) return check("thicken", "thicken section", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    // The block's points (under the fin and pin), to see that they stay where they are.
+    const block = () => b.executeAsync((done) => window.__TAURI_INTERNALS__.invoke("preview_mesh", {}).then((buf) => {
+      const leaves = new DataView(buf, 0, 8).getUint32(0, true);
+      const p = new Float32Array(buf, 8, leaves * 9);
+      const out = new Set();
+      for (let i = 0; i < p.length; i += 3) if (p[i + 2] < 19) out.add(`${p[i].toFixed(4)},${p[i + 1].toFixed(4)},${p[i + 2].toFixed(4)}`);
+      done([...out].sort().join(";"));
+    }));
+    const before = await block();
+    await click(b, "#thicken-show");
+    await b.waitUntil(async () => (await b.execute(() => document.querySelector("button[data-analysis][aria-pressed=true]")?.dataset.analysis)) === "thickness", { timeout: 120000, interval: 200 }).catch(() => {});
+    check("thicken", "Ver zonas finas shows them in the thickness view", await b.execute(() => document.querySelector("button[data-analysis][aria-pressed=true]")?.dataset.analysis === "thickness"));
+    await shot(b, "23-thicken-before");
+    const button = await b.execute(() => {
+      const card = [...document.querySelectorAll(".pa-check")].find((c) => /Espesor de pared/.test(c.textContent));
+      const btn = card?.querySelector('[data-fix="thicken"]');
+      return btn ? btn.textContent : null;
+    });
+    check("thicken", "the thin-walls card offers Engrosar", button === "Engrosar", button ?? "no button");
+    await b.execute(() => document.querySelector('.pa-check [data-fix="thicken"]')?.click());
+    await b.waitUntil(async () => (await b.execute(() => [...document.querySelectorAll(".pa-check")].some((c) => /Espesor de pared/.test(c.textContent) && c.dataset.severity === "fixed"))), { timeout: 120000, interval: 300 }).catch(() => {});
+    const card = await b.execute(() => [...document.querySelectorAll(".pa-check")].find((c) => /Espesor de pared/.test(c.textContent))?.dataset.severity ?? "gone");
+    check("thicken", "printability no longer flags thin walls", card === "fixed" || card === "gone", card);
+    const result = await text(b, "[data-bind=thickenResult]");
+    check("thicken", "says how much it moved and where", /Engrosó [\d,]+ cm² .*hasta [\d,]+ mm hacia fuera/.test(result ?? ""), result ?? "");
+    check("thicken", "the block does not move at all", (await block()) === before);
+    const issues = (await invoke(b, "mesh_issues")).v;
+    check("thicken", "the mesh stays closed", issues?.after.openEdges === 0, JSON.stringify(issues?.after));
+    await shot(b, "24-thicken-after");
+    await click(b, "#thicken-off");
+    await settle(b);
+    check("thicken", "Quitar puts the details back", (await b.execute(() => document.querySelector("[data-bind=thickenResult]").textContent)) === "");
+  },
+
   async english(b) {
     await waitState(b, "ready");
     const missing = await b.execute(() => [...document.querySelectorAll("[data-i18n]")].filter((el) => el.offsetParent && !el.textContent.trim()).map((el) => el.dataset.i18n));
@@ -491,7 +532,7 @@ const scenarios = {
 };
 
 const plan = [
-  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["simplify", {}], ["smooth", { model: CYLINDER }], ["smoothPaint", {}], ["hollow", { model: CYLINDER }], ["english", { lang: "en" }],
+  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["simplify", {}], ["smooth", { model: CYLINDER }], ["smoothPaint", {}], ["hollow", { model: CYLINDER }], ["thicken", { model: THIN }], ["english", { lang: "en" }],
 ];
 
 const metrics = {};

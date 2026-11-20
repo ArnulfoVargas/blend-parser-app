@@ -149,6 +149,18 @@ pub struct MeshOps {
     /// Drain holes through the base into the cavity, and their diameter in final millimetres.
     pub drains: u8,
     pub drain_mm: f32,
+    /// Walls and details thinner than this (final millimetres) are pushed out
+    /// along their normals until they reach it; 0 leaves them.
+    pub thicken_mm: f32,
+}
+
+/// What thickening moved, in source units.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ThickenReport {
+    pub moved_vertices: usize,
+    /// Furthest a vertex went out, and the area of the faces that moved.
+    pub max_offset: f32,
+    pub area: f32,
 }
 
 /// Drain holes the panel offers at most.
@@ -193,6 +205,7 @@ impl Default for MeshOps {
             hollow_mm: 0.0,
             drains: 0,
             drain_mm: 3.0,
+            thicken_mm: 0.0,
         }
     }
 }
@@ -221,6 +234,8 @@ pub struct Mesh {
     pub deviation: f32,
     /// What hollowing did, when it was asked for.
     pub hollow: Option<HollowReport>,
+    /// What thickening moved, when it was asked for.
+    pub thicken: Option<ThickenReport>,
 }
 
 /// The filament slot of each triangle of each part, for [`Mesh::build_with`]
@@ -239,7 +254,7 @@ impl Mesh {
                 origin: Some((0..p.tris.len() as u32).map(|i| (i, ROOT)).collect()),
             })
             .collect();
-        Self { parts, repair: RepairReport::default(), deviation: 0.0, hollow: None }
+        Self { parts, repair: RepairReport::default(), deviation: 0.0, hollow: None, thicken: None }
     }
 
     /// Builds the working mesh. Returns the shape before flattening (used to look
@@ -256,7 +271,7 @@ impl Mesh {
         // Holes, winding and fans are read from shared vertices: on an unwelded
         // mesh every seam would look like a hole. Reverting the cleanup alone
         // must not leave them working on loose triangles.
-        let rounds = ops.subdivide > 0 || ops.smooth > 0;
+        let rounds = ops.subdivide > 0 || ops.smooth > 0 || ops.thicken_mm > 0.0;
         if ops.repair || ops.deep_clean || ops.fill_holes || ops.orient || ops.split_vertices || rounds {
             shape.repair_all();
         }
@@ -284,7 +299,7 @@ impl Mesh {
             shape.simplify_with(ops.keep_ratio, locks.as_deref(), ops.protect_detail);
             shape.deviation = before.deviation_to(&shape);
         }
-        if rounds {
+        if ops.subdivide > 0 || ops.smooth > 0 {
             shape.round_off(ops, &labels(&shape));
         }
         if ops.flatten_mm > 0.0 {
@@ -297,6 +312,10 @@ impl Mesh {
         // Only the final shape moves: colours are still looked up where pieces were.
         if ops.drop_floating {
             work.drop_floating(1e-4 / scale);
+        }
+        // Only the final shape moves here too: a thickened detail keeps the colour it had.
+        if ops.thicken_mm > 0.0 {
+            work.thicken = Some(work.thicken(ops.thicken_mm / scale));
         }
         // Flattening squashes the walls under the cut into lines, and holes,
         // simplifying and the cut leave slivers after the clean-up ran.
@@ -423,6 +442,107 @@ impl Mesh {
         work.repair.degenerate_triangles = 0;
         report.volume = work.volume();
         work.hollow = Some(report);
+    }
+
+    /// Pushes out what is thinner than `min` (source units). Each face is
+    /// measured as printability measures it: from its centre, inward along its
+    /// normal, to the surface across. A face short of `min` moves out along its
+    /// own normal by half the shortfall (the face across does the same): each
+    /// corner takes the area-weighted average of what its short faces ask, so a
+    /// thin plate grows through its thin sides only and a pin grows round.
+    /// Neighbours of moved vertices follow by half, so no step is left. A few
+    /// rounds, since moving one side changes what the other measures. Faces
+    /// thick enough, and what is around them, stay where they are.
+    pub fn thicken(&mut self, min: f32) -> ThickenReport {
+        use rayon::prelude::*;
+        let original: Vec<Vec<Vec3>> = self.parts.iter().map(|p| p.positions.clone()).collect();
+        for _ in 0..6 {
+            let soup = self.soup();
+            if soup.is_empty() {
+                break;
+            }
+            let tree = crate::bvh::Bvh::build(&soup);
+            let mut any = false;
+            for part in &mut self.parts {
+                let start = min * 1e-3;
+                // What each face asks: out along its normal by half its shortfall, and its area.
+                let ask: Vec<(Vec3, f32)> = (0..part.tris.len())
+                    .into_par_iter()
+                    .map(|t| {
+                        let c = part.corners(t);
+                        let cross = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+                        let area = geom::len(cross) * 0.5;
+                        if area == 0.0 {
+                            return ([0.0; 3], 0.0);
+                        }
+                        let n = geom::scale(cross, 0.5 / area);
+                        let inward = geom::scale(n, -1.0);
+                        let at = geom::add(geom::at(&c, [1.0 / 3.0; 3]), geom::scale(inward, start));
+                        match tree.raycast(&soup, at, inward) {
+                            Some(h) if h.t + start < min => (geom::scale(n, (min - h.t - start) * 0.5), area),
+                            _ => ([0.0; 3], 0.0),
+                        }
+                    })
+                    .collect();
+                let mut sum = vec![([0.0f32; 3], 0.0f32); part.positions.len()];
+                for (t, &(d, w)) in ask.iter().enumerate() {
+                    if w == 0.0 {
+                        continue;
+                    }
+                    for &v in &part.tris[t] {
+                        let s = &mut sum[v as usize];
+                        *s = (geom::add(s.0, geom::scale(d, w)), s.1 + w);
+                    }
+                }
+                let push: Vec<Vec3> =
+                    sum.iter().map(|&(d, w)| if w > 0.0 { geom::scale(d, 1.0 / w) } else { [0.0; 3] }).collect();
+                if push.iter().all(|d| *d == [0.0; 3]) {
+                    continue;
+                }
+                any = true;
+                // Blend: a vertex beside a pushed one goes half as far, so the change has no step.
+                let mut ring: Vec<Vec<u32>> = vec![vec![]; part.positions.len()];
+                for t in &part.tris {
+                    for k in 0..3 {
+                        ring[t[k] as usize].push(t[(k + 1) % 3]);
+                    }
+                }
+                let moves: Vec<Vec3> = (0..push.len())
+                    .map(|v| {
+                        if push[v] != [0.0; 3] {
+                            return push[v];
+                        }
+                        let strongest = ring[v]
+                            .iter()
+                            .map(|&w| push[w as usize])
+                            .max_by(|a, b| geom::len(*a).total_cmp(&geom::len(*b)));
+                        strongest.map_or([0.0; 3], |d| geom::scale(d, 0.5))
+                    })
+                    .collect();
+                for (p, d) in part.positions.iter_mut().zip(moves) {
+                    *p = geom::add(*p, d);
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+        let mut report = ThickenReport::default();
+        for (part, before) in self.parts.iter().zip(&original) {
+            let off: Vec<f32> = part.positions.iter().zip(before).map(|(a, b)| geom::len(geom::sub(*a, *b))).collect();
+            for &d in &off {
+                if d > 0.0 {
+                    report.moved_vertices += 1;
+                    report.max_offset = report.max_offset.max(d);
+                }
+            }
+            for t in 0..part.tris.len() {
+                if part.tris[t].iter().any(|&v| off[v as usize] > 0.0) {
+                    report.area += geom::area(&part.corners(t));
+                }
+            }
+        }
+        report
     }
 
     /// Signed volume of every part together, in source units³.
@@ -1523,6 +1643,7 @@ mod tests {
             repair: RepairReport::default(),
             deviation: 0.0,
             hollow: None,
+            thicken: None,
         }
     }
 
@@ -1557,6 +1678,7 @@ mod tests {
             repair: RepairReport::default(),
             deviation: 0.0,
             hollow: None,
+            thicken: None,
         }
     }
 
@@ -1597,6 +1719,7 @@ mod tests {
             repair: RepairReport::default(),
             deviation: 0.0,
             hollow: None,
+            thicken: None,
         };
         m.split_vertices(0.01);
         assert_eq!(m.repair.split_vertices, 1);
@@ -1839,6 +1962,54 @@ mod tests {
         }
     }
 
+    /// A box of `size` at `at`, as triangles of its own in `part`.
+    fn add_box(part: &mut MeshPart, size: Vec3, at: Vec3) {
+        let base = part.positions.len() as u32;
+        let cube = closed_cube();
+        part.positions.extend(cube.parts[0].positions.iter().map(|p| std::array::from_fn(|k| p[k] * size[k] + at[k])));
+        part.tris.extend(cube.parts[0].tris.iter().map(|t| t.map(|v| v + base)));
+    }
+
+    #[test]
+    fn thickening_pushes_out_a_thin_plate_and_leaves_the_block_alone() {
+        let mut part = MeshPart { name: "t".into(), ..Default::default() };
+        add_box(&mut part, [10.0; 3], [0.0; 3]);
+        add_box(&mut part, [10.0, 10.0, 0.5], [20.0, 0.0, 0.0]);
+        let mut m = Mesh { parts: vec![part], ..Default::default() };
+        let before = m.parts[0].positions.clone();
+        let params = crate::printability::Params::for_nozzle(0.4);
+        let need = params.wall_mm.max(params.extrusion_mm * params.perimeters as f32);
+        let thin = |m: &Mesh| {
+            crate::printability::analyze(m, params).checks.into_iter().find(|c| c.code == "thinWalls").unwrap()
+        };
+        assert!(thin(&m).count > 0);
+        let r = m.thicken(need * 1.05);
+        // The plate's eight corners went out, through its thin sides only; the block did not move at all.
+        assert_eq!(r.moved_vertices, 8);
+        assert!(m.parts[0].positions[..8] == before[..8]);
+        assert!(r.max_offset > 0.1 && r.max_offset < need, "{r:?}");
+        for (a, b) in m.parts[0].positions[8..].iter().zip(&before[8..]) {
+            assert!(a[0] == b[0] && a[1] == b[1], "only along Z: {b:?} -> {a:?}");
+        }
+        // No wall under the minimum any more, and still closed.
+        let after = thin(&m);
+        assert_eq!(after.count, 0, "{:?}", after.measurement);
+        assert!(sealed(&m));
+
+        // A 0.6 mm pin standing on its own: thick enough after, and no fatter than it needs.
+        let mut pin = crate::smooth::tests::cylinder(16);
+        for p in &mut pin.positions {
+            *p = [p[0] * 0.3, p[1] * 0.3, p[2] * 5.0];
+        }
+        let mut m = Mesh { parts: vec![pin], ..Default::default() };
+        assert!(thin(&m).count > 0);
+        let r = m.thicken(need * 1.05);
+        assert_eq!(thin(&m).count, 0, "{r:?}");
+        let radius = m.parts[0].positions.iter().map(|p| p[0].hypot(p[1])).fold(0.0, f32::max);
+        assert!(radius * 2.0 < need * 1.6, "diameter {}", radius * 2.0);
+        assert!(sealed(&m));
+    }
+
     #[test]
     fn an_open_mesh_is_not_hollowed() {
         let mut work = big_cube(20.0);
@@ -1934,6 +2105,7 @@ mod tests {
             repair: RepairReport::default(),
             deviation: 0.0,
             hollow: None,
+            thicken: None,
         };
         let before = m.triangle_count();
         m.simplify(0.25);
@@ -1965,6 +2137,7 @@ mod tests {
             repair: RepairReport::default(),
             deviation: 0.0,
             hollow: None,
+            thicken: None,
         };
         (m, vec![labels])
     }
@@ -2016,6 +2189,7 @@ mod tests {
             repair: RepairReport::default(),
             deviation: 0.0,
             hollow: None,
+            thicken: None,
         };
         // Hard pressed, the plain quadric flattens peaks; with priority more of them stay.
         let peaks = |mesh: &Mesh| mesh.parts[0].positions.iter().filter(|p| p[2] > 0.5).count();

@@ -84,6 +84,8 @@ pub struct Stats {
     pub volume_mm3: f32,
     /// What hollowing did, with volumes in final mm³ and the voxel in mm.
     pub hollow: Option<crate::mesh::HollowReport>,
+    /// What thickening moved, in final mm and mm².
+    pub thicken: Option<crate::mesh::ThickenReport>,
 }
 
 #[derive(Clone)]
@@ -1160,6 +1162,11 @@ impl Project {
                 volume: h.volume * self.scale.powi(3),
                 cell: h.cell * self.scale,
                 ..h
+            }),
+            thicken: self.work.thicken.map(|t| crate::mesh::ThickenReport {
+                max_offset: t.max_offset * self.scale,
+                area: t.area * self.scale * self.scale,
+                ..t
             }),
         }
     }

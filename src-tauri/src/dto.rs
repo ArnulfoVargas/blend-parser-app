@@ -76,6 +76,14 @@ impl From<bp_core::MeshIssues> for IssuesDto {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThickenDto {
+    pub moved_vertices: usize,
+    pub max_offset_mm: f32,
+    pub area_mm2: f32,
+}
+
 /// What hollowing did: volumes in mm³, the voxel (its accuracy) in mm, and
 /// why it did nothing ("open", "noRoom") when it did not.
 #[derive(Serialize)]
@@ -202,6 +210,7 @@ pub struct SettingsDto {
     pub hollow_mm: f32,
     pub drains: u8,
     pub drain_mm: f32,
+    pub thicken_mm: f32,
     /// Rows of the rotation applied to the model as loaded.
     pub rotation: bp_core::Mat3,
     pub border_detail: u8,
@@ -237,6 +246,8 @@ pub struct Summary {
     /// The model's volume in mm³, and what hollowing did when it was asked for.
     pub volume_mm3: f32,
     pub hollow: Option<HollowDto>,
+    /// What thickening moved: vertices, the furthest one in mm and the area in mm².
+    pub thicken: Option<ThickenDto>,
     pub repair: RepairDto,
     pub estimate: EstimateDto,
     pub settings: SettingsDto,
@@ -409,6 +420,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         hollow_mm,
         drains,
         drain_mm,
+        thicken_mm,
     } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
@@ -451,6 +463,11 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         contact_mm2: stats.contact_mm2,
         deviation_mm: stats.deviation_mm,
         volume_mm3: stats.volume_mm3,
+        thicken: stats.thicken.map(|t| ThickenDto {
+            moved_vertices: t.moved_vertices,
+            max_offset_mm: t.max_offset,
+            area_mm2: t.area,
+        }),
         hollow: stats.hollow.map(|h| HollowDto {
             solid_mm3: h.solid_volume,
             volume_mm3: h.volume,
@@ -498,6 +515,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             hollow_mm,
             drains,
             drain_mm,
+            thicken_mm,
             rotation: p.rotation(),
             border_detail,
             min_island_mm2,

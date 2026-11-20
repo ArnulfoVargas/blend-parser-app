@@ -12,7 +12,7 @@ export interface Repair {
 export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; hollowMm: number; drains: number; drainMm: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; hollowMm: number; drains: number; drainMm: number; thickenMm: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -126,6 +126,7 @@ export interface Summary {
   deviationMm: number;
   /** The model's volume, and what hollowing did (volumes in mm³; why not, if it did nothing). */
   volumeMm3: number;
+  thicken: { movedVertices: number; maxOffsetMm: number; areaMm2: number } | null;
   hollow: { solidMm3: number; volumeMm3: number; cellMm: number; drains: number; drainsWanted: number; refused: "open" | "noRoom" | null } | null;
   repair: Repair;
   estimate: Estimate;
@@ -227,7 +228,7 @@ export const api = {
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */
 export interface MeshFix {
   repair?: boolean; orient?: boolean; fillHoles?: boolean; splitVertices?: boolean; dropFloating?: boolean; deepClean?: boolean;
-  minPieceMm?: number; flattenMm?: number;
+  minPieceMm?: number; flattenMm?: number; thickenMm?: number;
 }
 export interface PrintabilityParams {
   extrusionMm: number; perimeters: number; wallMm: number; detailMm: number;

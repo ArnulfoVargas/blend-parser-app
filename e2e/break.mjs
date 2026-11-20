@@ -189,6 +189,21 @@ const attacks = {
     const h = await health(b);
     log("hollowing", "18 concurrent hollows, repairs and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
   },
+  // Thickening: hostile minimums through fix_mesh, and in a burst with undos.
+  async thickening(b) {
+    for (const thickenMm of [-1, 0, 1e30, NaN, 10, 0.05, "1"]) await attack(b, "thickening", "fix_mesh", { fix: { thickenMm } }, 180000);
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 8; i++) {
+        calls.push(I("fix_mesh", { fix: { thickenMm: (i % 4) * 0.5 } }));
+        calls.push(I("undo", {}));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("thickening", "16 concurrent thickenings and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+  },
   // Cuts, in each branch's signature (the missing ones report "missing").
   async cuts(b) {
     for (const t of [0, 1, -1, 2, 0.5]) await attack(b, "cuts", "cut_model", { axis: 2, t, keepLow: true, keepOther: true, joint: null });

@@ -639,6 +639,7 @@ pub struct MeshFix {
     drop_floating: Option<bool>,
     min_piece_mm: Option<f32>,
     flatten_mm: Option<f32>,
+    thicken_mm: Option<f32>,
 }
 
 /// One undoable step, so Ctrl+Z restores geometry, colours and hand painting.
@@ -655,6 +656,8 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
             drop_floating: fix.drop_floating.unwrap_or(now.drop_floating),
             min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
             flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),
+            // NaN goes to 0: nothing thickened.
+            thicken_mm: fix.thicken_mm.map_or(now.thicken_mm, |v| if v.is_finite() { v.clamp(0.0, 10.0) } else { 0.0 }),
             ..now
         });
         Ok(dto::summary(d, prefs))
