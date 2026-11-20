@@ -248,6 +248,35 @@
             </div>
           </div>
         </details>
+        <details class="group" id="smooth-group">
+          <summary><h2 data-i18n="smooth.title">Suavizar</h2><span class="group__sum" data-bind="smoothSum"></span></summary>
+          <div class="group__body">
+            <fieldset class="keys" id="subdivide-levels">
+              <legend data-i18n="smooth.subdivide">Subdividir (niveles)</legend>
+              <input type="radio" name="subdivide" id="subdiv-0" value="0" checked><label for="subdiv-0">0</label>
+              <input type="radio" name="subdivide" id="subdiv-1" value="1"><label for="subdiv-1">1</label>
+              <input type="radio" name="subdivide" id="subdiv-2" value="2"><label for="subdiv-2">2</label>
+            </fieldset>
+            <div class="field">
+              <label for="smooth-passes" data-i18n="smooth.passes">Pasadas de suavizado</label>
+              <div class="field__unit"><input class="input" id="smooth-passes" type="number" inputmode="numeric" min="0" max="20" step="1" value="0" aria-describedby="smooth-passes-help"></div>
+              <p class="help" id="smooth-passes-help" data-i18n="smooth.passesHelp">Taubin: redondea sin encoger el modelo.</p>
+            </div>
+            <div class="field">
+              <label for="crease-deg" data-i18n="smooth.crease">Arista viva desde</label>
+              <div class="field__unit"><input class="input" id="crease-deg" type="number" inputmode="decimal" min="0" max="180" step="1" value="30" aria-describedby="crease-help"><span>°</span></div>
+              <p class="help" id="crease-help" data-i18n="smooth.creaseHelp">Las caras que se juntan con más ángulo y los bordes de color no se redondean.</p>
+            </div>
+            <div class="field">
+              <label for="tri-cap" data-i18n="smooth.cap">Tope de triángulos</label>
+              <div class="field__unit"><input class="input" id="tri-cap" type="number" inputmode="numeric" min="1000" max="8000000" step="100000" value="2000000"></div>
+            </div>
+            <p class="help smooth__estimate" data-bind="smoothEstimate" aria-live="polite"></p>
+            <div class="row-actions">
+              <button class="btn btn--primary btn--sm" type="button" id="smooth-apply" data-i18n="smooth.apply" disabled>Aplicar</button>
+            </div>
+          </div>
+        </details>
         <details class="group" id="base-group" open>
           <summary><h2 data-i18n="mesh.base">Base</h2><span class="group__sum num" data-bind="baseSum"></span></summary>
           <div class="group__body">

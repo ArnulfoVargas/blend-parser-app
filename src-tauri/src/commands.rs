@@ -662,6 +662,33 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
     .await
 }
 
+/// Subdivides and smooths the model as one undoable step. Refused when the
+/// result would pass `max_triangles` (the panel's cap).
+#[tauri::command]
+pub async fn smooth_mesh(
+    app: AppHandle,
+    subdivide: u8,
+    smooth: u8,
+    crease_deg: f32,
+    max_triangles: usize,
+) -> CmdResult<Summary> {
+    if subdivide > bp_core::mesh::MAX_SUBDIVIDE || smooth > 20 || !(0.0..=180.0).contains(&crease_deg) {
+        return Err(AppError::new("error.smoothParams"));
+    }
+    let cap = max_triangles.clamp(1, bp_core::mesh::SUBDIVIDE_LIMIT);
+    with_doc(app, move |d, prefs| {
+        let now = d.project.mesh_ops();
+        let base = d.project.stats().triangles / 4usize.pow(now.subdivide as u32);
+        let result = base * 4usize.pow(subdivide as u32);
+        if result > cap {
+            return Err(AppError::with("error.subdivideCap", json!({ "n": result, "cap": cap })));
+        }
+        d.project.fix_mesh(MeshOps { subdivide, smooth, crease_deg, ..now });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
 /// What each advanced repair finds before and after; on request, since it
 /// builds the mesh again without them.
 #[tauri::command]

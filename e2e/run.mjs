@@ -366,6 +366,49 @@ const scenarios = {
     await shot(b, "20-simplify-protected");
   },
 
+  // Malla → Suavizar on the 48-sided cylinder: the count said first, 2 levels, the paint kept, Ctrl+Z.
+  async smooth(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#smooth-apply"))) return check("smooth", "smooth section", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    await b.execute(() => (document.querySelector("#smooth-group").open = true));
+    const summary = async () => (await invoke(b, "end_stroke")).v;
+    const before = await summary();
+    await click(b, "#subdiv-2");
+    const estimate = await text(b, "[data-bind=smoothEstimate]");
+    check("smooth", "the resulting triangles are said before applying", estimate?.includes(new Intl.NumberFormat("es").format(before.triangles * 16)) ?? false, estimate ?? "");
+    await setValue(b, "#tri-cap", 1000);
+    const over = await b.execute(() => ({ off: document.querySelector("#smooth-apply").disabled, text: document.querySelector("[data-bind=smoothEstimate]").textContent }));
+    check("smooth", "over the cap it cannot be applied", over.off && /tope/.test(over.text), over.text);
+    const refused = await invoke(b, "smooth_mesh", { subdivide: 2, smooth: 0, creaseDeg: 30, maxTriangles: 1000 });
+    check("smooth", "the backend refuses it too", /subdivideCap/.test(refused.e ?? ""), refused.e ?? "accepted");
+    await setValue(b, "#tri-cap", 2000000);
+    await setValue(b, "#smooth-passes", 2);
+    await click(b, "#smooth-apply");
+    await settle(b);
+    const after = await summary();
+    check("smooth", "2 levels make every triangle sixteen", after.triangles === before.triangles * 16, `${before.triangles} → ${after.triangles}`);
+    await shot(b, "21-smooth-cylinder");
+    await b.execute(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true })));
+    await settle(b);
+    const back = await summary();
+    check("smooth", "Ctrl+Z gives the original mesh back", back.triangles === before.triangles && back.settings.subdivide === 0, `${back.triangles}`);
+  },
+
+  // Suavizar on the painted figure: one level, each colour keeps its share of the surface.
+  async smoothPaint(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#smooth-apply"))) return check("smoothPaint", "smooth section", null);
+    const summary = async () => (await invoke(b, "end_stroke")).v;
+    const before = await summary();
+    const r = await invoke(b, "smooth_mesh", { subdivide: 1, smooth: 2, creaseDeg: 30, maxTriangles: 2000000 });
+    const after = r.v;
+    const share = (s) => s.slots.map((x) => x.triangles / s.triangles);
+    const drift = Math.max(...share(before).map((v, i) => Math.abs(v - share(after)[i])));
+    check("smoothPaint", "each colour keeps its share after subdividing", !!after && drift < 0.01, `${share(before).map((v) => v.toFixed(3))} → ${after && share(after).map((v) => v.toFixed(3))}`);
+    check("smoothPaint", "filament changes do not go up", !!after && after.estimate.swaps <= before.estimate.swaps, `${before.estimate.swaps} → ${after?.estimate.swaps}`);
+  },
+
   async english(b) {
     await waitState(b, "ready");
     const missing = await b.execute(() => [...document.querySelectorAll("[data-i18n]")].filter((el) => el.offsetParent && !el.textContent.trim()).map((el) => el.dataset.i18n));
@@ -375,7 +418,7 @@ const scenarios = {
 };
 
 const plan = [
-  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["simplify", {}], ["english", { lang: "en" }],
+  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["simplify", {}], ["smooth", { model: CYLINDER }], ["smoothPaint", {}], ["english", { lang: "en" }],
 ];
 
 const metrics = {};

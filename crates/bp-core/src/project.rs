@@ -919,12 +919,18 @@ impl Project {
             || ops.split_vertices != self.mesh_ops.split_vertices
             || ops.deep_clean != self.mesh_ops.deep_clean
             || ops.protect_colors != self.mesh_ops.protect_colors
-            || ops.protect_detail != self.mesh_ops.protect_detail;
+            || ops.protect_detail != self.mesh_ops.protect_detail
+            || ops.subdivide != self.mesh_ops.subdivide;
         self.mesh_ops = ops;
         if topology_changes {
             self.rebuild_geometry();
         } else {
+            let before: Vec<usize> = self.work.parts.iter().map(|p| p.tris.len()).collect();
             self.rebuild_geometry_keep_paint();
+            // Hand painting is per triangle: it only survives when the triangles do.
+            if self.work.parts.iter().map(|p| p.tris.len()).ne(before) {
+                self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
+            }
         }
         self.rebuild_paint();
     }
@@ -1283,6 +1289,20 @@ mod tests {
         assert!(p.undo());
         assert!(!p.mesh_ops().fill_holes);
         assert_eq!(p.mesh_issues().1.holes, 1);
+    }
+
+    #[test]
+    fn subdividing_is_one_undo_step_and_keeps_the_colours() {
+        let mut p = Project::new(scene(), 2);
+        let tris = p.stats().triangles;
+        let per_slot = p.stats().per_slot;
+        p.fix_mesh(MeshOps { subdivide: 2, smooth: 3, ..p.mesh_ops() });
+        assert_eq!(p.stats().triangles, tris * 16);
+        // Each child keeps its parent's spot in the source: the same colours, sixteen times over.
+        assert_eq!(p.stats().per_slot, per_slot.iter().map(|n| n * 16).collect::<Vec<_>>());
+        assert!(p.undo());
+        assert_eq!(p.stats().triangles, tris);
+        assert_eq!(p.mesh_ops().subdivide, 0);
     }
 
     #[test]

@@ -138,7 +138,18 @@ pub struct MeshOps {
     pub protect_colors: bool,
     /// Simplifying weighs the surface's bend, so curved and small details keep more triangles.
     pub protect_detail: bool,
+    /// Levels of Loop subdivision (each makes every triangle four), up to [`MAX_SUBDIVIDE`].
+    pub subdivide: u8,
+    /// Rounds of Taubin smoothing, which do not shrink the model.
+    pub smooth: u8,
+    /// Faces meeting at more than this many degrees keep a sharp edge when subdividing or smoothing.
+    pub crease_deg: f32,
 }
+
+/// Subdivision levels the panel offers.
+pub const MAX_SUBDIVIDE: u8 = 2;
+/// Triangles subdividing never goes past, whatever the panel's cap says.
+pub const SUBDIVIDE_LIMIT: usize = 8_000_000;
 
 impl Default for MeshOps {
     fn default() -> Self {
@@ -154,6 +165,9 @@ impl Default for MeshOps {
             deep_clean: false,
             protect_colors: false,
             protect_detail: false,
+            subdivide: 0,
+            smooth: 0,
+            crease_deg: 30.0,
         }
     }
 }
@@ -215,7 +229,8 @@ impl Mesh {
         // Holes, winding and fans are read from shared vertices: on an unwelded
         // mesh every seam would look like a hole. Reverting the cleanup alone
         // must not leave them working on loose triangles.
-        if ops.repair || ops.deep_clean || ops.fill_holes || ops.orient || ops.split_vertices {
+        let rounds = ops.subdivide > 0 || ops.smooth > 0;
+        if ops.repair || ops.deep_clean || ops.fill_holes || ops.orient || ops.split_vertices || rounds {
             shape.repair_all();
         }
         // Before holes: a stray face's open sides are not a hole to cap.
@@ -241,6 +256,9 @@ impl Mesh {
             let locks = ops.protect_colors.then(|| shape.border_vertices(&labels(&shape)));
             shape.simplify_with(ops.keep_ratio, locks.as_deref(), ops.protect_detail);
             shape.deviation = before.deviation_to(&shape);
+        }
+        if rounds {
+            shape.round_off(ops, &labels(&shape));
         }
         if ops.flatten_mm > 0.0 {
             shape.split_at(shape.bounds().map_or(0.0, |(lo, _)| lo[2]) + ops.flatten_mm / scale);
@@ -760,6 +778,24 @@ impl Mesh {
             }
         }
         self.repair = report;
+    }
+
+    /// Subdivides and smooths every part as `ops` asks (see [`crate::smooth`]),
+    /// keeping sharp edges and the borders between `labels`. Levels that would
+    /// pass [`SUBDIVIDE_LIMIT`] triangles are skipped.
+    pub fn round_off(&mut self, ops: MeshOps, labels: &[Vec<u8>]) {
+        let mut levels = ops.subdivide.min(MAX_SUBDIVIDE);
+        while levels > 0 && self.triangle_count() * 4usize.pow(levels as u32) > SUBDIVIDE_LIMIT {
+            levels -= 1;
+        }
+        let crease = if ops.crease_deg.is_finite() { ops.crease_deg.clamp(0.0, 180.0) } else { 30.0 };
+        for (pi, part) in self.parts.iter_mut().enumerate() {
+            let mut l = labels.get(pi).cloned().unwrap_or_default();
+            for _ in 0..levels {
+                crate::smooth::subdivide(part, &mut l, crease);
+            }
+            crate::smooth::smooth(part, &l, crease, ops.smooth as u32);
+        }
     }
 
     /// Farthest a vertex of `self` lies from the surface of `other` (same units),

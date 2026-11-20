@@ -15,6 +15,7 @@ pub mod palette;
 pub mod printability;
 pub mod project;
 pub mod scene;
+pub mod smooth;
 pub mod split;
 pub mod waste;
 

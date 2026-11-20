@@ -150,6 +150,26 @@ const attacks = {
     const h = await health(b);
     log("views", "analysis views clicked 20 times and across modes", h.alive && !h.errors.length ? "ok" : "BROKEN", `${h.why} ${h.errors[0] ?? ""}`.slice(0, 200));
   },
+  // Subdivide and smooth: out of range, past the cap, and in a burst with undos.
+  async smoothing(b) {
+    for (const args of [{ subdivide: 3, smooth: 0, creaseDeg: 30, maxTriangles: 1e9 }, { subdivide: 2, smooth: 99, creaseDeg: 30, maxTriangles: 1e6 },
+      { subdivide: 2, smooth: 2, creaseDeg: -1, maxTriangles: 1e6 }, { subdivide: 2, smooth: 2, creaseDeg: NaN, maxTriangles: 1e6 },
+      { subdivide: 2, smooth: 2, creaseDeg: 30, maxTriangles: 0 }, { subdivide: 2, smooth: 2, creaseDeg: 30, maxTriangles: -5 },
+      { subdivide: 1, smooth: 20, creaseDeg: 180, maxTriangles: 8000000 }, { subdivide: 2, smooth: 0, creaseDeg: 0, maxTriangles: 8000000 }])
+      await attack(b, "smoothing", "smooth_mesh", args, 180000);
+    for (let i = 0; i < 4; i++) await call(b, "undo");
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 8; i++) {
+        calls.push(I("smooth_mesh", { subdivide: i % 3, smooth: i, creaseDeg: 30, maxTriangles: 2000000 }));
+        calls.push(I("undo", {}));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("smoothing", "16 concurrent smooths and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+  },
   // Cuts, in each branch's signature (the missing ones report "missing").
   async cuts(b) {
     for (const t of [0, 1, -1, 2, 0.5]) await attack(b, "cuts", "cut_model", { axis: 2, t, keepLow: true, keepOther: true, joint: null });

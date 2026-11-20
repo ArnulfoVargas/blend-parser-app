@@ -12,7 +12,7 @@ export interface Repair {
 export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -164,6 +164,9 @@ export function decodePreview(buf: ArrayBuffer): PreviewMesh {
 export const api = {
   analyzePrintability: (params: PrintabilityParams) => invoke<PrintabilityReport>("analyze_printability", { params }),
   fixMesh: (fix: MeshFix) => invoke<Summary>("fix_mesh", { fix }),
+  /** Subdivides and smooths as one undo step; refused past `maxTriangles`. */
+  smoothMesh: (subdivide: number, smooth: number, creaseDeg: number, maxTriangles: number) =>
+    invoke<Summary>("smooth_mesh", { subdivide, smooth, creaseDeg, maxTriangles }),
   /** Built without the advanced repairs, and as the mesh is now. */
   meshIssues: () => invoke<{ before: Issues; after: Issues }>("mesh_issues"),
   orientForPrint: (overhangDeg: number) => invoke<Summary>("orient_for_print", { overhangDeg }),

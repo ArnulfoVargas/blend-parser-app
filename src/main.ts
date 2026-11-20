@@ -481,8 +481,9 @@ function render(s: Summary) {
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
   bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
   // The mesh tab says when something there changes the model.
-  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || REPAIRS.some((op) => st[op]));
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || REPAIRS.some((op) => st[op]));
   renderRepairs(s);
+  syncSmoothForm(s);
   void refreshIssues();
   void refreshPlan();
   bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
@@ -1347,6 +1348,80 @@ analysisButtons.forEach((b) => b.addEventListener("click", () => void showAnalys
 const VIEW_OF: Record<string, Analysis> = {
   overhang: "overhang", thinWalls: "thickness", openEdges: "edges", nonManifoldEdges: "edges", winding: "edges",
 };
+
+// ---- subdivide and smooth ---------------------------------------------------------------
+
+const smoothPasses = $<HTMLInputElement>("#smooth-passes");
+const creaseDeg = $<HTMLInputElement>("#crease-deg");
+const triCap = $<HTMLInputElement>("#tri-cap");
+const CAP_KEY = "blendparser.triangleCap";
+try {
+  const saved = Number(localStorage.getItem(CAP_KEY));
+  if (saved >= 1000 && saved <= 8_000_000) triCap.value = String(saved);
+} catch {
+  // The default cap.
+}
+const subdivideLevel = () => Number(document.querySelector<HTMLInputElement>('input[name="subdivide"]:checked')?.value ?? 0);
+/** What the form asks for, or null with the offending field marked. */
+function readSmooth(): { subdivide: number; smooth: number; crease: number; cap: number } | null {
+  const fields: [HTMLInputElement, number, number][] = [[smoothPasses, 0, 20], [creaseDeg, 0, 180], [triCap, 1000, 8_000_000]];
+  let ok = true;
+  for (const [el, lo, hi] of fields) {
+    const v = Number(el.value);
+    const good = el.value.trim() !== "" && Number.isFinite(v) && v >= lo && v <= hi && (el !== smoothPasses || Number.isInteger(v));
+    el.setAttribute("aria-invalid", String(!good));
+    ok &&= good;
+  }
+  return ok ? { subdivide: subdivideLevel(), smooth: Number(smoothPasses.value), crease: Number(creaseDeg.value), cap: Number(triCap.value) } : null;
+}
+/** The triangles the choice would give, said before applying it; over the cap, it cannot be applied. */
+function renderSmooth() {
+  const s = summary;
+  const apply = $<HTMLButtonElement>("#smooth-apply");
+  const line = document.querySelector<HTMLElement>('[data-bind="smoothEstimate"]')!;
+  const st = s?.settings;
+  bind("smoothSum", st && (st.subdivide || st.smooth) ? t("smooth.sum", { levels: st.subdivide, passes: st.smooth }) : "");
+  const want = readSmooth();
+  if (!s || !st || !want) {
+    apply.disabled = true;
+    line.textContent = s && !want ? t("smooth.invalid") : "";
+    line.dataset.tone = "";
+    return;
+  }
+  const base = Math.round(s.triangles / 4 ** st.subdivide);
+  const result = base * 4 ** want.subdivide;
+  const same = want.subdivide === st.subdivide && want.smooth === st.smooth && want.crease === st.creaseDeg;
+  const over = result > want.cap;
+  line.dataset.tone = over ? "over" : "";
+  line.textContent = over
+    ? t("smooth.over", { n: nf(result), cap: nf(want.cap) })
+    : t("smooth.estimate", { from: nf(s.triangles), to: nf(result) });
+  apply.disabled = same || over;
+}
+/** The form shows what the model has, unless the user is changing it. */
+function syncSmoothForm(s: Summary) {
+  const st = s.settings;
+  const radio = document.querySelector<HTMLInputElement>(`#subdiv-${st.subdivide}`);
+  if (radio && !$("#smooth-group").contains(document.activeElement)) radio.checked = true;
+  setIfIdle("#smooth-passes", String(st.smooth));
+  setIfIdle("#crease-deg", String(st.creaseDeg));
+  renderSmooth();
+}
+$("#smooth-group").addEventListener("input", renderSmooth);
+$("#smooth-group").addEventListener("change", renderSmooth);
+triCap.addEventListener("change", () => {
+  try {
+    if (readSmooth()) localStorage.setItem(CAP_KEY, triCap.value);
+  } catch {
+    // Not remembered.
+  }
+});
+$("#smooth-apply").addEventListener("click", async () => {
+  const want = readSmooth();
+  if (!want || !summary) return;
+  if (summary.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("smooth.title"), kind: "warning" }))) return;
+  await apply(() => api.smoothMesh(want.subdivide, want.smooth, want.crease, want.cap), () => toast(t("smooth.done"), "ok", { label: t("stage.undo"), run: () => void undo() }));
+});
 
 const colorOps = () => void apply(() => api.setColorOps(Number($<HTMLInputElement>("#detail").value), Number($<HTMLInputElement>("#island").value)));
 $("#detail").addEventListener("change", colorOps);
