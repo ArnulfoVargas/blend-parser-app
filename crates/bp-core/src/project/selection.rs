@@ -269,6 +269,7 @@ impl Project {
         };
         let mut splits = vec![];
         let mut any = false;
+        let baked = self.cut_sources();
         for pi in 0..self.scene.parts.len() {
             let selected = self.scene_selection(pi);
             if !selected.contains(&true) {
@@ -276,7 +277,21 @@ impl Project {
                 continue;
             }
             any = true;
-            splits.push(Some(region::split(&self.scene.parts[pi], &selected, closure)?));
+            // The cleaned part, so seams and stray faces of the file do not stop the cut;
+            // every piece still says which scene triangle each of its faces came from.
+            let from = &baked[pi].from;
+            let mut part = baked[pi].part.clone();
+            for v in &mut part.positions {
+                *v = std::array::from_fn(|i| v[i] * self.stretch[i]);
+            }
+            let on: Vec<bool> = from.iter().map(|&t| selected.get(t as usize).copied().unwrap_or(false)).collect();
+            let mut split = region::split(&part, &on, closure)?;
+            for piece in std::iter::once(&mut split.rest).chain(split.regions.iter_mut()) {
+                for o in &mut piece.origins {
+                    *o = o.and_then(|t| from.get(t as usize).copied());
+                }
+            }
+            splits.push(Some(split));
         }
         if !any {
             return Err(RegionError::Empty.into());
