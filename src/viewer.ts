@@ -73,6 +73,8 @@ export interface BrushHandlers {
   section(s: Section): void;
   /** A click on the model with the thickness tool, as a ray (preview units). */
   thickness?(origin: Vec3, dir: Vec3): void;
+  /** The pointer resting over the model with the thickness tool, as a ray; null once it leaves. */
+  thicknessHover?(origin: Vec3 | null, dir: Vec3 | null): void;
   sectionLine(active: boolean, error?: LineError): void;
   cutChoice(both: boolean): void;
   cutPicking(active: boolean): void;
@@ -508,6 +510,7 @@ export class Viewer {
     });
     window.addEventListener("blur", () => this.cancelPlace());
     canvas.addEventListener("pointerleave", () => {
+      if (this.tool === "thickness") this.handlers.thicknessHover?.(null, null);
       this.cursor.visible = false;
       this.setHover(null);
     });
@@ -1038,6 +1041,13 @@ export class Viewer {
     if (this.moveDrag) return this.slideTo(e);
     if (this.turnDrag) return this.turnTo(e);
     if (this.planeDrag) return this.slidePlaneTo(e);
+    // The thickness tool shows the wall under the pointer before the click: from the surface to where it ends.
+    if (this.tool === "thickness" && e.buttons === 0 && this.mesh) {
+      const [o, dir] = this.rayFrom(e);
+      const from = this.clipRay(o, dir);
+      this.handlers.thicknessHover?.(from, from ? dir : null);
+      return;
+    }
     if ((this.tool === "move" || this.tool === "rotate" || this.planeTool()) && e.buttons === 0) {
       this.rayFrom(e);
       let over = false;

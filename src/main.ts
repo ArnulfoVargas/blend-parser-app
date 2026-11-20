@@ -253,6 +253,7 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   // Malla's section slides the same plane as the cut; the cut's panel only follows its own.
   section: (s) => (clipOn ? syncClip() : syncSection(s)),
   thickness: (o, d) => void measureWall(o, d),
+  thicknessHover: (o, d) => hoverWallAt(o, d),
   sectionLine: (active, error) => {
     cutDrawing = active;
     syncCutDrawing();
@@ -762,11 +763,45 @@ $("#toggle-wire").addEventListener("click", () => setWire(!wireOn));
 
 /** The wall measured with the thickness tool, kept on the model until the mesh changes. */
 let wall: { at: [Vec3, Vec3]; mm: number | null } | null = null;
+/** The wall under the pointer while it rests on the model, shown before the click pins it. */
+let hoverWall: { at: [Vec3, Vec3]; mm: number | null } | null = null;
+let hoverBusy = false;
+let hoverNext: [Vec3, Vec3] | null | undefined;
+async function hoverWallAt(origin: Vec3 | null, dir: Vec3 | null) {
+  if (app.dataset.tool !== "thickness" || !summary) return;
+  const ray: [Vec3, Vec3] | null = origin && dir ? [origin, dir] : null;
+  // One measurement at a time: the latest position waits for the one in flight.
+  if (hoverBusy) {
+    hoverNext = ray;
+    return;
+  }
+  hoverBusy = true;
+  try {
+    if (!ray) hoverWall = null;
+    else {
+      const tolerance = Number(document.querySelector<HTMLInputElement>("#pa-toleranceMm")?.value) || 0.001;
+      const w = await api.measureThickness(ray[0], ray[1], tolerance).catch(() => null);
+      hoverWall = w ? { at: [w.point, w.across], mm: w.mm } : null;
+    }
+  } finally {
+    hoverBusy = false;
+  }
+  syncWall();
+  if (hoverNext !== undefined) {
+    const next = hoverNext;
+    hoverNext = undefined;
+    void hoverWallAt(next?.[0] ?? null, next?.[1] ?? null);
+  }
+}
 function syncWall() {
-  const text = !wall ? (app.dataset.tool === "thickness" ? t("thickness.first") : "")
-    : wall.mm === null ? t("thickness.open") : t("thickness.value", { mm: nf(wall.mm, 2) });
+  if (app.dataset.tool !== "thickness") hoverWall = null;
+  const shown = hoverWall ?? wall;
+  const pinned = shown === wall;
+  const text = !shown ? (app.dataset.tool === "thickness" ? t("thickness.first") : "")
+    : shown.mm === null ? t("thickness.open")
+    : pinned ? t("thickness.value", { mm: nf(shown.mm, 2) }) : t("thickness.hover", { mm: nf(shown.mm, 2) });
   bind("thicknessOut", text);
-  viewer.setWall(wall && wall.mm !== null ? wall.at : null, wall?.mm != null ? `${nf(wall.mm, 2)} mm` : "");
+  viewer.setWall(shown && shown.mm !== null ? shown.at : null, shown?.mm != null ? `${nf(shown.mm, 2)} mm` : "");
 }
 async function measureWall(origin: Vec3, dir: Vec3) {
   if (!summary) return;
