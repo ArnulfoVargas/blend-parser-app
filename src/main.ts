@@ -880,12 +880,13 @@ function render(s: Summary) {
     r.degenerateTriangles && t("mesh.degenerate", { count: r.degenerateTriangles, n: nf(r.degenerateTriangles) }),
     r.duplicateTriangles && t("mesh.duplicate", { count: r.duplicateTriangles, n: nf(r.duplicateTriangles) }),
     r.loosePieces && t("mesh.loosePieces", { count: r.loosePieces, n: nf(r.loosePieces), tris: nf(r.looseTriangles) }),
+    r.hiddenPieces && t("mesh.hiddenPieces", { count: r.hiddenPieces, n: nf(r.hiddenPieces), tris: nf(r.hiddenTriangles) }),
   ].filter((x): x is string => Boolean(x));
   bind("repairOut", !st.repair && !r.loosePieces ? t("mesh.notRepaired") : fixes.length ? t("mesh.fixed", { list: fixes.join(", ") }) : t("mesh.clean"));
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
   bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
   // The mesh tab says when something there changes the model.
-  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || st.thickenMm > 0 || REPAIRS.some((op) => st[op]));
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || st.thickenMm > 0 || REPAIRS.some((op) => op !== "removeHidden" && st[op]));
   renderRepairs(s);
   syncSmoothForm(s);
   syncHollowForm(s);
@@ -2151,7 +2152,7 @@ $("#flatten").addEventListener("keydown", (e) => {
 // ---- advanced repairs ----------------------------------------------------------------
 
 /** The repairs with a switch of their own in Malla; each is a `MeshFix` field and a setting. */
-const REPAIRS = ["fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"] as const;
+const REPAIRS = ["removeHidden", "fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"] as const;
 type RepairOp = (typeof REPAIRS)[number];
 const repairGroup = $<HTMLDetailsElement>("#repair-group");
 const repairBox = (op: RepairOp) => $<HTMLInputElement>(`#repair-ops input[data-op="${op}"]`);
@@ -2171,10 +2172,11 @@ function issueText(op: RepairOp, i: Issues): string {
     case "splitVertices": return i.sharedVertices ? t("repair.shared", n(i.sharedVertices)) : t("repair.noShared");
     case "dropFloating": return i.floatingPieces ? t("repair.floating", n(i.floatingPieces)) : t("repair.noFloating");
     case "deepClean": return i.strayTriangles ? t("repair.stray", n(i.strayTriangles)) : t("repair.noStray");
+    case "removeHidden": return i.hiddenPieces ? t("repair.hidden", n(i.hiddenPieces)) : t("repair.noHidden");
   }
 }
 const issueCount = (op: RepairOp, i: Issues) =>
-  ({ fillHoles: i.openEdges, orient: i.flippedTriangles, splitVertices: i.sharedVertices, dropFloating: i.floatingPieces, deepClean: i.strayTriangles })[op];
+  ({ fillHoles: i.openEdges, orient: i.flippedTriangles, splitVertices: i.sharedVertices, dropFloating: i.floatingPieces, deepClean: i.strayTriangles, removeHidden: i.hiddenPieces })[op];
 
 /** Each switch's line: what it finds, or with it on, what there was and what is left. */
 function renderRepairs(s: Summary | null) {

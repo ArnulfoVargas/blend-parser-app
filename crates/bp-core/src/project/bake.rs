@@ -33,6 +33,7 @@ impl Project {
             orient: true,
             split_vertices: self.mesh_ops.split_vertices,
             min_piece_mm: self.mesh_ops.min_piece_mm,
+            remove_hidden: self.mesh_ops.remove_hidden,
             ..MeshOps::default()
         }
     }
@@ -76,12 +77,8 @@ impl Project {
             materials: vec![],
         };
         let (shape, _) = Mesh::build(&scene, ops, self.scale);
-        let baked: Vec<CutSource> = scene
-            .parts
-            .iter()
-            .zip(&shape.parts)
-            .map(|(source, cleaned)| bake_part(source, cleaned))
-            .collect();
+        let baked: Vec<CutSource> =
+            scene.parts.iter().zip(&shape.parts).map(|(source, cleaned)| bake_part(source, cleaned)).collect();
         let baked = Arc::new(baked);
         if let Ok(mut guard) = self.cut_cache.lock() {
             *guard = Some((key, baked.clone()));
@@ -102,7 +99,8 @@ pub(crate) fn bake_part(source: &Part, cleaned: &MeshPart) -> CutSource {
     if cleaned.tris.is_empty() || origin.iter().any(|(src, _)| *src as usize >= source.tris.len()) {
         return unchanged();
     }
-    let mut uv_layers: Vec<Vec<[f32; 2]>> = source.uv_layers.iter().map(|_| Vec::with_capacity(cleaned.tris.len() * 3)).collect();
+    let mut uv_layers: Vec<Vec<[f32; 2]>> =
+        source.uv_layers.iter().map(|_| Vec::with_capacity(cleaned.tris.len() * 3)).collect();
     let mut color_layers: Vec<Vec<[f32; 3]>> =
         source.color_layers.iter().map(|_| Vec::with_capacity(cleaned.tris.len() * 3)).collect();
     let mut tri_loops = Vec::with_capacity(cleaned.tris.len());

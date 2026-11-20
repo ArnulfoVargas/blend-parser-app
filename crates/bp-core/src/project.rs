@@ -1101,7 +1101,8 @@ impl Project {
                 return Err(cut::CutError::InvalidGeometry);
             }
             let [low, high] = sides.map(|(part, origins)| {
-                let origins: Vec<Option<u32>> = origins.iter().map(|o| o.and_then(|t| from.get(t as usize).copied())).collect();
+                let origins: Vec<Option<u32>> =
+                    origins.iter().map(|o| o.and_then(|t| from.get(t as usize).copied())).collect();
                 let painted = transfers[pi].as_ref().map(|_| CutPaint {
                     part: pi,
                     origins,
@@ -1609,7 +1610,11 @@ impl Project {
             let mut chunks: Vec<Chunk> = baked
                 .iter()
                 .enumerate()
-                .map(|(pi, b)| Chunk { part: b.part.clone(), from: pi, origins: b.from.iter().copied().map(Some).collect() })
+                .map(|(pi, b)| Chunk {
+                    part: b.part.clone(),
+                    from: pi,
+                    origins: b.from.iter().copied().map(Some).collect(),
+                })
                 .collect();
             for &(a, m, at) in &planes {
                 let plane = source_plane(a, at);
@@ -2265,6 +2270,7 @@ impl Project {
             || ops.fill_holes != self.mesh_ops.fill_holes
             || ops.split_vertices != self.mesh_ops.split_vertices
             || ops.deep_clean != self.mesh_ops.deep_clean
+            || ops.remove_hidden != self.mesh_ops.remove_hidden
             || ops.protect_colors != self.mesh_ops.protect_colors
             || ops.protect_detail != self.mesh_ops.protect_detail
             || ops.subdivide != self.mesh_ops.subdivide

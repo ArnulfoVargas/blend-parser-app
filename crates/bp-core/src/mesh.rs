@@ -152,6 +152,9 @@ pub struct MeshOps {
     /// Walls and details thinner than this (final millimetres) are pushed out
     /// along their normals until they reach it; 0 leaves them.
     pub thicken_mm: f32,
+    /// Pieces that cannot be seen from outside because other geometry closes
+    /// them in all round (eyes inside a head, a body under clothes) are removed.
+    pub remove_hidden: bool,
 }
 
 /// What thickening moved, in source units.
@@ -206,6 +209,7 @@ impl Default for MeshOps {
             drains: 0,
             drain_mm: 3.0,
             thicken_mm: 0.0,
+            remove_hidden: true,
         }
     }
 }
@@ -223,6 +227,9 @@ pub struct RepairReport {
     pub split_vertices: usize,
     pub dropped_pieces: usize,
     pub fin_triangles: usize,
+    /// Pieces enclosed by other geometry, and their triangles, that were removed.
+    pub hidden_pieces: usize,
+    pub hidden_triangles: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -272,12 +279,23 @@ impl Mesh {
         // mesh every seam would look like a hole. Reverting the cleanup alone
         // must not leave them working on loose triangles.
         let rounds = ops.subdivide > 0 || ops.smooth > 0 || ops.thicken_mm > 0.0;
-        if ops.repair || ops.deep_clean || ops.fill_holes || ops.orient || ops.split_vertices || rounds {
+        if ops.repair
+            || ops.deep_clean
+            || ops.fill_holes
+            || ops.orient
+            || ops.split_vertices
+            || ops.remove_hidden
+            || rounds
+        {
             shape.repair_all();
         }
         // Before holes: a stray face's open sides are not a hole to cap.
         if ops.deep_clean {
             shape.deep_clean(CLEAN_MM / scale);
+        }
+        // Before holes and simplifying: what nobody sees is not worth capping or keeping.
+        if ops.remove_hidden {
+            shape.remove_hidden_pieces();
         }
         // Holes first, so their caps get oriented with the rest of the piece.
         if ops.fill_holes {
@@ -772,6 +790,108 @@ impl Mesh {
 
     /// Removes connected pieces whose bounding box diagonal is under `min_size`
     /// (source units). The largest piece of each part always stays.
+    /// Removes the pieces nobody can see: every ray from every sampled point of
+    /// the piece, in every direction, runs into geometry. Eyes modelled inside
+    /// a head, a body under clothes, the hidden half of an overlapping part go;
+    /// a piece seen through any gap stays. The largest piece always stays.
+    /// Pieces are read on shared vertices, so weld first.
+    pub fn remove_hidden_pieces(&mut self) {
+        use rayon::prelude::*;
+        // Pieces of every part, numbered across the whole mesh.
+        let comps: Vec<Vec<u32>> = self.parts.iter().map(MeshPart::components).collect();
+        let mut pieces: Vec<(usize, u32, Vec<usize>)> = vec![];
+        for (pi, comp) in comps.iter().enumerate() {
+            let mut index: HashMap<u32, usize> = HashMap::new();
+            for (ti, &c) in comp.iter().enumerate() {
+                let at = *index.entry(c).or_insert_with(|| {
+                    pieces.push((pi, c, vec![]));
+                    pieces.len() - 1
+                });
+                pieces[at].2.push(ti);
+            }
+        }
+        if pieces.len() < 2 {
+            return;
+        }
+        let Some((lo, hi)) = self.bounds() else { return };
+        let size = geom::len(geom::sub(hi, lo)).max(1e-6);
+        let eps = size * 1e-5;
+        let soup = self.soup();
+        let bvh = crate::bvh::Bvh::build(&soup);
+        // The biggest piece by its box: that one is the model.
+        let extent = |(pi, _, tris): &(usize, u32, Vec<usize>)| {
+            let part = &self.parts[*pi];
+            let (lo, hi) =
+                tris.iter().flat_map(|&t| part.corners(t)).fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
+                    (std::array::from_fn(|i| lo[i].min(v[i])), std::array::from_fn(|i| hi[i].max(v[i])))
+                });
+            geom::len(geom::sub(hi, lo))
+        };
+        let largest = (0..pieces.len()).max_by(|&a, &b| extent(&pieces[a]).total_cmp(&extent(&pieces[b]))).unwrap_or(0);
+        // Directions spread evenly over the sphere (Fibonacci).
+        const DIRS: usize = 48;
+        let dirs: Vec<Vec3> = (0..DIRS)
+            .map(|i| {
+                let z = 1.0 - 2.0 * (i as f32 + 0.5) / DIRS as f32;
+                let r = (1.0 - z * z).max(0.0).sqrt();
+                let a = i as f32 * std::f32::consts::PI * (3.0 - 5f32.sqrt());
+                geom::normalize([r * a.cos() + 1e-4, r * a.sin() + 2e-4, z])
+            })
+            .collect();
+        let parts = &self.parts;
+        let hidden: Vec<bool> = pieces
+            .par_iter()
+            .enumerate()
+            .map(|(i, (pi, _, tris))| {
+                if i == largest {
+                    return false;
+                }
+                let part = &parts[*pi];
+                // Up to 64 faces, spread over the piece.
+                let step = (tris.len() / 64).max(1);
+                !tris.iter().step_by(step).any(|&ti| {
+                    let c = part.corners(ti);
+                    let centre = geom::at(&c, [1.0 / 3.0; 3]);
+                    let n = geom::normalize(geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0])));
+                    if !n.iter().all(|v| v.is_finite()) {
+                        return false;
+                    }
+                    dirs.iter().any(|&d| {
+                        // Off the face on the side the ray leaves from.
+                        let side = if geom::dot(d, n) >= 0.0 { 1.0 } else { -1.0 };
+                        let o = geom::add(centre, geom::add(geom::scale(n, side * eps), geom::scale(d, eps)));
+                        // A ray slipping along a shared edge is no gap: it has to
+                        // get out a little to either side as well.
+                        let (u, v) = (geom::normalize(geom::cross(d, [0.577, 0.211, 0.789])), d);
+                        let w = geom::cross(v, u);
+                        [
+                            d,
+                            geom::normalize(geom::add(d, geom::scale(u, 0.01))),
+                            geom::normalize(geom::add(d, geom::scale(w, 0.01))),
+                        ]
+                        .iter()
+                        .all(|&r| bvh.raycast(&soup, o, r).is_none())
+                    })
+                })
+            })
+            .collect();
+        let mut keep: Vec<Vec<bool>> = self.parts.iter().map(|p| vec![true; p.tris.len()]).collect();
+        for ((pi, _, tris), &h) in pieces.iter().zip(&hidden) {
+            if h {
+                self.repair.hidden_pieces += 1;
+                self.repair.hidden_triangles += tris.len();
+                for &t in tris {
+                    keep[*pi][t] = false;
+                }
+            }
+        }
+        if hidden.iter().any(|&h| h) {
+            for (part, keep) in self.parts.iter_mut().zip(&keep) {
+                part.retain(keep);
+            }
+        }
+    }
+
     pub fn remove_loose_pieces(&mut self, min_size: f32) {
         let mut report = self.repair;
         for part in &mut self.parts {
@@ -1333,6 +1453,8 @@ pub struct MeshIssues {
     pub floating_pieces: usize,
     /// Slivers, repeats and stray faces [`Mesh::deep_clean`] would take off.
     pub stray_triangles: usize,
+    /// Pieces [`Mesh::remove_hidden_pieces`] would take off.
+    pub hidden_pieces: usize,
 }
 
 impl Mesh {
@@ -1360,6 +1482,7 @@ impl Mesh {
         issues.floating_pieces = after(&|m| m.drop_floating(float_tol)).dropped_pieces;
         let clean = after(&|m| m.deep_clean(clean_tol));
         issues.stray_triangles = clean.degenerate_triangles + clean.duplicate_triangles + clean.fin_triangles;
+        issues.hidden_pieces = after(&|m| m.remove_hidden_pieces()).hidden_pieces;
         issues
     }
 }
@@ -1619,6 +1742,33 @@ pub(crate) fn unsupported(boxes: &[(Vec3, Vec3)], floor: f32, tol: f32) -> Vec<b
 
 #[cfg(test)]
 mod tests {
+
+    /// A closed axis-aligned box from `lo` to `hi`, its faces outwards.
+    fn cube(lo: Vec3, hi: Vec3) -> MeshPart {
+        let p = |x: usize, y: usize, z: usize| [[lo[0], hi[0]][x], [lo[1], hi[1]][y], [lo[2], hi[2]][z]];
+        let positions: Vec<Vec3> = (0..8).map(|i| p(i & 1, (i >> 1) & 1, (i >> 2) & 1)).collect();
+        let quads = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+        let tris = quads.iter().flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]).collect();
+        MeshPart { name: String::new(), positions, tris, origin: None }
+    }
+
+    #[test]
+    fn pieces_closed_in_by_others_are_removed_and_visible_ones_stay() {
+        let mut head = cube([0.0; 3], [20.0; 3]);
+        // An eye inside the head, in the same part, and a hat beside it.
+        for extra in [cube([8.0; 3], [12.0; 3]), cube([30.0, 0.0, 0.0], [34.0, 4.0, 4.0])] {
+            let base = head.positions.len() as u32;
+            head.positions.extend(extra.positions);
+            head.tris.extend(extra.tris.iter().map(|t| t.map(|v| v + base)));
+        }
+        // A tooth inside the head, in a part of its own.
+        let tooth = cube([2.0; 3], [4.0; 3]);
+        let mut m = Mesh { parts: vec![head, tooth], ..Default::default() };
+        m.remove_hidden_pieces();
+        assert_eq!(m.repair.hidden_pieces, 2);
+        assert_eq!(m.parts[0].tris.len(), 24, "the head and the hat stay");
+        assert!(m.parts[1].tris.is_empty());
+    }
     use super::*;
     use crate::optimize::adjacency;
 

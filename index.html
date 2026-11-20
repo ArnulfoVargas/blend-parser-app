@@ -256,6 +256,7 @@
             <p class="help" data-bind="repairOut"></p>
             <!-- One switch per repair, with what it finds before and after; each change is one undo step. -->
             <ul class="repairs" id="repair-ops" aria-describedby="repair-ops-help">
+              <li><label class="check"><input type="checkbox" data-op="removeHidden"> <span data-i18n="repair.removeHidden">Quitar piezas ocultas dentro de otras</span></label><p class="help repairs__count" data-count="removeHidden"></p></li>
               <li><label class="check"><input type="checkbox" data-op="fillHoles"> <span data-i18n="repair.fillHoles">Rellenar agujeros</span></label><p class="help repairs__count" data-count="fillHoles"></p></li>
               <li><label class="check"><input type="checkbox" data-op="orient"> <span data-i18n="repair.orient">Orientar caras hacia fuera</span></label><p class="help repairs__count" data-count="orient"></p></li>
               <li><label class="check"><input type="checkbox" data-op="splitVertices"> <span data-i18n="repair.splitVertices">Separar vértices compartidos por abanicos</span></label><p class="help repairs__count" data-count="splitVertices"></p></li>

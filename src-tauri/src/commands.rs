@@ -1590,6 +1590,7 @@ pub struct MeshFix {
     min_piece_mm: Option<f32>,
     flatten_mm: Option<f32>,
     thicken_mm: Option<f32>,
+    remove_hidden: Option<bool>,
 }
 
 /// One undoable step, so Ctrl+Z restores geometry, colours and hand painting.
@@ -1603,6 +1604,7 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
             fill_holes: fix.fill_holes.unwrap_or(now.fill_holes),
             split_vertices: fix.split_vertices.unwrap_or(now.split_vertices),
             deep_clean: fix.deep_clean.unwrap_or(now.deep_clean),
+            remove_hidden: fix.remove_hidden.unwrap_or(now.remove_hidden),
             drop_floating: fix.drop_floating.unwrap_or(now.drop_floating),
             min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
             flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),
