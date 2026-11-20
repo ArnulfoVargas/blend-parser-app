@@ -227,7 +227,7 @@ export const en: Catalog = {
 
   "colour.title": "Colour",
   "colour.sum": { one: "{n} colour", other: "{n} colours" },
-  "colour.redetect": "Detect again with",
+  "colour.redetect": "Detect again with up to",
   "colour.redetectHelp": "Reads the model's colours again; discards hand painting.",
   "colour.reduce": "Merge the closest down to",
   "colour.colours": "colours",

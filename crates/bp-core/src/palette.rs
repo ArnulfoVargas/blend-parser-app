@@ -158,17 +158,14 @@ pub fn auto_palette(samples: &[Rgb], k: usize) -> Vec<Rgb> {
     out.into_iter().map(|o| o.0).collect()
 }
 
-/// CIE76 colour difference (ΔE) between two sRGB colours.
-/// Picks `k` of `candidates` (spools the user has, say) to paint `samples`
+/// Picks up to `k` of `candidates` (spools the user has, say) to paint `samples`
 /// with: the ones that leave the least total ΔE from each sample to its closest
 /// pick. Samples are binned and weighted as [`auto_palette`] does, so small but
 /// distinct details count. Greedy picks, then swaps while one lowers the total.
-/// Returns indices into `candidates`, at most `k` and no repeats.
+/// Stops adding colours once none reduces the error, so identical swatches
+/// and colours that match no samples do not occupy extra slots.
 pub fn pick_from(samples: &[Rgb], candidates: &[Rgb], k: usize) -> Vec<usize> {
-    let k = k.clamp(1, candidates.len().max(1));
-    if candidates.len() <= k {
-        return (0..candidates.len()).collect();
-    }
+    let k = k.max(1).min(candidates.len());
     let mut bins: std::collections::HashMap<u32, ([f32; 3], u32)> = std::collections::HashMap::new();
     for c in samples {
         let q = |v: f32| (v.clamp(0.0, 1.0) * 31.0).round() as u32;
@@ -187,6 +184,7 @@ pub fn pick_from(samples: &[Rgb], candidates: &[Rgb], k: usize) -> Vec<usize> {
         bins.iter().zip(&d).map(|(b, row)| b.1 * picks.iter().map(|&p| row[p]).fold(f32::MAX, f32::min)).sum()
     };
     let mut picks: Vec<usize> = vec![];
+    let mut now = f32::MAX;
     while picks.len() < k {
         let mut best: Option<(f32, usize)> = None;
         for c in 0..labs.len() {
@@ -201,11 +199,13 @@ pub fn pick_from(samples: &[Rgb], candidates: &[Rgb], k: usize) -> Vec<usize> {
             }
         }
         match best {
-            Some((_, c)) => picks.push(c),
-            None => break,
+            Some((v, c)) if v < now => {
+                picks.push(c);
+                now = v;
+            }
+            _ => break,
         }
     }
-    let mut now = cost(&picks);
     for _ in 0..4 {
         let mut better = false;
         for i in 0..picks.len() {
@@ -227,9 +227,21 @@ pub fn pick_from(samples: &[Rgb], candidates: &[Rgb], k: usize) -> Vec<usize> {
             break;
         }
     }
+    // A swap can make another pick redundant. Keep at least one for a
+    // non-empty inventory, even when there are no surface samples.
+    for i in (0..picks.len()).rev() {
+        if picks.len() == 1 {
+            break;
+        }
+        let removed = picks.remove(i);
+        if cost(&picks) > now {
+            picks.insert(i, removed);
+        }
+    }
     picks
 }
 
+/// CIE76 colour difference (ΔE) between two sRGB colours.
 pub fn delta_e(a: Rgb, b: Rgb) -> f32 {
     dist2(srgb_to_lab(a), srgb_to_lab(b)).sqrt()
 }
@@ -337,8 +349,24 @@ mod tests {
         let mut p = pick_from(&s, &spools, 2);
         p.sort_unstable();
         assert_eq!(p, vec![2, 4]);
-        // As many spools as asked for, or fewer: all of them.
-        assert_eq!(pick_from(&s, &spools[..2], 4), vec![0, 1]);
+        let mut p = pick_from(&s, &spools[..2], 4);
+        p.sort_unstable();
+        assert_eq!(p, vec![0, 1]);
+    }
+
+    #[test]
+    fn skips_duplicate_swatches_and_unused_spools_below_the_requested_limit() {
+        let black = [0.0; 3];
+        let cream = [0.98, 0.87, 0.73];
+        let white = [1.0; 3];
+        let candidates = [black, cream, white, black];
+        let samples = [black, black, cream, white];
+        let mut picks = pick_from(&samples, &candidates, 4);
+        picks.sort_unstable();
+        assert_eq!(picks, vec![0, 1, 2]);
+        assert_eq!(pick_from(&[black; 4], &candidates, 4), vec![0]);
+        assert_eq!(pick_from(&[], &candidates, 4), vec![0]);
+        assert!(pick_from(&samples, &[], 4).is_empty());
     }
 
     #[test]

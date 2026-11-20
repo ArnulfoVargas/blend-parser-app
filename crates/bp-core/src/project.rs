@@ -775,8 +775,8 @@ impl Project {
         palette::auto_palette(&samples, n.clamp(1, 16))
     }
 
-    /// Which `n` of `candidates` (spool colours) paint the model with the least
-    /// total ΔE from its colours (see [`palette::pick_from`]), as indices.
+    /// Indices of up to `n` candidate spool colours that minimize the total
+    /// ΔE from the model's colours (see [`palette::pick_from`]).
     pub fn suggest_from(&self, candidates: &[Rgb], n: usize) -> Vec<usize> {
         let field = ColorField::new(&self.scene, &self.shape);
         let samples = palette::surface_samples(&field, &self.shape, 300_000, 1);

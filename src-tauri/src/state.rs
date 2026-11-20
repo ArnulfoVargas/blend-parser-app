@@ -29,7 +29,7 @@ pub struct Document {
 }
 
 impl Document {
-    /// Paints the model with the `count` owned spools closest to its colours;
+    /// Paints the model with up to `count` owned spools closest to its colours;
     /// each slot takes its spool's colour and the spool itself.
     pub fn suggest_from_inventory(&mut self, owned: &[bp_3mf::filament::Filament], count: usize) {
         let colors: Vec<_> = owned.iter().map(|f| bp_core::color::parse_hex(&f.hex).unwrap_or([0.5; 3])).collect();

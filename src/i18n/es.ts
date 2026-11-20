@@ -231,7 +231,7 @@ export const es = {
 
   "colour.title": "Color",
   "colour.sum": { one: "{n} color", other: "{n} colores" },
-  "colour.redetect": "Detectar de nuevo con",
+  "colour.redetect": "Detectar de nuevo con hasta",
   "colour.redetectHelp": "Vuelve a leer los colores del modelo; descarta lo pintado a mano.",
   "colour.reduce": "Unir los más parecidos hasta",
   "colour.colours": "colores",

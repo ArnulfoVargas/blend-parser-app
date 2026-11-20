@@ -213,8 +213,7 @@ pub async fn set_palette(app: AppHandle, colors: Vec<String>) -> CmdResult<Summa
     .await
 }
 
-/// Detects `count` colours again; with colours from the inventory only, picks
-/// the `count` owned spools that paint the model best instead.
+/// Detects up to `count` colours again, picking from the owned spools in inventory mode.
 #[tauri::command]
 pub async fn suggest_palette(app: AppHandle, count: usize) -> CmdResult<Summary> {
     let owned = app.state::<AppState>().filaments.lock()?.inventory();
