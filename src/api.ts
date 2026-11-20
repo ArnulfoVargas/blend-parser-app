@@ -88,6 +88,9 @@ export interface Plate {
   objects: number; // the model and the pieces cut off it that were kept
 }
 
+/** The turn with the least overhang: areas in mm² as now and after it; `down` faces the plate after it. */
+export interface OrientationPlan { changes: boolean; rotation: number[][]; down: Vec3; overhangMm2: [number, number]; contactMm2: [number, number] }
+
 /** A turn; `rigid` says how the preview moved when it could follow as it is: p' = matrix · p + shift. */
 export interface TurnResult { summary: Summary; rigid: { matrix: number[][]; shift: Vec3 } | null }
 
@@ -162,6 +165,8 @@ export const api = {
   /** Built without the advanced repairs, and as the mesh is now. */
   meshIssues: () => invoke<{ before: Issues; after: Issues }>("mesh_issues"),
   orientForPrint: (overhangDeg: number) => invoke<Summary>("orient_for_print", { overhangDeg }),
+  /** The best turn and what it gains, without turning; `setRotation` applies it. */
+  planOrientation: (overhangDeg: number) => invoke<OrientationPlan>("plan_orientation", { overhangDeg }),
   setRotation: (rotation: number[][]) => invoke<Summary>("set_rotation", { rotation }),
   blenderStatus: () => invoke<string | null>("blender_status"),
   initialFile: () => invoke<string | null>("initial_file"),

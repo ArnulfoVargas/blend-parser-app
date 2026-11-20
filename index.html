@@ -259,6 +259,22 @@
             </div>
           </div>
         </details>
+        <details class="group" id="orient-group" open>
+          <summary><h2 data-i18n="orient.title">Orientación</h2><span class="group__sum" data-bind="orientSum"></span></summary>
+          <div class="group__body">
+            <div class="field">
+              <label for="orient-angle" data-i18n="orient.angle">Ángulo de voladizo</label>
+              <div class="field__unit"><input class="input" id="orient-angle" type="number" inputmode="decimal" min="0" max="90" step="1" value="45" aria-describedby="orient-angle-help"><span>°</span></div>
+              <p class="help" id="orient-angle-help" data-i18n="orient.angleHelp">Las caras que miran hacia abajo más que esto cuentan como voladizo. Por defecto, el de viabilidad.</p>
+            </div>
+            <p class="help orient__gain" data-bind="orientGain" aria-live="polite"></p>
+            <p class="help orient__legend" id="orient-legend" hidden><i class="sw sw--rest" aria-hidden="true"></i><span data-i18n="orient.legend">En la vista, la cara que quedará sobre la placa.</span></p>
+            <div class="row-actions">
+              <button class="btn btn--primary btn--sm" type="button" id="orient-best" data-i18n="orient.best" disabled>Mejor orientación</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="orient-reset" data-i18n="place.resetRotation" disabled>Orientación original</button>
+            </div>
+          </div>
+        </details>
         <details class="group" id="printability">
           <summary><h2 data-i18n="printability.title">Viabilidad de impresión</h2><span class="group__sum pa-sum"></span></summary>
           <div class="group__body">

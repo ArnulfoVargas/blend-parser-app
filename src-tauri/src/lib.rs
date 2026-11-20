@@ -50,6 +50,7 @@ pub fn run() {
             commands::fix_mesh,
             commands::mesh_issues,
             commands::orient_for_print,
+            commands::plan_orientation,
             commands::set_rotation,
             commands::set_color_ops,
             commands::printers,

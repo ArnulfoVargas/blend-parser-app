@@ -79,6 +79,8 @@ export class Viewer {
   private plate: THREE.Mesh;
   private tape = new THREE.Group();
   private findings = new THREE.Group();
+  /** The faces a proposed turn would rest on the plate, tinted over the model. */
+  private resting: THREE.Mesh | null = null;
   private tapePoints: Vec3[] = [];
   /** Where the pointer is on the model while measuring. */
   private hover: Vec3 | null = null;
@@ -363,6 +365,7 @@ export class Viewer {
   /** Replaces the mesh. Keeps the camera unless `frame` is set. */
   load(data: PreviewMesh, frame: boolean) {
     this.data = data;
+    this.setResting(null);
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -1318,6 +1321,55 @@ export class Viewer {
       }
     }
     this.requestRender();
+  }
+
+  /**
+   * Tints the faces that would rest on the plate if the model were turned so
+   * `down` (preview axes, as the model stands now) faced it: the lowest along
+   * `down`, facing it. Null clears. Returns how many leaf triangles it tinted.
+   */
+  setResting(down: Vec3 | null): number {
+    if (this.resting) {
+      this.scene.remove(this.resting);
+      this.resting.geometry.dispose();
+      (this.resting.material as THREE.Material).dispose();
+      this.resting = null;
+    }
+    const box = this.mesh?.geometry.boundingBox;
+    if (!down || !this.data || !box) {
+      this.requestRender();
+      return 0;
+    }
+    const p = this.data.positions;
+    const d = new THREE.Vector3(...down).normalize();
+    const along = (i: number) => p[i] * d.x + p[i + 1] * d.y + p[i + 2] * d.z;
+    let base = -Infinity;
+    for (let i = 0; i < p.length; i += 3) base = Math.max(base, along(i));
+    // The same tolerance the backend takes for touching the plate.
+    const tol = box.getSize(new THREE.Vector3()).length() * 1e-3;
+    const picked: number[] = [];
+    const [a, b, c] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    for (let i = 0; i < p.length; i += 9) {
+      if (along(i) < base - tol || along(i + 3) < base - tol || along(i + 6) < base - tol) continue;
+      a.fromArray(p, i);
+      b.fromArray(p, i + 3);
+      c.fromArray(p, i + 6);
+      if (b.clone().sub(a).cross(c.clone().sub(a)).dot(d) <= 0) continue;
+      for (let k = 0; k < 9; k++) picked.push(p[i + k]);
+    }
+    if (picked.length) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(picked, 3));
+      const mat = new THREE.MeshBasicMaterial({
+        color: cssColor("--color-rest"), transparent: true, opacity: 0.75, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, depthWrite: false,
+      });
+      this.resting = new THREE.Mesh(geo, mat);
+      this.resting.renderOrder = 5;
+      this.scene.add(this.resting);
+    }
+    this.requestRender();
+    return picked.length / 9;
   }
 
   /** Shows the measured points (preview units) and the line between them. */

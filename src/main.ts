@@ -21,6 +21,7 @@ import {
   type Progress,
   type Issues,
   type MeshFix,
+  type OrientationPlan,
   type Summary,
   type TurnResult,
   type Vec3,
@@ -478,6 +479,7 @@ function render(s: Summary) {
   $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || REPAIRS.some((op) => st[op]));
   renderRepairs(s);
   void refreshIssues();
+  void refreshPlan();
   bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
 
   // Filament changes, with what the last change did.
@@ -1193,6 +1195,81 @@ for (const op of REPAIRS) {
   });
 }
 
+// ---- best orientation for printing -----------------------------------------------------
+
+const orientGroup = $<HTMLDetailsElement>("#orient-group");
+const orientAngle = $<HTMLInputElement>("#orient-angle");
+const orientBest = $<HTMLButtonElement>("#orient-best");
+/** The proposed turn for the geometry and angle `planFor` names. */
+let plan: OrientationPlan | null = null;
+let planFor = "";
+let planToken = 0;
+/** Typed by the user; until then the angle follows the printability panel's. */
+let angleTyped = false;
+const cm2 = (mm2: number) => nf(mm2 / 100, mm2 < 1000 ? 1 : 0);
+
+/** The angle to search with: the typed one, or the printability panel's. */
+function overhangAngle(): number | null {
+  const pa = document.querySelector<HTMLInputElement>("#pa-overhangDeg");
+  if (!angleTyped && pa && pa.value !== "" && Number(pa.value) !== Number(orientAngle.value)) orientAngle.value = pa.value;
+  const v = Number(orientAngle.value);
+  const ok = orientAngle.value.trim() !== "" && Number.isFinite(v) && v >= 0 && v <= 90;
+  orientAngle.setAttribute("aria-invalid", String(!ok));
+  return ok ? v : null;
+}
+
+/** The gain in words, the button and the face tinted in the view while the section is in sight. */
+function renderPlan() {
+  const showing = app.dataset.tab === "mesh" && orientGroup.open && plan !== null && plan.changes && summary !== null;
+  viewer.setResting(showing ? plan!.down : null);
+  $("#orient-legend").hidden = !showing;
+  orientBest.disabled = !plan?.changes || !summary;
+  $<HTMLButtonElement>("#orient-reset").disabled = !summary?.plate.rotated;
+  if (!summary) return bind("orientGain", "");
+  if (!plan || planFor === "") return bind("orientGain", t("orient.searching"));
+  const [o0, o1] = plan.overhangMm2;
+  const [c0, c1] = plan.contactMm2;
+  bind("orientGain", plan.changes
+    ? t("orient.gain", { from: cm2(o0), to: cm2(o1), base0: nf(c0), base1: nf(c1) })
+    : t("orient.already", { overhang: cm2(o0), base: nf(c0) }));
+  bind("orientSum", summary.plate.rotated ? t("orient.turned") : "");
+}
+
+/** Searches again when the model or the angle changed and the section is in sight. */
+async function refreshPlan() {
+  const s = summary;
+  const deg = overhangAngle();
+  if (!s || deg === null || app.dataset.tab !== "mesh" || !orientGroup.open) return renderPlan();
+  const key = `${geometryKey(s)}|${deg}`;
+  if (key === planFor) return renderPlan();
+  const mine = ++planToken;
+  planFor = "";
+  renderPlan();
+  try {
+    const found = await api.planOrientation(deg);
+    if (mine !== planToken) return;
+    plan = found;
+    planFor = key;
+  } catch (e) {
+    if (mine === planToken) toast(errText(e), "error");
+  }
+  renderPlan();
+}
+orientGroup.addEventListener("toggle", () => void refreshPlan());
+orientAngle.addEventListener("change", () => {
+  angleTyped = true;
+  void refreshPlan();
+});
+orientBest.addEventListener("click", async () => {
+  const p = plan;
+  if (!p?.changes || !summary) return;
+  const gain = t("orient.gain", { from: cm2(p.overhangMm2[0]), to: cm2(p.overhangMm2[1]), base0: nf(p.contactMm2[0]), base1: nf(p.contactMm2[1]) });
+  measured = [];
+  // Turning keeps the triangles and their paint; Ctrl+Z turns it back.
+  await apply(() => api.setRotation(p.rotation), () => toast(t("orient.done", { gain }), "ok", { label: t("stage.undo"), run: () => void undo() }));
+});
+$("#orient-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
+
 const colorOps = () => void apply(() => api.setColorOps(Number($<HTMLInputElement>("#detail").value), Number($<HTMLInputElement>("#island").value)));
 $("#detail").addEventListener("change", colorOps);
 $("#island").addEventListener("change", colorOps);
@@ -1533,6 +1610,7 @@ function selectTab(tab: Tab, focus = false) {
   $(".side").scrollTo({ top: 0 });
   placeToolOptions(tab);
   if (tab === "mesh") void refreshIssues();
+  void refreshPlan();
   // Each mode shows its own tools in the view: the cut opens with its tool, and
   // a tool the new mode does not have hands the view back to orbiting.
   const tool = app.dataset.tool as Tool;

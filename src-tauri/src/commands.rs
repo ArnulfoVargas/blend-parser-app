@@ -667,6 +667,26 @@ pub async fn mesh_issues(app: AppHandle) -> CmdResult<dto::MeshIssuesDto> {
     .await
 }
 
+/// The turn with the least overhang and what it gains, without turning; the
+/// panel shows it and `set_rotation` applies it.
+#[tauri::command]
+pub async fn plan_orientation(app: AppHandle, overhang_deg: f32) -> CmdResult<dto::OrientationDto> {
+    if !overhang_deg.is_finite() {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, _| {
+        let p = d.project.orientation_plan(overhang_deg.clamp(0.0, 90.0));
+        Ok(dto::OrientationDto {
+            changes: p.rotation != d.project.rotation(),
+            rotation: p.rotation,
+            down: p.down,
+            overhang_mm2: [p.now.0, p.after.0],
+            contact_mm2: [p.now.1, p.after.1],
+        })
+    })
+    .await
+}
+
 /// Turns the model to the orientation with the least overhang; one undoable step.
 #[tauri::command]
 pub async fn orient_for_print(app: AppHandle, overhang_deg: f32) -> CmdResult<Summary> {
@@ -681,7 +701,11 @@ pub async fn orient_for_print(app: AppHandle, overhang_deg: f32) -> CmdResult<Su
 /// Sets the model's rotation from load (rows of a 3×3 matrix); reverts a turn.
 #[tauri::command]
 pub async fn set_rotation(app: AppHandle, rotation: bp_core::Mat3) -> CmdResult<Summary> {
-    if rotation.iter().flatten().any(|v| !v.is_finite()) {
+    // Only a turn: rows of unit length at right angles, not a mirror. Anything else would warp the model.
+    let dot = |a: usize, b: usize| (0..3).map(|k| rotation[a][k] * rotation[b][k]).sum::<f32>();
+    let det = bp_core::geom::dot(rotation[0], bp_core::geom::cross(rotation[1], rotation[2]));
+    let turn = (0..3).all(|a| (0..3).all(|b| (dot(a, b) - if a == b { 1.0 } else { 0.0 }).abs() < 1e-3));
+    if rotation.iter().flatten().any(|v| !v.is_finite()) || !turn || (det - 1.0).abs() > 1e-3 {
         return Err(AppError::new("error.printabilityParams"));
     }
     with_doc(app, move |d, prefs| {

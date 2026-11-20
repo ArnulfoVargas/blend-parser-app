@@ -245,6 +245,44 @@ const scenarios = {
     check("repairs", "each other switch applies on its own", /Antes|Before/.test(oriented ?? "") && !(await b.execute(() => document.querySelector('#repair-ops input[data-op="fillHoles"]').checked)), oriented ?? "");
   },
 
+  // Malla → Orientación: the best turn for the figure upside down, what it gains, the face it rests on.
+  async orient(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#orient-best"))) return check("orient", "best orientation button", null);
+    // Upside down: two quarter turns about X.
+    for (let i = 0; i < 2; i++) { await click(b, 'button[data-turn="0"]'); await settle(b); }
+    await click(b, "[role=tab][data-tab=mesh]");
+    const gain = () => text(b, "[data-bind=orientGain]");
+    await b.waitUntil(async () => /→|ya está/i.test((await gain()) ?? ""), { timeout: 120000, interval: 200 });
+    const g = (await gain()) ?? "";
+    const nums = (g.match(/[\d.,]+(?= cm²)/g) ?? []).map((x) => Number(x.replace(/\./g, "").replace(",", ".")));
+    check("orient", "says what the turn gains", /Voladizo: .* cm² → .* cm²; base: .* → .* mm²/.test(g) && nums[1] < nums[0], g);
+    check("orient", "tints the face that will rest on the plate", await visible(b, "#orient-legend"));
+    await shot(b, "14-orient-preview");
+    await click(b, "#orient-best");
+    await settle(b);
+    await b.waitUntil(async () => /ya está/i.test((await gain()) ?? ""), { timeout: 120000, interval: 200 }).catch(() => {});
+    check("orient", "after the turn there is nothing better", /ya está/i.test((await gain()) ?? ""), (await gain()) ?? "");
+    const low = await b.executeAsync((done) => window.__TAURI_INTERNALS__.invoke("preview_mesh", {}).then((buf) => {
+      const leaves = new DataView(buf, 0, 8).getUint32(0, true);
+      const p = new Float32Array(buf, 8, leaves * 9);
+      let lo = Infinity;
+      for (let i = 2; i < p.length; i += 3) lo = Math.min(lo, p[i]);
+      done(lo);
+    }));
+    check("orient", "the turned model rests on the plate", Math.abs(low) < 1e-3, `lowest z ${low}`);
+    check("orient", "the tint goes once applied", !(await visible(b, "#orient-legend")));
+    await shot(b, "15-orient-done");
+    const undo = await b.execute(() => document.querySelector("#undo").title);
+    await b.execute(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true })));
+    await settle(b);
+    await b.waitUntil(async () => /→/.test((await gain()) ?? ""), { timeout: 120000, interval: 200 }).catch(() => {});
+    check("orient", "Ctrl+Z turns it back", /→/.test((await gain()) ?? ""), undo);
+    await click(b, "#orient-reset");
+    await settle(b);
+    check("orient", "Orientación original is at hand", await b.execute(() => document.querySelector("#orient-reset").disabled), "disabled once back");
+  },
+
   async english(b) {
     await waitState(b, "ready");
     const missing = await b.execute(() => [...document.querySelectorAll("[data-i18n]")].filter((el) => el.offsetParent && !el.textContent.trim()).map((el) => el.dataset.i18n));
@@ -254,7 +292,7 @@ const scenarios = {
 };
 
 const plan = [
-  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["english", { lang: "en" }],
+  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["english", { lang: "en" }],
 ];
 
 const metrics = {};

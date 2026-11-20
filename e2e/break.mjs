@@ -108,6 +108,10 @@ const attacks = {
     await attack(b, "mesh", "fix_mesh", { fix: { repair: true, orient: true, fillHoles: true, splitVertices: true, dropFloating: true, deepClean: true, minPieceMm: 1000, flattenMm: 1000 } });
     await attack(b, "mesh", "undo", {});
     await attack(b, "mesh", "orient_for_print", { overhangDeg: -10 });
+    for (const overhangDeg of [-10, 0, 90, 1e30, NaN, "45"]) await attack(b, "mesh", "plan_orientation", { overhangDeg });
+    await attack(b, "mesh", "set_rotation", { rotation: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] });
+    await attack(b, "mesh", "set_rotation", { rotation: [[1e30, 0, 0], [0, 1, 0], [0, 0, 1]] });
+    await attack(b, "mesh", "undo", {});
   },
   // The repair switches: counted while other commands run, toggled in a burst, undone in a loop.
   async repairs(b) {

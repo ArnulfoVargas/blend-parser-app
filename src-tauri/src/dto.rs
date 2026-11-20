@@ -76,6 +76,19 @@ impl From<bp_core::MeshIssues> for IssuesDto {
     }
 }
 
+/// The best turn for printing and what it gains, as now and after.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientationDto {
+    /// Whether it differs from the current turn.
+    pub changes: bool,
+    pub rotation: bp_core::Mat3,
+    /// Which way, in the preview as it is, will face the plate.
+    pub down: [f32; 3],
+    pub overhang_mm2: [f32; 2],
+    pub contact_mm2: [f32; 2],
+}
+
 /// The mesh built without the advanced repairs, and as it is now.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

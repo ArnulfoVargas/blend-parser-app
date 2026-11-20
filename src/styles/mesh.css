@@ -4,3 +4,7 @@
 .repairs__count { margin: 0 0 var(--space-2xs) calc(18px + var(--space-xs)); font-family: var(--font-outlier); font-size: var(--text-xs); }
 .repairs__count[data-tone="found"] { color: var(--color-warn-ink); }
 .repairs__count[data-tone="fixed"] { color: var(--color-success); }
+.orient__gain { font-family: var(--font-outlier); color: var(--color-ink-2); }
+.orient__legend { display: flex; align-items: center; gap: var(--space-xs); }
+.sw--rest { display: inline-block; width: 12px; height: 12px; border-radius: 3px; background: var(--color-rest); box-shadow: 0 0 0 1px var(--color-rule); }
+:root { --color-rest: oklch(70% 0.17 150); }

@@ -124,6 +124,18 @@ fn transpose(m: &Mat3) -> Mat3 {
     std::array::from_fn(|r| std::array::from_fn(|c| m[c][r]))
 }
 
+/// The turn [`Project::orientation_plan`] proposes and what it gains.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrientationPlan {
+    /// Absolute, like [`Project::set_rotation`]; the current one when nothing is clearly better.
+    pub rotation: Mat3,
+    /// The direction, in the model as it stands now, that will face the plate.
+    pub down: Vec3,
+    /// Overhang and plate contact in final mm², as it stands and after the turn.
+    pub now: (f32, f32),
+    pub after: (f32, f32),
+}
+
 /// How a turn moved the preview's positions, `p' = matrix · p + shift`, when
 /// it could be applied to them as they are.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -604,9 +616,20 @@ impl Project {
     /// ties go to more plate contact. Returns the current rotation when nothing
     /// stable is clearly better.
     pub fn best_rotation(&self, overhang_deg: f32) -> Mat3 {
+        self.orientation_plan(overhang_deg).rotation
+    }
+
+    /// [`Self::best_rotation`] with what it gains: overhang and plate contact
+    /// now and after the turn, and which way (in the model as it stands now)
+    /// will face the plate. Areas are in final mm².
+    pub fn orientation_plan(&self, overhang_deg: f32) -> OrientationPlan {
         let tris: Vec<[Vec3; 3]> =
             self.scene.parts.iter().flat_map(|p| (0..p.tris.len()).map(move |t| p.corners(t))).collect();
-        let Some((lo, hi)) = self.scene.bounds() else { return self.rotation };
+        let down = [0.0, 0.0, -1.0];
+        let k = self.scale * self.scale;
+        let Some((lo, hi)) = self.scene.bounds() else {
+            return OrientationPlan { rotation: self.rotation, down, now: (0.0, 0.0), after: (0.0, 0.0) };
+        };
         let diagonal = geom::len(geom::sub(hi, lo));
         let tol = diagonal * 1e-3;
         let faces: Vec<(Vec3, f32)> = tris
@@ -619,8 +642,8 @@ impl Project {
         let total: f32 = faces.iter().map(|f| f.1).sum();
         let centre = mass_centre(&tris, &faces, lo);
         let limit = overhang_deg.to_radians().sin();
-        // (overhang, contact) with `down` pointing at the plate; None when it would tip over.
-        let score = |down: Vec3| -> Option<(f32, f32)> {
+        // (overhang, contact) with `down` pointing at the plate, and whether it stands.
+        let measure = |down: Vec3| -> ((f32, f32), bool) {
             let up = geom::scale(down, -1.0);
             let base = tris.iter().flatten().map(|&p| geom::dot(p, up)).fold(f32::MAX, f32::min);
             let (mut overhang, mut contact) = (0.0, 0.0);
@@ -636,7 +659,11 @@ impl Project {
                 }
                 feet.extend(c.iter().copied().filter(|&p| geom::dot(p, up) <= base + tol));
             }
-            stands(&feet, centre, up, diagonal * 0.01).then_some((overhang, contact))
+            ((overhang, contact), stands(&feet, centre, up, diagonal * 0.01))
+        };
+        let score = |down: Vec3| -> Option<(f32, f32)> {
+            let (s, ok) = measure(down);
+            ok.then_some(s)
         };
         let mut candidates: Vec<Vec3> = vec![];
         for x in -1..=1 {
@@ -652,12 +679,9 @@ impl Project {
         largest.sort_by(|a, b| b.1.total_cmp(&a.1));
         candidates.extend(largest.iter().take(24).map(|f| f.0));
         // The model as it is stays a valid answer even if it would not stand.
-        let current = score([0.0, 0.0, -1.0]).unwrap_or_else(|| {
-            let up = [0.0, 0.0, 1.0];
-            let overhang = faces.iter().filter(|f| -geom::dot(f.0, up) > limit).map(|f| f.1).sum();
-            (overhang, 0.0)
-        });
-        let mut best = ([0.0, 0.0, -1.0], current);
+        let (now, now_stands) = measure(down);
+        let current = if now_stands { now } else { (now.0, 0.0) };
+        let mut best = (down, current);
         for d in candidates {
             let Some(s) = score(d) else { continue };
             let near = (s.0 - best.1 .0).abs() <= total * 0.01;
@@ -665,11 +689,17 @@ impl Project {
                 best = (d, s);
             }
         }
+        let area = |(o, c): (f32, f32)| (o * k, c * k);
         // Not worth turning for less than 1% of the surface.
         if best.1 .0 >= current.0 - total * 0.01 && best.1 .1 <= current.1 * 1.05 {
-            return self.rotation;
+            return OrientationPlan { rotation: self.rotation, down, now: area(now), after: area(now) };
         }
-        mat_mul(onto_down(best.0), self.rotation)
+        OrientationPlan {
+            rotation: mat_mul(onto_down(best.0), self.rotation),
+            down: best.0,
+            now: area(now),
+            after: area(best.1),
+        }
     }
 
     pub fn scene(&self) -> &Scene {
@@ -1495,12 +1525,21 @@ mod tests {
         let flipped = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
         p.set_rotation(flipped);
         let labels = p.preview().labels;
+        let plan = p.orientation_plan(45.0);
         let r = p.best_rotation(45.0);
+        assert_eq!(plan.rotation, r);
         assert_ne!(r, flipped);
+        // Upside down the 200 mm² base hangs flat over the plate; after the turn it rests on it.
+        assert!(plan.now.0 > 150.0 && plan.after.0 < plan.now.0, "{plan:?}");
+        assert!(plan.after.1 > plan.now.1, "{plan:?}");
+        // It lands on a face that does not face the plate now.
+        assert!((geom::len(plan.down) - 1.0).abs() < 1e-4 && plan.down[2] > -0.99, "{plan:?}");
         p.set_rotation(r);
         assert_eq!(p.preview().labels, labels, "turning keeps the triangles and their paint");
         // Resting on a flat side nothing overhangs, so another search changes nothing.
         assert_eq!(p.best_rotation(45.0), p.rotation());
+        let again = p.orientation_plan(45.0);
+        assert_eq!((again.down, again.now), ([0.0, 0.0, -1.0], again.after));
         let overhang = p.printability(crate::printability::Params::for_nozzle(0.4));
         assert_eq!(overhang.checks.iter().find(|c| c.code == "overhang").unwrap().count, 0);
         assert_eq!(p.undo_label(), Some("fix"));
