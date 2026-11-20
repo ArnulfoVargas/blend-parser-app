@@ -60,3 +60,7 @@
 .spl-controls :is(button, input):disabled { opacity: 0.55; cursor: not-allowed; }
 .app.is-working .spl-controls { pointer-events: none; cursor: progress; }
 @media (prefers-reduced-motion: reduce) { .spl-controls * { transition: none; animation: none; } }
+.spl-size { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2xs) var(--space-sm); }
+.spl-size__label { color: var(--color-ink-2); font-size: var(--text-xs); font-weight: 500; }
+.spl-size .spl-value { width: 7.5rem; }
+.spl-size .check { min-height: 30px; font-size: var(--text-xs); }

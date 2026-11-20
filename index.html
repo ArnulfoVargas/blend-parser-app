@@ -523,6 +523,14 @@
             <span class="spl-room" id="spl-room"></span>
             <button class="link" type="button" id="spl-scale" data-i18n="spl.scaleInstead" data-i18n-attr="title:spl.scaleHelp">Shrink to fit instead</button>
           </div>
+          <div class="spl-size" role="group" aria-labelledby="spl-size-label">
+            <span class="spl-size__label" id="spl-size-label" data-i18n="spl.size" data-i18n-attr="title:spl.sizeHelp">Medidas que necesitas</span>
+            <label class="cut-value spl-value" data-axis="x"><span>X</span><input id="spl-sx" type="number" inputmode="decimal" min="1" max="1000" step="1" aria-label="X (mm)"><i aria-hidden="true">mm</i></label>
+            <label class="cut-value spl-value" data-axis="y"><span>Y</span><input id="spl-sy" type="number" inputmode="decimal" min="1" max="1000" step="1" aria-label="Y (mm)"><i aria-hidden="true">mm</i></label>
+            <label class="cut-value spl-value" data-axis="z"><span>Z</span><input id="spl-sz" type="number" inputmode="decimal" min="1" max="1000" step="1" aria-label="Z (mm)"><i aria-hidden="true">mm</i></label>
+            <label class="check"><input type="checkbox" id="spl-prop" checked><span data-i18n="spl.proportional">Proporcional</span></label>
+            <button class="btn btn--quiet btn--sm" type="button" id="spl-resize" disabled data-i18n="spl.resize" data-i18n-attr="title:spl.sizeHelp">Usar estas medidas</button>
+          </div>
           <div class="spl-axes" role="group" data-i18n-attr="aria-label:spl.cuts">
             <div class="spl-axis" data-axis="0"><span class="spl-axis__name">X</span><button class="cut-action" type="button" data-spl-less="0" data-i18n-attr="title:spl.less;aria-label:spl.less">&minus;</button><output class="spl-axis__count" data-spl-count="0">0</output><button class="cut-action" type="button" data-spl-more="0" data-i18n-attr="title:spl.more;aria-label:spl.more">+</button><div class="spl-axis__at" data-spl-at="0"></div></div>
             <div class="spl-axis" data-axis="1"><span class="spl-axis__name">Y</span><button class="cut-action" type="button" data-spl-less="1" data-i18n-attr="title:spl.less;aria-label:spl.less">&minus;</button><output class="spl-axis__count" data-spl-count="1">0</output><button class="cut-action" type="button" data-spl-more="1" data-i18n-attr="title:spl.more;aria-label:spl.more">+</button><div class="spl-axis__at" data-spl-at="1"></div></div>

@@ -526,6 +526,13 @@ const splitPanel = new SplitPanel({
   },
   // Shrinking is the user's call, never the split's.
   shrink: () => void apply(() => api.fitToPlate(), () => toast(t("spl.shrunk"))),
+  resize: async (size) => {
+    if (!size.every((v) => v >= SIZE_MIN && v <= SIZE_MAX)) {
+      toast(t("error.sizeRange", { min: nf(SIZE_MIN), max: nf(SIZE_MAX) }), "error");
+      return false;
+    }
+    return (await apply(() => api.setSize(size), () => toast(t("spl.resized", { size: dims(size, 1) })))) !== undefined;
+  },
   close: () => setTool("orbit"),
   redraw: () => viewer.requestRender(),
   error: errText,
