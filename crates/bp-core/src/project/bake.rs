@@ -201,4 +201,16 @@ mod tests {
         assert!(p.undo());
         assert_eq!(p.object_count(), 1);
     }
+
+    #[test]
+    fn the_chosen_optimisations_still_apply_after_a_cut() {
+        let scene = Scene { parts: vec![open_box()], images: vec![], materials: vec![] };
+        let mut p = Project::new(scene, 1);
+        let ops = MeshOps { fill_holes: true, orient: true, deep_clean: true, ..p.mesh_ops() };
+        p.set_mesh_ops(ops);
+        assert_eq!(p.cut_plane([0.0, 0.0, 3.0], [0.0, 0.0, 1.0], true, true, false, &[]), Ok(()));
+        assert_eq!(p.mesh_ops(), ops);
+        // Rebuilt with them: every piece of the working mesh is closed.
+        assert!(p.work.parts.iter().all(|w| crate::mesh::boundary_loops(w).1 == 0));
+    }
 }

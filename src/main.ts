@@ -3085,7 +3085,8 @@ function selectTab(tab: Tab, focus = false) {
   // a tool the new mode does not have hands the view back to orbiting.
   const tool = app.dataset.tool as Tool;
   if (tab === "cut") {
-    if (!toolModes(tool).includes("cut")) setTool("section");
+    // A tool of Cortes' own stays; one shared with the other modes hands over to the cut.
+    if (toolModes(tool).join(" ") !== "cut") setTool("section");
   } else if (!toolModes(tool).includes(tab)) setTool("orbit");
   try {
     // A cut left open would turn the cut on at the next start: only the others are remembered.

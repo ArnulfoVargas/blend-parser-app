@@ -126,6 +126,8 @@ const scenarios = {
     await settle(b);
     await shot(b, "03-cut-preview");
     await click(b, "#cut-keep-other");
+    // The cut is checked on a copy first; Apply waits for that.
+    await b.waitUntil(() => b.execute(() => !document.querySelector("#cut-apply").disabled), { timeout: 30000, interval: 200 }).catch(() => {});
     await click(b, "#cut-apply");
     await settle(b);
     const undoOn = await b.execute(() => !document.querySelector("#cut-undo")?.disabled);
@@ -217,17 +219,19 @@ const scenarios = {
     check("tabs", "Malla's view offers orbit, measure, move and turn", (await tools()) === meshTools, await tools());
     await shot(b, "10-tab-mesh");
     await key(b, "c");
-    check("tabs", "Cortes' view offers orbit, measure and the cut", (await tools()) === "orbit,measure,section", await tools());
+    check("tabs", "Cortes' view offers orbit, measure and the cutting tools", (await tools()) === "orbit,measure,section,connect,separate,split,region", await tools());
     check("tabs", "C opens Cortes with the cut on", (await sel()) === "cut" && (await b.execute(() => document.querySelector("[data-app]").dataset.tool)) === "section");
-    await setValue(b, "#cut-mm", 30);
+    await setValue(b, "#cut-z", 30, "input");
     await settle(b);
     const t = await b.execute(() => document.querySelector("#cut-pos").value);
-    check("tabs", "typing 30 mm moves the slider", Math.abs(Number(t) - (30 / 80.78) * 100) < 1, `${t} %`);
-    await setValue(b, "#cut-mm", "abc");
+    const depth = (await text(b, "#cut-depth-value")) ?? "";
+    check("tabs", "typing Z 30 mm moves the plane there", /^30[,.]0 mm$/.test(depth), `${depth} · ${t} %`);
+    await setValue(b, "#cut-z", "abc", "input");
     check("tabs", "junk height leaves the cut where it was", (await b.execute(() => document.querySelector("#cut-pos").value)) === t);
-    const help = await text(b, "[data-bind=cutPosHelp]");
-    check("tabs", "says which side stays", /abajo|bottom/.test(help ?? ""), help ?? "");
+    const help = await text(b, "#cut-side");
+    check("tabs", "says which side stays", /A|B|Ambas|Both/.test(help ?? ""), help ?? "");
     await shot(b, "11-tab-cut");
+    await b.waitUntil(() => b.execute(() => !document.querySelector("#cut-apply").disabled), { timeout: 30000, interval: 200 }).catch(() => {});
     await click(b, "#cut-apply");
     await settle(b);
     check("tabs", "after cutting the tab stays on Cortes, undo is on", (await sel()) === "cut" && (await b.execute(() => !document.querySelector("#cut-undo").disabled)));
@@ -541,9 +545,9 @@ const scenarios = {
     await key(b, "z");
     const plain = path.join(OUT, "view-plain.3mf");
     await invoke(b, "export_3mf", { path: plain });
-    await key(b, "k");
+    await key(b, "v");
     await settle(b);
-    check("meshView", "K turns the section on in Malla", await b.execute(() => document.querySelector("[data-app]").dataset.tool === "clip" && document.querySelector('button[data-tool="clip"]').dataset.on === "true"));
+    check("meshView", "V turns the section on in Malla", await b.execute(() => document.querySelector("[data-app]").dataset.tool === "clip" && document.querySelector('button[data-tool="clip"]').dataset.on === "true"));
     await shot(b, "26-mesh-section");
     const cut = path.join(OUT, "view-section.3mf");
     await invoke(b, "export_3mf", { path: cut });

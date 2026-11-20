@@ -847,6 +847,17 @@ impl Mesh {
                     return false;
                 }
                 let part = &parts[*pi];
+                // Faces turned inwards enclose a cavity: the inner wall of a hollow model stays.
+                let signed: f32 = tris
+                    .iter()
+                    .map(|&t| {
+                        let c = part.corners(t);
+                        geom::dot(c[0], geom::cross(c[1], c[2])) / 6.0
+                    })
+                    .sum();
+                if signed < 0.0 {
+                    return false;
+                }
                 // Up to 64 faces, spread over the piece.
                 let step = (tris.len() / 64).max(1);
                 !tris.iter().step_by(step).any(|&ti| {
@@ -1761,12 +1772,20 @@ mod tests {
             head.positions.extend(extra.positions);
             head.tris.extend(extra.tris.iter().map(|t| t.map(|v| v + base)));
         }
+        // A hollow's inner wall, faces turned inwards: a cavity, not a hidden piece.
+        let mut cavity = cube([15.0; 3], [18.0; 3]);
+        for t in &mut cavity.tris {
+            t.swap(1, 2);
+        }
+        let base = head.positions.len() as u32;
+        head.positions.extend(cavity.positions);
+        head.tris.extend(cavity.tris.iter().map(|t| t.map(|v| v + base)));
         // A tooth inside the head, in a part of its own.
         let tooth = cube([2.0; 3], [4.0; 3]);
         let mut m = Mesh { parts: vec![head, tooth], ..Default::default() };
         m.remove_hidden_pieces();
         assert_eq!(m.repair.hidden_pieces, 2);
-        assert_eq!(m.parts[0].tris.len(), 24, "the head and the hat stay");
+        assert_eq!(m.parts[0].tris.len(), 36, "the head, the hat and the cavity stay");
         assert!(m.parts[1].tris.is_empty());
     }
     use super::*;

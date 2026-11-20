@@ -143,6 +143,12 @@ pub async fn open_blend(
         emit("palette");
         let mut project = bp_core::Project::new(imported.scene, 4);
         let state = handle.state::<AppState>();
+        // The clean-up and simplification chosen for the last model apply to this
+        // one too; what depends on a model's size (base, hollow, thicken, rounding) does not.
+        let carried = state.doc.lock()?.as_ref().map(|d| carry_mesh_ops(d.project.mesh_ops()));
+        if let Some(ops) = carried {
+            project.set_mesh_ops(ops);
+        }
         let prefs = state.prefs.lock()?;
         project.set_print_ops(print_ops(&printer, &prefs));
         let mut doc = Document {
@@ -199,6 +205,24 @@ pub async fn open_project(app: AppHandle, path: String) -> CmdResult<Summary> {
     })
     .await
     .map_err(AppError::internal)?
+}
+
+/// The mesh operations a newly opened model takes from the one before it.
+fn carry_mesh_ops(last: MeshOps) -> MeshOps {
+    MeshOps {
+        keep_ratio: last.keep_ratio,
+        repair: last.repair,
+        min_piece_mm: last.min_piece_mm,
+        orient: last.orient,
+        fill_holes: last.fill_holes,
+        split_vertices: last.split_vertices,
+        drop_floating: last.drop_floating,
+        deep_clean: last.deep_clean,
+        protect_colors: last.protect_colors,
+        protect_detail: last.protect_detail,
+        remove_hidden: last.remove_hidden,
+        ..MeshOps::default()
+    }
 }
 
 #[tauri::command]
