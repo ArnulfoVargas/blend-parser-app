@@ -53,6 +53,17 @@ import { RegionPanel } from "./region-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
+// Containers without a scrollbar never stay scrolled (see app.css): a focus
+// that scrolled one anyway is undone at once, so the app never shifts out of place.
+const FIXED = "html, body, .app, .work, .stage, .stage__view, .stage__foot";
+document.addEventListener("scroll", (e) => {
+  const el = e.target === document ? document.documentElement : e.target;
+  if (el instanceof Element && el.matches(FIXED) && getComputedStyle(el).overflowY !== "auto" && (el.scrollTop || el.scrollLeft)) {
+    el.scrollTop = 0;
+    el.scrollLeft = 0;
+  }
+}, true);
+
 const app = document.querySelector<HTMLElement>("[data-app]")!;
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 const live = $<HTMLParagraphElement>("#live");
@@ -2977,8 +2988,23 @@ function setView(v: View) {
   viewer.setView(v);
 }
 
+/** What each tool leaves on the view goes when another tool is picked: the cut's
+ *  plane (shared by the cut and its connectors), Malla's section (kept only for
+ *  the thickness tool, which measures through it), the tape and the wall. */
+function leaveTool(from: Tool, to: Tool) {
+  if (from === to) return;
+  const plane = (t: Tool) => t === "section" || t === "connect";
+  if (plane(from) && !plane(to)) setSection(null);
+  if (from === "clip" && to !== "thickness") clipEnd();
+  if (from === "thickness" && to !== "clip") {
+    clipEnd();
+    wall = null;
+  }
+  if (from === "measure") measured = [];
+}
+
 function setTool(tool: Tool) {
-  // The section turns on with its tool and stays while other Malla tools are used.
+  leaveTool((app.dataset.tool as Tool) ?? "orbit", tool);
   if (tool === "clip") clipStart();
   app.dataset.tool = tool;
   // A tool from another mode (its key, say) opens that mode first.

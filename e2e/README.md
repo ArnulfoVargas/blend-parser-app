@@ -24,6 +24,8 @@ problemas de geometría no cerrada.
 |---|---|
 | `node run.mjs [escenario…]` | Flujo normal: abrir, tamaño, corte, malla, viabilidad, pincel, exportar, accesibilidad, modos, inglés, y las herramientas de Malla: reparaciones, orientación, vistas de viabilidad, grosor, simplificar protegido, suavizar, vaciar, engrosar y las ayudas del visor (con `cylinder.blend`, `head.blend` y `thin.blend` de `simple.py`). |
 | `node break.mjs [ataque…]` | Intenta romper la app: argumentos hostiles a cada comando, ráfagas concurrentes, deshacer en bucle, cortar todo, basura en cada campo numérico, clics repetidos. Tras cada ataque comprueba que el documento sigue respondiendo (un *panic* con el documento bloqueado lo deja inservible) y que la ventana no registró errores. |
+| `node probe-layout.mjs [modelo]` | Cada herramienta a 1024×640, 1280×720 y 1440×900 (`BP_SIZES`, `BP_TOOLS`): capturas, controles que la ventana corta y contenedores sin barra que se desplazaron al enfocar un campo. |
+| `node probe-scroll.mjs [modelo]` / `probe-foot.mjs` | Cambia cada ajuste del panel lateral / de las herramientas bajo la vista y avisa si el panel o la vista saltaron. |
 | `node probe-cut.mjs <modelo>` / `probe-axis.mjs` | Dónde se rechaza un corte plano / por eje, del 5 % al 95 %. |
 
 Variables: `BP_APP` (binario), `BP_ROOT` (checkout cuya interfaz sirve Vite;

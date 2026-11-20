@@ -631,3 +631,29 @@ details.group[open] .group__sum { visibility: hidden; }
 .cutp__apply { width: 100%; }
 .cutp .field__unit .input { width: 6rem; }
 .field__label { font-size: var(--text-sm); font-weight: 500; color: var(--color-ink-2); }
+
+/* Nothing but a panel with its own scrollbar may scroll. A focused control
+   cut off by the window would otherwise scroll the whole app (or the view)
+   out of place, and with no scrollbar there would be no way back. */
+html, body, .app, .work, .stage__view { overflow: clip; }
+.app { grid-template-columns: minmax(0, 1fr); }
+.bar { min-width: 0; overflow: clip; }
+/* Short of room, the printer's name gives way first, then the wordmark; nothing overlaps. */
+.bar__end { min-width: 0; flex: 0 1 auto; }
+.bar__end > #printer-picker { min-width: 0; flex: 0 1 auto; }
+.bar__end > #printer-picker .picker__button { max-width: 100%; }
+@media (max-width: 66rem) {
+  .bar { gap: var(--space-xs); padding-inline: var(--space-sm); }
+  .menubar { padding-right: var(--space-xs); }
+  .wordmark { display: none; }
+}
+
+/* A short window: the view keeps room to work in and the tool's controls
+   under it scroll with the column instead of squeezing the view to nothing. */
+.stage { overflow-x: clip; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
+.stage__view { flex: 1 0 auto; min-height: min(320px, 50dvh); }
+@media (max-height: 760px) {
+  .stage { gap: var(--space-xs); }
+  .stage__top h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .stage__top { justify-content: flex-end; }
+}
