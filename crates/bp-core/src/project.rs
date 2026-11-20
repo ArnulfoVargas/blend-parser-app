@@ -4242,6 +4242,12 @@ mod tests {
                 assert!(!p.can_undo_cut());
             }
         }
+        // An open surface is cut as it is instead of being refused, and undone in one step.
+        let mut p = Project::new(self::scene(), 2);
+        let before = p.preview().positions;
+        assert_eq!(p.cut_plane([0.0, 0.0, 8.0], [0.0, 0.0, 1.0], true, false, false, &[]), Ok(()));
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before);
     }
 
     #[test]
