@@ -6,6 +6,8 @@
 // to e2e/out. A scenario whose control is missing on this branch is skipped, not failed,
 // so the same run compares branches.
 import path from "node:path";
+import { readFileSync } from "node:fs";
+import { inflateRawSync } from "node:zlib";
 import {
   HERE, OUT, services, stop, session, waitState, settle, shot, report, times, probe,
   click, exists, visible, text, setValue, key, sleep,
@@ -16,6 +18,35 @@ const MODEL = process.env.BP_MODEL ?? path.join(HERE, "e2e/fixtures/out/figure.b
 const HEAD = path.join(HERE, "e2e/fixtures/out/head.blend");
 /** A closed cylinder, 44 × 45 mm (`fixtures/simple.py`). */
 const CYLINDER = path.join(HERE, "e2e/fixtures/out/cylinder.blend");
+/** The `3D/Objects/*.model` files of a 3MF, as text. */
+function objectModels(file) {
+  const buf = readFileSync(file);
+  const end = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  let at = buf.readUInt32LE(end + 16);
+  const out = [];
+  for (let n = buf.readUInt16LE(end + 10); n > 0; n--) {
+    const [method, size, nameLen, extra, comment, local] = [buf.readUInt16LE(at + 10), buf.readUInt32LE(at + 20), buf.readUInt16LE(at + 28), buf.readUInt16LE(at + 30), buf.readUInt16LE(at + 32), buf.readUInt32LE(at + 42)];
+    const name = buf.toString("utf8", at + 46, at + 46 + nameLen);
+    if (/^3D\/Objects\/.*\.model$/.test(name)) {
+      const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+      const data = buf.subarray(start, start + size);
+      out.push((method === 8 ? inflateRawSync(data) : data).toString("utf8"));
+    }
+    at += 46 + nameLen + extra + comment;
+  }
+  return out;
+}
+/** Every triangle of a 3MF by its corners (to the micrometre), with its paint. */
+function paintedTriangles(file) {
+  const tris = new Map();
+  for (const xml of objectModels(file)) {
+    const v = [...xml.matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)].map((m) => [m[1], m[2], m[3]].map((x) => Number(x).toFixed(3)).join(","));
+    for (const m of xml.matchAll(/<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"(?: paint_color="([^"]*)")?/g)) {
+      tris.set([v[m[1]], v[m[2]], v[m[3]]].sort().join("|"), m[4] ?? "");
+    }
+  }
+  return tris;
+}
 const invoke = (b, cmd, args = {}) => b.executeAsync((c, a, done) => window.__TAURI_INTERNALS__.invoke(c, a).then((v) => done({ v }), (e) => done({ e: JSON.stringify(e) })), cmd, args);
 const only = process.argv.slice(2);
 const results = [];
@@ -409,6 +440,48 @@ const scenarios = {
     check("smoothPaint", "filament changes do not go up", !!after && after.estimate.swaps <= before.estimate.swaps, `${before.estimate.swaps} → ${after?.estimate.swaps}`);
   },
 
+  // Malla → Vaciar on the closed two-colour cylinder: the saving, the drains, the paint outside kept, thin walls flagged.
+  async hollow(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#hollow-apply"))) return check("hollow", "hollow section", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    await b.execute(() => (document.querySelector("#hollow-group").open = true));
+    const solidFile = path.join(OUT, "hollow-solid.3mf");
+    await invoke(b, "export_3mf", { path: solidFile });
+    await setValue(b, "#hollow-wall", 0.5);
+    check("hollow", "a wall under two nozzle lines cannot be asked for", await b.execute(() => document.querySelector("#hollow-apply").disabled && document.querySelector("#hollow-wall").getAttribute("aria-invalid") === "true"), await text(b, "[data-bind=hollowWallHelp]"));
+    await setValue(b, "#hollow-wall", 2);
+    await click(b, "#hollow-apply");
+    await settle(b);
+    const result = await text(b, "[data-bind=hollowResult]");
+    check("hollow", "says what it saves", /−\d+ % de volumen, −[\d,]+ g/.test(result ?? ""), result ?? "");
+    const issues = (await invoke(b, "mesh_issues")).v;
+    check("hollow", "the hollow model is still closed", issues?.after.openEdges === 0 && issues?.after.flippedTriangles === 0, JSON.stringify(issues?.after));
+    const hollowFile = path.join(OUT, "hollow-2mm.3mf");
+    await invoke(b, "export_3mf", { path: hollowFile });
+    const [a, h] = [paintedTriangles(solidFile), paintedTriangles(hollowFile)];
+    const kept = [...a].filter(([k, paint]) => h.get(k) === paint).length;
+    check("hollow", "the 3MF keeps the outside and its paint as it was", kept === a.size && h.size > a.size, `${kept} of ${a.size} outer triangles unchanged; ${h.size} in all`);
+    await shot(b, "22-hollow");
+    // Two drains through the base, then a wall the printability check flags as thin.
+    await click(b, "#drains-2");
+    await click(b, "#hollow-apply");
+    await settle(b);
+    const drained = await text(b, "[data-bind=hollowResult]");
+    const after = (await invoke(b, "mesh_issues")).v;
+    check("hollow", "two drains through the base, still closed", /2 de 2 agujeros/.test(drained ?? "") && after?.after.openEdges === 0, drained ?? "");
+    await setValue(b, "#hollow-wall", 0.8);
+    await click(b, "#hollow-apply");
+    await settle(b);
+    const params = { extrusionMm: 0.44, perimeters: 2, wallMm: 0.88, detailMm: 0.44, componentMm: 2, overhangDeg: 45, contactMm2: 4, toleranceMm: 0.001, samples: 512 };
+    const report = (await invoke(b, "analyze_printability", { params })).v;
+    const thin = report?.checks.find((c) => c.code === "thinWalls");
+    check("hollow", "printability flags the 0,8 mm wall as too thin", thin?.evidence === "estimated" && thin.count > 0, `${thin?.count} thin of ${report?.thickness.length}, min ${thin?.measurement?.toFixed(2)} mm`);
+    await click(b, "#hollow-off");
+    await settle(b);
+    check("hollow", "Rellenar gives the solid back", await b.execute(() => document.querySelector("[data-bind=hollowResult]").textContent === ""));
+  },
+
   async english(b) {
     await waitState(b, "ready");
     const missing = await b.execute(() => [...document.querySelectorAll("[data-i18n]")].filter((el) => el.offsetParent && !el.textContent.trim()).map((el) => el.dataset.i18n));
@@ -418,7 +491,7 @@ const scenarios = {
 };
 
 const plan = [
-  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["simplify", {}], ["smooth", { model: CYLINDER }], ["smoothPaint", {}], ["english", { lang: "en" }],
+  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["simplify", {}], ["smooth", { model: CYLINDER }], ["smoothPaint", {}], ["hollow", { model: CYLINDER }], ["english", { lang: "en" }],
 ];
 
 const metrics = {};

@@ -277,6 +277,34 @@
             </div>
           </div>
         </details>
+        <details class="group" id="hollow-group">
+          <summary><h2 data-i18n="hollow.title">Vaciar</h2><span class="group__sum" data-bind="hollowSum"></span></summary>
+          <div class="group__body">
+            <div class="field">
+              <label for="hollow-wall" data-i18n="hollow.wall">Grosor de pared</label>
+              <div class="field__unit"><input class="input" id="hollow-wall" type="number" inputmode="decimal" min="0.2" max="50" step="0.2" value="2" aria-describedby="hollow-wall-help"><span>mm</span></div>
+              <p class="help" id="hollow-wall-help" data-bind="hollowWallHelp"></p>
+            </div>
+            <fieldset class="keys" id="hollow-drains">
+              <legend data-i18n="hollow.drains">Agujeros de drenaje en la base</legend>
+              <input type="radio" name="drains" id="drains-0" value="0" checked><label for="drains-0">0</label>
+              <input type="radio" name="drains" id="drains-1" value="1"><label for="drains-1">1</label>
+              <input type="radio" name="drains" id="drains-2" value="2"><label for="drains-2">2</label>
+              <input type="radio" name="drains" id="drains-3" value="3"><label for="drains-3">3</label>
+              <input type="radio" name="drains" id="drains-4" value="4"><label for="drains-4">4</label>
+            </fieldset>
+            <div class="field">
+              <label for="drain-mm" data-i18n="hollow.drainSize">Diámetro de los agujeros</label>
+              <div class="field__unit"><input class="input" id="drain-mm" type="number" inputmode="decimal" min="1" max="20" step="0.5" value="3"><span>mm</span></div>
+            </div>
+            <p class="help" data-i18n="hollow.colourHelp">La pared interior toma el color de la cara exterior más cercana; la pintura de fuera no cambia.</p>
+            <p class="help hollow__result" data-bind="hollowResult" aria-live="polite"></p>
+            <div class="row-actions">
+              <button class="btn btn--primary btn--sm" type="button" id="hollow-apply" data-i18n="hollow.apply" disabled>Vaciar</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="hollow-off" data-i18n="hollow.off" disabled>Rellenar</button>
+            </div>
+          </div>
+        </details>
         <details class="group" id="base-group" open>
           <summary><h2 data-i18n="mesh.base">Base</h2><span class="group__sum num" data-bind="baseSum"></span></summary>
           <div class="group__body">

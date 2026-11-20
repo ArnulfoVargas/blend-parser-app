@@ -170,6 +170,25 @@ const attacks = {
     const h = await health(b);
     log("smoothing", "16 concurrent smooths and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
   },
+  // Hollowing: hostile walls and drains, an open model, and hollowing in a burst with undos.
+  async hollowing(b) {
+    for (const args of [{ wallMm: -1, drains: 0, drainMm: 3 }, { wallMm: 1e30, drains: 0, drainMm: 3 }, { wallMm: NaN, drains: 0, drainMm: 3 },
+      { wallMm: 0.1, drains: 0, drainMm: 3 }, { wallMm: 2, drains: 9, drainMm: 3 }, { wallMm: 2, drains: 4, drainMm: 0 }, { wallMm: 2, drains: 4, drainMm: 1e9 },
+      { wallMm: 50, drains: 0, drainMm: 3 }, { wallMm: 2, drains: 4, drainMm: 20 }, { wallMm: 0.8, drains: 4, drainMm: 1 }, { wallMm: 0, drains: 0, drainMm: 3 }])
+      await attack(b, "hollowing", "hollow_mesh", args, 180000);
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 6; i++) {
+        calls.push(I("hollow_mesh", { wallMm: 1 + i, drains: i % 3, drainMm: 3 }));
+        calls.push(I("fix_mesh", { fix: { fillHoles: i % 2 === 0 } }));
+        calls.push(I("undo", {}));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("hollowing", "18 concurrent hollows, repairs and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+  },
   // Cuts, in each branch's signature (the missing ones report "missing").
   async cuts(b) {
     for (const t of [0, 1, -1, 2, 0.5]) await attack(b, "cuts", "cut_model", { axis: 2, t, keepLow: true, keepOther: true, joint: null });

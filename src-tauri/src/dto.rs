@@ -76,6 +76,19 @@ impl From<bp_core::MeshIssues> for IssuesDto {
     }
 }
 
+/// What hollowing did: volumes in mm³, the voxel (its accuracy) in mm, and
+/// why it did nothing ("open", "noRoom") when it did not.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HollowDto {
+    pub solid_mm3: f32,
+    pub volume_mm3: f32,
+    pub cell_mm: f32,
+    pub drains: u8,
+    pub drains_wanted: u8,
+    pub refused: Option<&'static str>,
+}
+
 /// The best turn for printing and what it gains, as now and after.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +199,9 @@ pub struct SettingsDto {
     pub subdivide: u8,
     pub smooth: u8,
     pub crease_deg: f32,
+    pub hollow_mm: f32,
+    pub drains: u8,
+    pub drain_mm: f32,
     /// Rows of the rotation applied to the model as loaded.
     pub rotation: bp_core::Mat3,
     pub border_detail: u8,
@@ -218,6 +234,9 @@ pub struct Summary {
     pub contact_mm2: f32,
     /// How far simplifying moved the surface at most, in mm; 0 unsimplified.
     pub deviation_mm: f32,
+    /// The model's volume in mm³, and what hollowing did when it was asked for.
+    pub volume_mm3: f32,
+    pub hollow: Option<HollowDto>,
     pub repair: RepairDto,
     pub estimate: EstimateDto,
     pub settings: SettingsDto,
@@ -387,6 +406,9 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         subdivide,
         smooth,
         crease_deg,
+        hollow_mm,
+        drains,
+        drain_mm,
     } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
@@ -428,6 +450,18 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         min_detail_mm2: min_detail,
         contact_mm2: stats.contact_mm2,
         deviation_mm: stats.deviation_mm,
+        volume_mm3: stats.volume_mm3,
+        hollow: stats.hollow.map(|h| HollowDto {
+            solid_mm3: h.solid_volume,
+            volume_mm3: h.volume,
+            cell_mm: h.cell,
+            drains: h.drains,
+            drains_wanted: h.drains_wanted,
+            refused: h.refused.map(|r| match r {
+                bp_core::hollow::Refusal::Open => "open",
+                bp_core::hollow::Refusal::NoRoom => "noRoom",
+            }),
+        }),
         repair: RepairDto {
             welded_vertices: stats.repair.welded_vertices,
             degenerate_triangles: stats.repair.degenerate_triangles,
@@ -461,6 +495,9 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             subdivide,
             smooth,
             crease_deg,
+            hollow_mm,
+            drains,
+            drain_mm,
             rotation: p.rotation(),
             border_detail,
             min_island_mm2,

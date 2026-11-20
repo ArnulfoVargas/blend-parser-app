@@ -662,6 +662,30 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
     .await
 }
 
+/// Hollows the model to a wall of `wall_mm` with `drains` holes of `drain_mm`
+/// through the base, as one undoable step; a wall of 0 fills it again. The wall
+/// is at least two lines of the nozzle.
+#[tauri::command]
+pub async fn hollow_mesh(app: AppHandle, wall_mm: f32, drains: u8, drain_mm: f32) -> CmdResult<Summary> {
+    if !wall_mm.is_finite()
+        || !(0.0..=50.0).contains(&wall_mm)
+        || drains > bp_core::mesh::MAX_DRAINS
+        || !(1.0..=20.0).contains(&drain_mm)
+    {
+        return Err(AppError::new("error.hollowParams"));
+    }
+    with_doc(app, move |d, prefs| {
+        let min = 2.0 * d.printer.nozzle_mm;
+        if wall_mm > 0.0 && wall_mm < min - 1e-4 {
+            return Err(AppError::with("error.hollowWall", json!({ "min": min })));
+        }
+        let now = d.project.mesh_ops();
+        d.project.fix_mesh(MeshOps { hollow_mm: wall_mm, drains, drain_mm, ..now });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
 /// Subdivides and smooths the model as one undoable step. Refused when the
 /// result would pass `max_triangles` (the panel's cap).
 #[tauri::command]

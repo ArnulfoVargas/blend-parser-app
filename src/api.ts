@@ -12,7 +12,7 @@ export interface Repair {
 export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; hollowMm: number; drains: number; drainMm: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -124,6 +124,9 @@ export interface Summary {
   contactMm2: number;
   /** How far simplifying moved the surface at most, in mm; 0 unsimplified. */
   deviationMm: number;
+  /** The model's volume, and what hollowing did (volumes in mm³; why not, if it did nothing). */
+  volumeMm3: number;
+  hollow: { solidMm3: number; volumeMm3: number; cellMm: number; drains: number; drainsWanted: number; refused: "open" | "noRoom" | null } | null;
   repair: Repair;
   estimate: Estimate;
   settings: Settings;
@@ -164,6 +167,8 @@ export function decodePreview(buf: ArrayBuffer): PreviewMesh {
 export const api = {
   analyzePrintability: (params: PrintabilityParams) => invoke<PrintabilityReport>("analyze_printability", { params }),
   fixMesh: (fix: MeshFix) => invoke<Summary>("fix_mesh", { fix }),
+  /** Hollows to a wall of `wallMm` (0 fills it again) with drains through the base; one undo step. */
+  hollowMesh: (wallMm: number, drains: number, drainMm: number) => invoke<Summary>("hollow_mesh", { wallMm, drains, drainMm }),
   /** Subdivides and smooths as one undo step; refused past `maxTriangles`. */
   smoothMesh: (subdivide: number, smooth: number, creaseDeg: number, maxTriangles: number) =>
     invoke<Summary>("smooth_mesh", { subdivide, smooth, creaseDeg, maxTriangles }),

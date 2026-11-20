@@ -123,6 +123,7 @@ mod tests {
             parts: vec![MeshPart { name: "c".into(), positions, tris, origin: None }],
             repair: RepairReport::default(),
             deviation: 0.0,
+            hollow: None,
         }
     }
 

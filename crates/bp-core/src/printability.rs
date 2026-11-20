@@ -133,6 +133,47 @@ pub struct EdgeMap {
 /// Enough to see where the problems are, without sending a broken scan's every edge.
 pub const MAX_EDGES: usize = 20_000;
 
+/// Whether component `id` of part `pi` lies inside a shell that faces out:
+/// a ray from one of its corners crosses those shells an odd number of times.
+fn nested(mesh: &Mesh, part_ids: &[Vec<u32>], shells: &[(usize, u32, f64, Vec3)], pi: usize, id: u32) -> bool {
+    let Some(t0) = part_ids[pi].iter().position(|&c| c == id) else { return false };
+    let from = mesh.parts[pi].corners(t0)[0];
+    // Off the axes, so it does not run along an edge.
+    let dir = geom::normalize([1.0, 0.000_731, 0.001_37]);
+    let solid = |p: usize, c: u32| shells.iter().any(|s| s.0 == p && s.1 == c && s.2 > 0.0);
+    let mut crossings = 0;
+    for (p, part) in mesh.parts.iter().enumerate() {
+        for (t, &c) in part_ids[p].iter().enumerate() {
+            if solid(p, c) && ray_hits(from, dir, &part.corners(t)) {
+                crossings += 1;
+            }
+        }
+    }
+    crossings % 2 == 1
+}
+
+/// Möller–Trumbore, strictly ahead of the origin.
+fn ray_hits(o: Vec3, d: Vec3, c: &[Vec3; 3]) -> bool {
+    let e1 = geom::sub(c[1], c[0]);
+    let e2 = geom::sub(c[2], c[0]);
+    let p = geom::cross(d, e2);
+    let det = geom::dot(e1, p);
+    if det.abs() < 1e-12 {
+        return false;
+    }
+    let s = geom::sub(o, c[0]);
+    let u = geom::dot(s, p) / det;
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let q = geom::cross(s, e1);
+    let v = geom::dot(d, q) / det;
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    geom::dot(e2, q) / det > 1e-6
+}
+
 fn center(c: &[Vec3; 3]) -> Vec3 {
     geom::at(c, [1.0 / 3.0; 3])
 }
@@ -165,7 +206,10 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
     let mut all_closed = !soup.is_empty();
     let mut positive_shells = 0;
     let mut negative_shells = 0;
-    for part in &mesh.parts {
+    // Closed shells as (part, component, volume, centre), and each part's components.
+    let mut shells: Vec<(usize, u32, f64, Vec3)> = vec![];
+    let mut part_ids: Vec<Vec<u32>> = vec![];
+    for (pi, part) in mesh.parts.iter().enumerate() {
         let mut vertices = HashMap::<[i64; 3], u32>::new();
         let remap: Vec<u32> = part
             .positions
@@ -287,16 +331,11 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
                 detail.push(at);
             }
             boxes.push((a, b));
-            if closed && volume[i] > 0.0 {
-                positive_shells += 1;
-            }
-            if closed && volume[i] < 0.0 {
-                negative_shells += 1;
-            }
-            if closed && volume[i] <= (params.tolerance_mm as f64).powi(3) {
-                invalid_volume.push(at);
+            if closed {
+                shells.push((pi, i as u32, volume[i], at));
             }
         }
+        part_ids.push(ids);
         all_closed &= closed;
     }
     // Same rule as the fix that lowers them, so fixing clears the warning.
@@ -331,8 +370,22 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         Some(0.0),
         collect(nonmanifold_vertices.into_iter()),
     ));
-    // Oppositely oriented shells can be valid cavity boundaries. Without robust
-    // nesting/intersection classification, their orientation expectation is unknown.
+    // An inside-out shell inside a solid one is a cavity (a hollowed model):
+    // valid, and not counted against either. Any other mix of orientations is
+    // left unjudged, since which way such shells should face is unknown.
+    for &(pi, id, volume, at) in &shells {
+        if volume < 0.0 && nested(mesh, &part_ids, &shells, pi, id) {
+            continue;
+        }
+        if volume > 0.0 {
+            positive_shells += 1;
+        } else {
+            negative_shells += 1;
+        }
+        if volume <= (params.tolerance_mm as f64).powi(3) {
+            invalid_volume.push(at);
+        }
+    }
     let mixed_shells = positive_shells > 0 && negative_shells > 0;
     if all_closed && !mixed_shells {
         checks.push(Check::new(
@@ -649,7 +702,7 @@ mod tests {
         assert_eq!(check(&r, "thinWalls").evidence, "notEvaluated");
     }
     #[test]
-    fn hollow_solid_with_reversed_cavity_is_incomplete_rather_than_invalid() {
+    fn a_reversed_cavity_inside_a_solid_is_a_valid_hollow_with_measured_walls() {
         let mut outer = cuboid([10.; 3], [0.; 3]);
         let mut inner = cuboid([8.; 3], [1.; 3]);
         for t in &mut inner.tris {
@@ -659,9 +712,27 @@ mod tests {
         outer.positions.extend(inner.positions);
         outer.tris.extend(inner.tris.iter().map(|t| t.map(|v| v + offset)));
         let r = analyze(&mesh(outer), params());
-        assert_eq!(check(&r, "volume").evidence, "notEvaluated");
-        assert_eq!(check(&r, "volume").severity, "incomplete");
-        assert_eq!(check(&r, "thinWalls").evidence, "notEvaluated");
+        assert_eq!(check(&r, "volume").evidence, "checked");
+        assert_eq!(check(&r, "volume").severity, "pass");
         assert_eq!(check(&r, "winding").severity, "pass");
+        // The walls are measured: 1 mm everywhere.
+        let walls = check(&r, "thinWalls");
+        assert_eq!(walls.evidence, "estimated");
+        assert!((walls.measurement.unwrap() - 1.0).abs() < 0.01, "{:?}", walls.measurement);
+    }
+
+    #[test]
+    fn a_reversed_shell_outside_any_solid_stays_unjudged() {
+        let mut a = cuboid([10.; 3], [0.; 3]);
+        let mut b = cuboid([4.; 3], [20., 0., 0.]);
+        for t in &mut b.tris {
+            t.swap(1, 2);
+        }
+        let offset = a.positions.len() as u32;
+        a.positions.extend(b.positions);
+        a.tris.extend(b.tris.iter().map(|t| t.map(|v| v + offset)));
+        let r = analyze(&mesh(a), params());
+        assert_eq!(check(&r, "volume").evidence, "notEvaluated");
+        assert_eq!(check(&r, "thinWalls").evidence, "notEvaluated");
     }
 }

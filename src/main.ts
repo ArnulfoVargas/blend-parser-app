@@ -481,9 +481,10 @@ function render(s: Summary) {
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
   bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
   // The mesh tab says when something there changes the model.
-  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || REPAIRS.some((op) => st[op]));
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || REPAIRS.some((op) => st[op]));
   renderRepairs(s);
   syncSmoothForm(s);
+  syncHollowForm(s);
   void refreshIssues();
   void refreshPlan();
   bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
@@ -1421,6 +1422,81 @@ $("#smooth-apply").addEventListener("click", async () => {
   if (!want || !summary) return;
   if (summary.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("smooth.title"), kind: "warning" }))) return;
   await apply(() => api.smoothMesh(want.subdivide, want.smooth, want.crease, want.cap), () => toast(t("smooth.done"), "ok", { label: t("stage.undo"), run: () => void undo() }));
+});
+
+// ---- hollowing -------------------------------------------------------------------------
+
+const hollowWall = $<HTMLInputElement>("#hollow-wall");
+const drainMm = $<HTMLInputElement>("#drain-mm");
+/** Two lines of the nozzle: the thinnest wall that prints. */
+const minWall = () => 2 * (summary?.settings.nozzleMm ?? 0.4);
+const drainCount = () => Number(document.querySelector<HTMLInputElement>('input[name="drains"]:checked')?.value ?? 0);
+function readHollow(): { wall: number; drains: number; drain: number } | null {
+  const wall = Number(hollowWall.value);
+  const drain = Number(drainMm.value);
+  const wallOk = hollowWall.value.trim() !== "" && wall >= minWall() - 1e-6 && wall <= 50;
+  const drainOk = drainMm.value.trim() !== "" && drain >= 1 && drain <= 20;
+  hollowWall.setAttribute("aria-invalid", String(!wallOk));
+  drainMm.setAttribute("aria-invalid", String(!drainOk));
+  return wallOk && drainOk ? { wall, drains: drainCount(), drain } : null;
+}
+/** What hollowing saves, or why it did nothing. */
+function renderHollow(s: Summary | null) {
+  const st = s?.settings;
+  const line = document.querySelector<HTMLElement>('[data-bind="hollowResult"]')!;
+  bind("hollowWallHelp", t("hollow.wallHelp", { min: mm(minWall()), nozzle: mm(st?.nozzleMm ?? 0.4) }));
+  const h = s?.hollow;
+  line.dataset.tone = "";
+  if (!s || !st || !h) {
+    line.textContent = "";
+    bind("hollowSum", "");
+  } else if (h.refused) {
+    line.dataset.tone = "warn";
+    line.textContent = t(h.refused === "open" ? "hollow.open" : "hollow.noRoom");
+    bind("hollowSum", "");
+  } else {
+    const saved = h.solidMm3 - h.volumeMm3;
+    const grams = (saved / 1000) * (s.waste.prefs.densityGCm3 ?? 1.24);
+    const parts = [t("hollow.saved", { pct: nf((saved / h.solidMm3) * 100), g: nf(grams) })];
+    if (h.drainsWanted) parts.push(t("hollow.drainsMade", { count: h.drains, n: h.drains, of: h.drainsWanted }));
+    if (h.drains < h.drainsWanted) parts.push(t("hollow.drainsHint"));
+    parts.push(t("hollow.accuracy", { mm: mm(h.cellMm) }));
+    line.textContent = parts.join(" ");
+    if (h.drains < h.drainsWanted) line.dataset.tone = "warn";
+    bind("hollowSum", t("hollow.sum", { mm: mm(st.hollowMm) }));
+  }
+  const want = readHollow();
+  const same = !!st && !!want && st.hollowMm === want.wall && st.drains === want.drains && st.drainMm === want.drain;
+  $<HTMLButtonElement>("#hollow-apply").disabled = !s || !want || same;
+  $<HTMLButtonElement>("#hollow-off").disabled = !st || st.hollowMm === 0;
+}
+function syncHollowForm(s: Summary) {
+  const st = s.settings;
+  if (st.hollowMm > 0) {
+    setIfIdle("#hollow-wall", String(st.hollowMm));
+    setIfIdle("#drain-mm", String(st.drainMm));
+    const radio = document.querySelector<HTMLInputElement>(`#drains-${st.drains}`);
+    if (radio && !$("#hollow-group").contains(document.activeElement)) radio.checked = true;
+  }
+  renderHollow(s);
+}
+$("#hollow-group").addEventListener("input", () => renderHollow(summary));
+$("#hollow-group").addEventListener("change", () => renderHollow(summary));
+async function hollowTo(wall: number, drains: number, drain: number) {
+  if (!summary) return;
+  if (summary.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("hollow.title"), kind: "warning" }))) return;
+  await apply(() => api.hollowMesh(wall, drains, drain), () => {
+    const h = summary?.hollow;
+    if (wall > 0 && h && !h.refused) toast(t("hollow.done"), "ok", { label: t("stage.undo"), run: () => void undo() });
+  });
+}
+$("#hollow-apply").addEventListener("click", () => {
+  const want = readHollow();
+  if (want) void hollowTo(want.wall, want.drains, want.drain);
+});
+$("#hollow-off").addEventListener("click", () => {
+  const st = summary?.settings;
+  if (st) void hollowTo(0, st.drains, st.drainMm);
 });
 
 const colorOps = () => void apply(() => api.setColorOps(Number($<HTMLInputElement>("#detail").value), Number($<HTMLInputElement>("#island").value)));

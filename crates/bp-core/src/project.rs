@@ -80,6 +80,10 @@ pub struct Stats {
     pub repair: RepairReport,
     /// How far the simplified surface strays from the one before, in final mm.
     pub deviation_mm: f32,
+    /// Volume of the model, in final mm³.
+    pub volume_mm3: f32,
+    /// What hollowing did, with volumes in final mm³ and the voxel in mm.
+    pub hollow: Option<crate::mesh::HollowReport>,
 }
 
 #[derive(Clone)]
@@ -920,7 +924,10 @@ impl Project {
             || ops.deep_clean != self.mesh_ops.deep_clean
             || ops.protect_colors != self.mesh_ops.protect_colors
             || ops.protect_detail != self.mesh_ops.protect_detail
-            || ops.subdivide != self.mesh_ops.subdivide;
+            || ops.subdivide != self.mesh_ops.subdivide
+            || ops.hollow_mm != self.mesh_ops.hollow_mm
+            || ops.drains != self.mesh_ops.drains
+            || ops.drain_mm != self.mesh_ops.drain_mm;
         self.mesh_ops = ops;
         if topology_changes {
             self.rebuild_geometry();
@@ -1147,6 +1154,13 @@ impl Project {
             nearest: palette::nearest_others(&self.palette),
             repair: self.work.repair,
             deviation_mm: self.work.deviation * self.scale,
+            volume_mm3: self.work.volume() * self.scale.powi(3),
+            hollow: self.work.hollow.map(|h| crate::mesh::HollowReport {
+                solid_volume: h.solid_volume * self.scale.powi(3),
+                volume: h.volume * self.scale.powi(3),
+                cell: h.cell * self.scale,
+                ..h
+            }),
         }
     }
 

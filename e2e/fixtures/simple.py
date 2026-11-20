@@ -17,5 +17,5 @@ for name in ("cylinder", "head"):
     o = bpy.context.object
     o.data.materials.append(a); o.data.materials.append(b)
     for f in o.data.polygons:
-        f.material_index = int(f.center.z > o.location.z)
+        f.material_index = int(f.center.z > 0)  # local: the upper half (the cylinder's top cap)
     bpy.ops.wm.save_as_mainfile(filepath=os.path.join(out, f"{name}.blend"))
