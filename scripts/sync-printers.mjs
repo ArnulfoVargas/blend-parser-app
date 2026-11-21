@@ -9,7 +9,8 @@
 // resolves `inherits`, and keeps single-extruder printers: their print area and height,
 // the zones of the bed they keep free, and per nozzle the machine preset, a process (the
 // machine's default, or the compatible one closest to half the nozzle) with its layer
-// height, and a PLA filament preset.
+// height, a PLA filament preset, and the nozzle's volume below the cutter (the least
+// Bambu Studio flushes at a swap).
 // Printers with two extruders are left out: their 3MF needs another filament layout.
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -44,9 +45,12 @@ async function all(items, fn, width = 16) {
   return out;
 }
 
-const vendors = (await (await fetch(`https://api.github.com/repos/${REPO}/contents/resources/profiles?ref=${commit}`)).json())
-  .filter((e) => e.type === 'file' && e.name.endsWith('.json'))
-  .map((e) => e.name.replace(/\.json$/, ''));
+// VENDORS=BBL,Creality,... skips listing the folder through the GitHub API (rate-limited without a token).
+const vendors = process.env.VENDORS
+  ? process.env.VENDORS.split(',').map((v) => v.trim()).filter(Boolean)
+  : (await (await fetch(`https://api.github.com/repos/${REPO}/contents/resources/profiles?ref=${commit}`)).json())
+      .filter((e) => e.type === 'file' && e.name.endsWith('.json'))
+      .map((e) => e.name.replace(/\.json$/, ''));
 
 const first = (v) => (Array.isArray(v) ? v[0] : v);
 /** `bed_exclude_area` is one polygon of "XxY" points; the app keeps its bounding box. */
@@ -127,7 +131,15 @@ for (const vendor of vendors) {
     if (model.nozzles.some((n) => n.diameter === diameter)) continue;
     const process = pickProcess(m, name, diameter);
     const layer = process ? layerOf(process) : NaN;
-    model.nozzles.push({ diameter, printer: name, process, layer: layer > 0 ? layer : null, filament: pickFilament(m, name) });
+    const volume = Number(first(m.nozzle_volume));
+    model.nozzles.push({
+      diameter,
+      printer: name,
+      process,
+      layer: layer > 0 ? layer : null,
+      filament: pickFilament(m, name),
+      flush_min: volume > 0 ? volume : null,
+    });
     models.set(m.printer_model, model);
   }
   for (const m of models.values()) {

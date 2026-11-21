@@ -3,45 +3,39 @@
 
 use std::path::Path;
 
-use bp_3mf::{Printer, PrinterProfile};
-use serde::{Deserialize, Serialize};
+use bp_3mf::project_file::{self, ProjectError, Settings, Warning};
+use bp_3mf::Printer;
 use serde_json::json;
 
 use crate::error::{AppError, CmdResult};
 use crate::profiles::Store;
 use crate::state::Document;
 
-/// The `.bpproj` layout this build writes; a newer one is refused.
-const FORMAT: u32 = 1;
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Settings {
-    format: u32,
-    /// The BlendParser that saved it, for reference.
-    app_version: String,
-    file_name: String,
-    file_size: u64,
-    import_warnings: Vec<bp_blend::ImportWarning>,
-    /// The whole profile, so a custom printer that has since gone still opens.
-    printer: PrinterProfile,
-    nozzle_mm: f32,
-    /// Flush the user typed per swap: old colour, new colour, mm³.
-    flush: Vec<(String, String, f32)>,
-    offset_mm: [f32; 2],
-}
-
 pub fn save(doc: &Document, path: &str) -> CmdResult<()> {
     let settings = Settings {
-        format: FORMAT,
+        format: project_file::FORMAT,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         file_name: doc.file_name.clone(),
         file_size: doc.file_size,
-        import_warnings: doc.import_warnings.clone(),
+        import_warnings: doc
+            .import_warnings
+            .iter()
+            .map(|w| Warning { code: w.code.clone(), detail: w.detail.clone() })
+            .collect(),
         printer: doc.printer.profile.clone(),
         nozzle_mm: doc.printer.nozzle_mm,
         flush: doc.flush.iter().map(|((a, b), v)| (a.clone(), b.clone(), *v)).collect(),
         offset_mm: doc.offset_mm,
+        filaments: doc
+            .project
+            .palette()
+            .iter()
+            .filter_map(|c| {
+                let hex = bp_core::color::to_hex(*c);
+                doc.filaments.get(&hex).map(|f| (hex, f.clone()))
+            })
+            .collect(),
+        kit: doc.kit,
     };
     let json = serde_json::to_string_pretty(&settings).map_err(AppError::internal)?;
     let model = doc.project.to_bytes();
@@ -49,7 +43,7 @@ pub fn save(doc: &Document, path: &str) -> CmdResult<()> {
     let tmp = format!("{path}.tmp");
     let write = || -> std::io::Result<()> {
         let file = std::fs::File::create(&tmp)?;
-        bp_3mf::project_file::write(std::io::BufWriter::new(file), &json, &model).map_err(std::io::Error::other)?;
+        project_file::write(std::io::BufWriter::new(file), &json, &model).map_err(std::io::Error::other)?;
         std::fs::rename(&tmp, path)
     };
     write().map_err(|e| {
@@ -62,19 +56,18 @@ pub fn save(doc: &Document, path: &str) -> CmdResult<()> {
 /// them is kept from the file and named in the import warnings.
 pub fn open(path: &str, store: &Store) -> CmdResult<Document> {
     let file = std::fs::File::open(path).map_err(|e| AppError::file(path, e))?;
-    let (json, model) = bp_3mf::project_file::read(std::io::BufReader::new(file))
+    let (json, model) = project_file::read(std::io::BufReader::new(file))
         .map_err(|_| AppError::with("error.projectCorrupt", json!({ "path": path })))?;
-    let format = serde_json::from_str::<serde_json::Value>(&json).ok().and_then(|v| v["format"].as_u64());
-    if format.is_some_and(|f| f > FORMAT as u64) {
-        return Err(AppError::with("error.projectVersion", json!({ "path": path })));
-    }
-    let s: Settings =
-        serde_json::from_str(&json).map_err(|_| AppError::with("error.projectCorrupt", json!({ "path": path })))?;
+    let s = project_file::parse_settings(&json).map_err(|e| match e {
+        ProjectError::Version => AppError::with("error.projectVersion", json!({ "path": path })),
+        ProjectError::Corrupt => AppError::with("error.projectCorrupt", json!({ "path": path })),
+    })?;
     let project = bp_core::Project::from_bytes(&model).map_err(|e| match e {
         bp_core::SnapshotError::Version(_) => AppError::with("error.projectVersion", json!({ "path": path })),
         bp_core::SnapshotError::Corrupt => AppError::with("error.projectCorrupt", json!({ "path": path })),
     })?;
-    let mut warnings = s.import_warnings;
+    let mut warnings: Vec<bp_blend::ImportWarning> =
+        s.import_warnings.into_iter().map(|w| bp_blend::ImportWarning { code: w.code, detail: w.detail }).collect();
     let known = store.profiles().into_iter().find(|p| p.id == s.printer.id);
     if known.is_none() {
         warnings.push(bp_blend::ImportWarning { code: "projectPrinter".into(), detail: s.printer.name.clone() });
@@ -88,6 +81,8 @@ pub fn open(path: &str, store: &Store) -> CmdResult<Document> {
         printer,
         flush: s.flush.into_iter().map(|(a, b, v)| ((a, b), v)).collect(),
         offset_mm: s.offset_mm,
+        filaments: s.filaments.into_iter().collect(),
+        kit: s.kit,
     })
 }
 
@@ -99,6 +94,7 @@ pub fn is_project(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bp_3mf::PrinterProfile;
     use bp_core::{ColorSource, Part, Scene};
 
     fn doc(printer: Printer) -> Document {
@@ -121,6 +117,20 @@ mod tests {
             printer,
             flush: [(("#E61A1A".to_string(), "#1A1AE6".to_string()), 321.0)].into_iter().collect(),
             offset_mm: [12.0, -3.5],
+            filaments: Default::default(),
+            kit: Some(bp_3mf::project_file::KitSettings {
+                voxel_mm: 0.3,
+                depth_mm: 2.0,
+                core_slot: Some(1),
+                min_piece_mm3: 12.0,
+                mix: true,
+                contents: bp_3mf::project_file::KitContents {
+                    stl: bp_3mf::project_file::StlFiles::Colour,
+                    quality: bp_3mf::project_file::Quality::High,
+                    ..Default::default()
+                },
+                pins: Some(bp_3mf::project_file::KitPins { diameter_mm: 4.0, depth_mm: 3.0, clearance_mm: 0.2 }),
+            }),
         }
     }
 
@@ -135,6 +145,7 @@ mod tests {
         assert_eq!(o.file_name, "q.blend");
         assert_eq!(o.offset_mm, [12.0, -3.5]);
         assert_eq!(o.flush, d.flush);
+        assert_eq!(o.kit, d.kit);
         assert_eq!(o.printer.profile.id, d.printer.profile.id);
         assert!(o.import_warnings.is_empty());
         assert_eq!(o.project.export_parts()[0].paint, d.project.export_parts()[0].paint);
