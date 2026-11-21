@@ -18,7 +18,7 @@ use crate::split::{self, ColorPiece};
 use std::collections::HashMap;
 
 mod selection;
-pub use selection::{RegionAction, RegionFailure, RegionPreview};
+pub use selection::{ColourMatch, RefineFailure, RegionAction, RegionFailure, RegionPreview};
 
 /// Colour settings, in final millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]

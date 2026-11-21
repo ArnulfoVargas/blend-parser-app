@@ -564,12 +564,19 @@ pub struct SelectStrokeDto {
     pub tris: Vec<u32>,
 }
 
-/// How a cut region is closed: a shell `mm` thick, or a cap `mm` deep.
+/// How a cut region is closed: a shell `mm` thick (the piece `clearance_mm`
+/// smaller than its pocket), or a cap `mm` deep.
 #[derive(Deserialize, Clone, Copy)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ClosureDto {
-    Shell { mm: f32 },
-    Cap { mm: f32 },
+    Shell {
+        mm: f32,
+        #[serde(default)]
+        clearance_mm: f32,
+    },
+    Cap {
+        mm: f32,
+    },
 }
 
 /// What happens to the region: it goes, or it becomes objects of its own.
@@ -577,13 +584,17 @@ pub enum ClosureDto {
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RegionActionDto {
     Remove,
-    Extract { lay_flat: bool },
+    Extract {
+        lay_flat: bool,
+        #[serde(default)]
+        group: bool,
+    },
 }
 
 impl From<ClosureDto> for bp_core::region::Closure {
     fn from(c: ClosureDto) -> Self {
         match c {
-            ClosureDto::Shell { mm } => Self::Shell { thickness: mm },
+            ClosureDto::Shell { mm, clearance_mm } => Self::Shell { thickness: mm, clearance: clearance_mm },
             ClosureDto::Cap { mm } => Self::Cap { depth: mm },
         }
     }
@@ -593,7 +604,7 @@ impl From<RegionActionDto> for bp_core::RegionAction {
     fn from(a: RegionActionDto) -> Self {
         match a {
             RegionActionDto::Remove => Self::Remove,
-            RegionActionDto::Extract { lay_flat } => Self::Extract { lay_flat },
+            RegionActionDto::Extract { lay_flat, group } => Self::Extract { lay_flat, group },
         }
     }
 }
@@ -609,6 +620,8 @@ pub struct RegionPreviewDto {
     pub piece_mm3: Vec<f32>,
     pub rest_mm3: f32,
     pub closed: bool,
+    /// Pieces narrower than two nozzle widths.
+    pub small: usize,
 }
 
 pub fn region_preview(p: bp_core::RegionPreview) -> RegionPreviewDto {
@@ -620,5 +633,25 @@ pub fn region_preview(p: bp_core::RegionPreview) -> RegionPreviewDto {
         piece_mm3: p.piece_mm3,
         rest_mm3: p.rest_mm3,
         closed: p.closed,
+        small: p.small,
+    }
+}
+
+/// What makes faces the same colour when selecting by colour.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ColourMatchDto {
+    Material,
+    Filament,
+    Similar { delta_e: f32 },
+}
+
+impl From<ColourMatchDto> for bp_core::ColourMatch {
+    fn from(c: ColourMatchDto) -> Self {
+        match c {
+            ColourMatchDto::Material => Self::Material,
+            ColourMatchDto::Filament => Self::Filament,
+            ColourMatchDto::Similar { delta_e } => Self::Similar { delta_e },
+        }
     }
 }

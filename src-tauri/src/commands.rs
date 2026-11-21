@@ -414,12 +414,51 @@ pub async fn selection_op(app: AppHandle, op: String) -> CmdResult<dto::Selectio
 }
 
 fn closure(c: dto::ClosureDto) -> CmdResult<bp_core::region::Closure> {
-    let (dto::ClosureDto::Shell { mm } | dto::ClosureDto::Cap { mm }) = c;
+    let (dto::ClosureDto::Shell { mm, .. } | dto::ClosureDto::Cap { mm }) = c;
     in_range(mm, CLOSURE_RANGE, "error.closureRange")?;
-    if matches!(c, dto::ClosureDto::Shell { .. }) && mm <= 0.0 {
-        return Err(AppError::with("error.closureRange", json!({ "min": 0.0, "max": CLOSURE_RANGE.end() })));
+    if let dto::ClosureDto::Shell { clearance_mm, .. } = c {
+        if mm <= 0.0 {
+            return Err(AppError::with("error.closureRange", json!({ "min": 0.0, "max": CLOSURE_RANGE.end() })));
+        }
+        in_range(clearance_mm, 0.0..=5.0, "error.clearanceRange")?;
     }
     Ok(c.into())
+}
+
+/// Selects (or with `add` false, deselects) the faces the same colour as
+/// preview triangle `seed`: only those joined to it with `contiguous`. With
+/// `base`, the selection is that first, so trying a pick again with another
+/// tolerance is one step that no other pick can come between.
+#[tauri::command]
+pub async fn select_by_colour(
+    app: AppHandle,
+    seed: u32,
+    how: dto::ColourMatchDto,
+    contiguous: bool,
+    add: bool,
+    base: Option<Vec<u32>>,
+) -> CmdResult<dto::SelectionDto> {
+    if let dto::ColourMatchDto::Similar { delta_e } = how {
+        in_range(delta_e, 0.0..=100.0, "error.deltaERange")?;
+    }
+    with_doc(app, move |d, _| {
+        if let Some(base) = base {
+            d.project.set_selection(&base);
+        }
+        d.project.select_by_colour(seed, how.into(), contiguous, add);
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
+/// Makes colour borders that cross triangles edges of the mesh; one undoable step.
+#[tauri::command]
+pub async fn refine_to_paint(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.refine_to_paint()?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
 }
 
 /// What cutting the selected region out would make; nothing changes.

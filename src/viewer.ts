@@ -90,6 +90,8 @@ export class Viewer {
   private colors: Uint8Array | null = null;
   /** Colour per preview triangle that replaces its filament while a tool shows pieces. */
   private tint: (Vec3 | null)[] | null = null;
+  /** The region tool picks faces with a click (by colour) instead of brushing them. */
+  private regionPicking = false;
   /** How much of a tint covers the filament under it: 1 hides it, less lets it show through. */
   private tintMix = 1;
   /** What cutting a region out would make: its closing faces, and the pieces pulled out along their way off. */
@@ -619,7 +621,14 @@ export class Viewer {
 
   /** The tools whose left button strokes the model: painting, and selecting a region. */
   private brushes(t: Tool = this.tool) {
-    return t === "brush" || t === "region";
+    return t === "brush" || (t === "region" && !this.regionPicking);
+  }
+
+  /** With `on`, a click with the region tool picks the face under it and dragging orbits; otherwise it brushes. */
+  setRegionPicking(on: boolean) {
+    if (on === this.regionPicking) return;
+    this.regionPicking = on;
+    if (this.tool === "region") this.setTool("region");
   }
 
   /** Colours preview triangles (RGB 0–255) over their filament; null puts the filaments back.
@@ -1686,7 +1695,9 @@ export class Viewer {
   }
 
   private onDown(e: PointerEvent) {
-    if ((this.tool === "measure" || this.tool === "separate") && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
+    if ((this.tool === "measure" || this.tool === "separate" || (this.tool === "region" && this.regionPicking)) && e.button === 0) {
+      this.down = { x: e.clientX, y: e.clientY };
+    }
     if (this.drag || this.moveDrag || this.turnDrag || this.planeDrag) return;
     if (!this.brushes() || e.button !== 0 || !this.mesh) return;
     this.painting = true;
@@ -1720,7 +1731,8 @@ export class Viewer {
       if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
       return;
     }
-    if (this.tool === "separate" && d && this.mesh && this.data && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+    const picks = this.tool === "separate" || (this.tool === "region" && this.regionPicking);
+    if (picks && d && this.mesh && this.data && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
       this.rayFrom(e);
       const hit = this.ray.intersectObject(this.mesh, false)[0];
       this.handlers.toolClick?.(this.tool, hit?.faceIndex != null ? this.triangleOf(hit.faceIndex) : null, e.ctrlKey || e.metaKey || e.shiftKey);
