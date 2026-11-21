@@ -71,6 +71,7 @@ fn real_multicolor_imports_and_missing_resources() {
         let parts = project.export_parts();
         let model = bp_3mf::Model {
             name: "fixture",
+            piece: "piece",
             parts: parts
                 .iter()
                 .map(|p| bp_3mf::Part {
@@ -82,10 +83,12 @@ fn real_multicolor_imports_and_missing_resources() {
                 })
                 .collect(),
             filaments: project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect(),
+            slots: vec![],
             printer: bp_3mf::Printer::default(),
             flush: Default::default(),
             layer_mm: None,
             offset_mm: [0.0; 2],
+            thumbnail: None,
         };
         let mut out = std::io::Cursor::new(Vec::new());
         bp_3mf::write(&mut out, &model).unwrap();

@@ -1,416 +1,1044 @@
-//! Splits a painted mesh into one closed solid per filament colour, for
-//! printing colours as separate pieces or for slicers without paint support.
+//! Splits a painted model into solid pieces, one or more per filament colour,
+//! that fit back together into the whole part.
 //!
-//! The colours are read from the painting itself, leaf by leaf, not from each
-//! triangle's main colour, so the pieces follow the painted borders. Leaves of
-//! neighbouring triangles split to different depths meet with T-junctions;
-//! they are stitched first, so every piece is closed.
-//!
-//! Each colour becomes a shell: its patch of surface, the same patch pushed
-//! inward by `thickness`, and walls joining the two along the patch border.
-//! Optionally one colour (the main one) becomes the body the others sit in:
-//! its own surface, plus the other colours' patches sunk by the same
-//! `thickness`, so each shell drops into its pocket and together they make
-//! up the model without overlapping.
+//! The solid is voxelised and every inside voxel takes the colour of the
+//! nearest point of the painted surface, so a leg painted black becomes a solid
+//! black leg instead of a hollow skin. Optionally colours only reach `depth_mm`
+//! inward and the rest becomes a core of one colour. Each connected region of
+//! one colour is a piece, crumbs smaller than `min_piece_mm3` join a neighbour,
+//! and every piece is meshed with marching tetrahedra: closed, and sharing the
+//! same mating surface as its neighbours. Where a piece meets the outside its
+//! vertices lie on the original surface.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 
-use crate::geom::{self, BaryTri, Vec3, ROOT};
-use crate::mesh::{Mesh, MeshPart};
-use crate::paint::Node;
+use rayon::prelude::*;
 
-pub struct ColorPiece {
+use crate::bvh::{Bvh, TriSoup};
+use crate::geom::{self, Bary, Vec3};
+
+mod pins;
+mod shells;
+mod skin;
+pub use shells::{color_pieces, painted, pieces_of, ColorPiece};
+
+pub use pins::PinParams;
+use pins::{Pins, GAP};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitParams {
+    /// Voxel edge in millimetres; grown when the grid would be too large.
+    pub voxel_mm: f32,
+    /// How far each colour reaches inward; 0 lets it reach the middle.
+    pub depth_mm: f32,
+    /// Colour of the core when `depth_mm` > 0; `None` takes the most painted colour.
+    pub core_slot: Option<u8>,
+    /// Pieces smaller than this join the neighbour they touch most.
+    pub min_piece_mm3: f32,
+    /// Pins that key neighbouring pieces together; `None` leaves them to glue.
+    pub pins: Option<PinParams>,
+    /// Give the pieces the model's own surface outside (see [`skin`]).
+    pub exact_skin: bool,
+}
+
+impl Default for SplitParams {
+    fn default() -> Self {
+        Self { voxel_mm: 0.5, depth_mm: 0.0, core_slot: None, min_piece_mm3: 20.0, pins: None, exact_skin: false }
+    }
+}
+
+pub struct Piece {
     pub slot: u8,
+    /// Millimetres, in place in the assembled model.
     pub positions: Vec<Vec3>,
     pub tris: Vec<[u32; 3]>,
-    /// True when this is the main body, with pockets for the other colours.
-    pub solid: bool,
+    pub volume_mm3: f32,
+    /// Neighbouring pieces and the area each one touches, in mm².
+    pub contacts: Vec<(usize, f32)>,
 }
 
-/// The surface as painted: one triangle per painted leaf, T-junctions stitched.
-pub struct Painted {
-    pub positions: Vec<Vec3>,
-    pub tris: Vec<[u32; 3]>,
-    pub labels: Vec<u8>,
+/// A pin and the two pieces it keys together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PinJoin {
+    /// The piece it stands out of.
+    pub pin: usize,
+    /// The piece with its socket.
+    pub socket: usize,
+    /// Unit, the way the pin points: the way the socket's piece slides on.
+    pub axis: Vec3,
 }
 
-/// Barycentric coordinates as integers summing to `ONE`: leaf corners are
-/// halves of halves of the root, so they are exact at this scale.
-const ONE: i64 = 1 << 24;
-
-/// A point of the painted surface, the same whichever triangle names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Key {
-    Corner(u32),
-    /// On the edge between two vertices (lower id first), with the lower one's weight.
-    Edge(u32, u32, i64),
-    /// Inside a triangle: its first two barycentrics.
-    Inside(u32, i64, i64),
+#[derive(Default)]
+pub struct Split {
+    /// Sorted by colour, then largest first.
+    pub pieces: Vec<Piece>,
+    /// The voxel size actually used.
+    pub voxel_mm: f32,
+    /// Crumbs smaller than the least piece that went to a neighbour.
+    pub merged: usize,
+    /// Regions too thin to give a surface, left out.
+    pub dropped: usize,
+    pub pins: Vec<PinJoin>,
+    /// Joins wide enough for a pin where none fitted.
+    pub unpinned: usize,
+    /// When asked for, how many pieces got the model's own surface outside.
+    pub exact_skin: Option<usize>,
 }
 
-fn int_bary(b: [f32; 3]) -> [i64; 3] {
-    let i = (b[0] as f64 * ONE as f64).round() as i64;
-    let j = (b[1] as f64 * ONE as f64).round() as i64;
-    [i, j, ONE - i - j]
-}
+/// Positions and triangles of one mesh.
+type MeshData = (Vec<Vec3>, Vec<[u32; 3]>);
 
-fn key(t: [u32; 3], tri: u32, b: [i64; 3]) -> Key {
-    let zeros = b.iter().filter(|&&x| x == 0).count();
-    if zeros >= 2 {
-        let k = (0..3).find(|&k| b[k] != 0).unwrap_or(0);
-        return Key::Corner(t[k]);
-    }
-    if zeros == 1 {
-        let z = (0..3).find(|&k| b[k] == 0).unwrap_or(0);
-        let (p, q) = ((z + 1) % 3, (z + 2) % 3);
-        return match t[p].cmp(&t[q]) {
-            std::cmp::Ordering::Less => Key::Edge(t[p], t[q], b[p]),
-            std::cmp::Ordering::Greater => Key::Edge(t[q], t[p], b[q]),
-            // A degenerate triangle: its "edge" is a point.
-            std::cmp::Ordering::Equal => Key::Corner(t[p]),
-        };
-    }
-    Key::Inside(tri, b[0], b[1])
-}
+const OUT: u8 = u8::MAX;
+const NONE: u32 = u32::MAX;
+const MAX_VOXELS: usize = 24_000_000;
 
-/// Vertex ids with exact duplicates joined, so seams in the file do not open the pieces.
-fn welded(part: &MeshPart) -> Vec<[u32; 3]> {
-    let mut first: HashMap<[u32; 3], u32> = HashMap::with_capacity(part.positions.len());
-    let ids: Vec<u32> =
-        part.positions.iter().enumerate().map(|(i, p)| *first.entry(p.map(f32::to_bits)).or_insert(i as u32)).collect();
-    part.tris.iter().map(|t| t.map(|v| ids[v as usize])).collect()
-}
-
-/// The painted leaves of one part as a closed, consistently wound surface
-/// when the part is: each leaf is a triangle, or, where finer leaves next to
-/// it add points on its edges, a fan round its centre through those points.
-pub fn painted(part: &MeshPart, nodes: &[Node]) -> Painted {
-    let tris = welded(part);
-    let mut leaves: Vec<(u32, [[i64; 3]; 3], u8)> = vec![];
-    for (ti, node) in nodes.iter().enumerate().take(tris.len()) {
-        node.for_each_leaf(&ROOT, &mut |t: &BaryTri, label| leaves.push((ti as u32, t.map(int_bary), label)));
-    }
-    let mut index: HashMap<Key, u32> = HashMap::with_capacity(leaves.len() * 2);
-    let mut out = Painted { positions: vec![], tris: vec![], labels: vec![] };
-    let mut vertex = |k: Key, ti: u32, b: [i64; 3], out: &mut Painted| -> u32 {
-        *index.entry(k).or_insert_with(|| {
-            let c = part.corners(ti as usize);
-            let f = b.map(|x| (x as f64 / ONE as f64) as f32);
-            out.positions.push(geom::at(&c, f));
-            out.positions.len() as u32 - 1
-        })
-    };
-    // Every leaf corner first, so the edges below can find the points on them.
-    let mut present: HashSet<Key> = HashSet::with_capacity(leaves.len() * 2);
-    for &(ti, corners, _) in &leaves {
-        for b in corners {
-            present.insert(key(tris[ti as usize], ti, b));
+/// Face, edge and corner neighbours.
+const N26: [[i32; 3]; 26] = {
+    let mut out = [[0; 3]; 26];
+    let mut n = 0;
+    let mut i = 0;
+    while i < 27 {
+        let d = [i % 3 - 1, i / 3 % 3 - 1, i / 9 - 1];
+        if d[0] != 0 || d[1] != 0 || d[2] != 0 {
+            out[n] = d;
+            n += 1;
         }
-    }
-    // Points of finer leaves on the edge from `p` to `q`, in order: they are
-    // always midpoints of midpoints, so it only needs to look at those.
-    fn between(t: [u32; 3], ti: u32, p: [i64; 3], q: [i64; 3], present: &HashSet<Key>, out: &mut Vec<[i64; 3]>) {
-        if (0..3).any(|k| (p[k] + q[k]) % 2 != 0) {
-            return;
-        }
-        let m = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2, (p[2] + q[2]) / 2];
-        if !present.contains(&key(t, ti, m)) {
-            return;
-        }
-        between(t, ti, p, m, present, out);
-        out.push(m);
-        between(t, ti, m, q, present, out);
-    }
-    for (ti, corners, label) in leaves {
-        let t = tris[ti as usize];
-        let mut ring: Vec<[i64; 3]> = Vec::with_capacity(6);
-        for k in 0..3 {
-            ring.push(corners[k]);
-            between(t, ti, corners[k], corners[(k + 1) % 3], &present, &mut ring);
-        }
-        let ids: Vec<u32> = ring.iter().map(|&b| vertex(key(t, ti, b), ti, b, &mut out)).collect();
-        if ids.len() == 3 {
-            if ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2] {
-                out.tris.push([ids[0], ids[1], ids[2]]);
-                out.labels.push(label);
-            }
-            continue;
-        }
-        // The leaf is convex: a fan from its centre covers it without slivers.
-        let c = part.corners(ti as usize);
-        let mid = [0, 1, 2].map(|k| corners.iter().map(|b| b[k]).sum::<i64>() as f64 / 3.0 / ONE as f64);
-        out.positions.push(geom::at(&c, mid.map(|x| x as f32)));
-        let centre = out.positions.len() as u32 - 1;
-        for k in 0..ids.len() {
-            let (a, b) = (ids[k], ids[(k + 1) % ids.len()]);
-            if a != b {
-                out.tris.push([centre, a, b]);
-                out.labels.push(label);
-            }
-        }
+        i += 1;
     }
     out
+};
+
+/// Neighbours joined by an edge of the tetrahedra below: the connectivity the
+/// meshed surface actually has.
+const N14: [[i32; 3]; 14] = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 1, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+    [1, 1, 0],
+    [-1, -1, 0],
+    [1, 0, 1],
+    [-1, 0, -1],
+    [0, 1, 1],
+    [0, -1, -1],
+    [1, 1, 1],
+    [-1, -1, -1],
+];
+
+const N6: [[i32; 3]; 6] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
+/// Six tetrahedra sharing the cube diagonal (Kuhn): each walks from corner 0
+/// to corner 7 one axis at a time. Corners are bit masks x=1, y=2, z=4.
+const TETS: [[usize; 4]; 6] = [[0, 1, 3, 7], [0, 1, 5, 7], [0, 2, 3, 7], [0, 2, 6, 7], [0, 4, 5, 7], [0, 4, 6, 7]];
+
+struct Grid {
+    origin: Vec3,
+    h: f32,
+    n: [usize; 3],
 }
 
-/// Inward offset of each vertex: along its area-weighted normal, stretched
-/// so the flat faces round it stay `thickness` from their offset (at most
-/// twice, at sharp corners).
-fn inward(positions: &[Vec3], tris: &[[u32; 3]], thickness: f32) -> Vec<Vec3> {
-    let mut n = vec![[0.0f32; 3]; positions.len()];
-    let faces: Vec<Vec3> = tris
-        .iter()
-        .map(|t| {
-            let c = t.map(|v| positions[v as usize]);
-            geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]))
-        })
-        .collect();
-    for (t, f) in tris.iter().zip(&faces) {
-        for &v in t {
-            n[v as usize] = geom::add(n[v as usize], *f);
-        }
+impl Grid {
+    fn len(&self) -> usize {
+        self.n[0] * self.n[1] * self.n[2]
     }
-    let n: Vec<Vec3> = n.into_iter().map(geom::normalize).collect();
-    let mut cos = vec![1.0f32; positions.len()];
-    for (t, f) in tris.iter().zip(&faces) {
-        let f = geom::normalize(*f);
-        for &v in t {
-            cos[v as usize] = cos[v as usize].min(geom::dot(n[v as usize], f));
-        }
+    fn index(&self, c: [usize; 3]) -> usize {
+        c[0] + self.n[0] * (c[1] + self.n[1] * c[2])
     }
-    positions
-        .iter()
-        .zip(&n)
-        .zip(&cos)
-        .map(|((&p, &nv), &c)| geom::sub(p, geom::scale(nv, thickness / c.max(0.5))))
-        .collect()
-}
-
-fn find(up: &mut [u32], mut x: u32) -> u32 {
-    while up[x as usize] != x {
-        up[x as usize] = up[up[x as usize] as usize];
-        x = up[x as usize];
+    fn coords(&self, i: usize) -> [usize; 3] {
+        [i % self.n[0], i / self.n[0] % self.n[1], i / (self.n[0] * self.n[1])]
     }
-    x
+    fn center(&self, i: usize) -> Vec3 {
+        let c = self.coords(i);
+        std::array::from_fn(|a| self.origin[a] + (c[a] as f32 + 0.5) * self.h)
+    }
+    fn offsets<const K: usize>(&self, dirs: &[[i32; 3]; K]) -> [isize; K] {
+        let (nx, ny) = (self.n[0] as isize, self.n[1] as isize);
+        dirs.map(|d| d[0] as isize + nx * (d[1] as isize + ny * d[2] as isize))
+    }
+    /// True for voxels on the outermost layer, which are always outside.
+    fn on_border(&self, i: usize) -> bool {
+        let c = self.coords(i);
+        (0..3).any(|a| c[a] == 0 || c[a] + 1 >= self.n[a])
+    }
 }
 
-/// Builds one piece. Its vertices are triangle corners grouped round each
-/// vertex by the triangles of the same kind they join through, so where a
-/// colour only touches itself at a point each side gets its own copy and
-/// the piece stays edge-manifold.
-struct Builder<'a> {
-    painted: &'a Painted,
-    inner: &'a [Vec3],
-    up: Vec<u32>,
-    ids: HashMap<(u32, bool), u32>,
-    piece: ColorPiece,
+#[inline]
+fn step(i: usize, off: isize) -> usize {
+    (i as isize + off) as usize
 }
 
-impl<'a> Builder<'a> {
-    /// `kind(t)` is how triangle `t` is drawn in this piece (None: not at all).
-    fn new(
-        painted: &'a Painted,
-        inner: &'a [Vec3],
-        across: &HashMap<(u32, u32), u32>,
-        kind: impl Fn(usize) -> Option<bool>,
-        slot: u8,
-        solid: bool,
-    ) -> Self {
-        let mut up: Vec<u32> = (0..painted.tris.len() as u32 * 3).collect();
-        for (ti, t) in painted.tris.iter().enumerate() {
-            let Some(mine) = kind(ti) else { continue };
-            for k in 0..3 {
-                let (a, c) = (t[k], t[(k + 1) % 3]);
-                let Some(&u) = across.get(&(c, a)) else { continue };
-                if kind(u as usize) != Some(mine) {
-                    continue;
-                }
-                let tu = painted.tris[u as usize];
-                for (v, here) in [(a, k), (c, (k + 1) % 3)] {
-                    if let Some(there) = (0..3).find(|&j| tu[j] == v) {
-                        let (x, y) = (find(&mut up, ti as u32 * 3 + here as u32), find(&mut up, u * 3 + there as u32));
-                        up[x as usize] = y;
+/// Inside test by casting one ray per voxel column along each axis and
+/// counting signed crossings (so overlapping closed parts make a union); a
+/// voxel is inside when at least two of the three axes agree.
+fn inside(grid: &Grid, bvh: &Bvh, soup: &TriSoup) -> Vec<bool> {
+    let mut votes = vec![0u8; grid.len()];
+    for axis in 0..3 {
+        let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
+        let columns = grid.n[b] * grid.n[c];
+        let spans: Vec<Vec<(u32, u32)>> = (0..columns)
+            .into_par_iter()
+            .map(|col| {
+                let (ub, uc) = (col % grid.n[b], col / grid.n[b]);
+                let mut o = [0.0f32; 3];
+                // A tiny offset keeps rays off the edges of axis-aligned meshes.
+                o[axis] = grid.origin[axis] - grid.h;
+                o[b] = grid.origin[b] + (ub as f32 + 0.5 + 0.00137) * grid.h;
+                o[c] = grid.origin[c] + (uc as f32 + 0.5 + 0.00291) * grid.h;
+                let mut d = [0.0f32; 3];
+                d[axis] = 1.0;
+                let mut hits = Vec::new();
+                bvh.ray_crossings(soup, o, d, &mut hits);
+                hits.sort_by(|x, y| x.0.total_cmp(&y.0));
+                let mut spans = Vec::new();
+                let (mut winding, mut next, mut start) = (0i32, 0usize, None);
+                for m in 0..grid.n[axis] {
+                    let t = (m as f32 + 1.5) * grid.h;
+                    while next < hits.len() && hits[next].0 < t {
+                        winding += hits[next].1 as i32;
+                        next += 1;
+                    }
+                    match (winding > 0, start) {
+                        (true, None) => start = Some(m as u32),
+                        (false, Some(s)) => {
+                            spans.push((s, m as u32));
+                            start = None;
+                        }
+                        _ => {}
                     }
                 }
+                if let Some(s) = start {
+                    spans.push((s, grid.n[axis] as u32));
+                }
+                spans
+            })
+            .collect();
+        for (col, spans) in spans.iter().enumerate() {
+            let mut cell = [0usize; 3];
+            cell[b] = col % grid.n[b];
+            cell[c] = col / grid.n[b];
+            for &(s, e) in spans {
+                for m in s..e {
+                    cell[axis] = m as usize;
+                    votes[grid.index(cell)] += 1;
+                }
             }
         }
-        Self {
-            painted,
-            inner,
-            up,
-            ids: HashMap::new(),
-            piece: ColorPiece { slot, positions: vec![], tris: vec![], solid },
+    }
+    votes.par_iter().enumerate().map(|(i, &v)| v >= 2 && !grid.on_border(i)).collect()
+}
+
+/// Connected regions of equal label (14-connected), `NONE` outside.
+fn components(grid: &Grid, lab: &[u8]) -> (Vec<u32>, Vec<u32>, Vec<u8>) {
+    let off = grid.offsets(&N14);
+    let mut comp = vec![NONE; lab.len()];
+    let (mut sizes, mut labels) = (vec![], vec![]);
+    let mut stack = vec![];
+    for start in 0..lab.len() {
+        if lab[start] >= GAP || comp[start] != NONE {
+            continue;
+        }
+        let id = sizes.len() as u32;
+        let l = lab[start];
+        comp[start] = id;
+        stack.push(start);
+        let mut size = 0u32;
+        while let Some(v) = stack.pop() {
+            size += 1;
+            for &o in &off {
+                let n = step(v, o);
+                if lab[n] == l && comp[n] == NONE {
+                    comp[n] = id;
+                    stack.push(n);
+                }
+            }
+        }
+        sizes.push(size);
+        labels.push(l);
+    }
+    (comp, sizes, labels)
+}
+
+/// Gives every region smaller than `min_voxels` the label it touches most.
+/// Regions that touch nothing (loose bits of the model) keep theirs.
+/// Returns how many regions it gave away.
+fn merge_crumbs(grid: &Grid, lab: &mut [u8], min_voxels: u32) -> usize {
+    let off = grid.offsets(&N6);
+    let mut merged = 0;
+    for _ in 0..6 {
+        let (comp, sizes, _) = components(grid, lab);
+        let small: Vec<bool> = sizes.iter().map(|&s| s < min_voxels).collect();
+        let mut tally: HashMap<(u32, u8), u32> = HashMap::new();
+        for v in 0..lab.len() {
+            let c = comp[v];
+            if c == NONE || !small[c as usize] {
+                continue;
+            }
+            for &o in &off {
+                let n = lab[step(v, o)];
+                if n != OUT && n != lab[v] {
+                    *tally.entry((c, n)).or_default() += 1;
+                }
+            }
+        }
+        let mut best: HashMap<u32, (u8, u32)> = HashMap::new();
+        for ((c, l), count) in tally {
+            let e = best.entry(c).or_insert((l, 0));
+            if count > e.1 || (count == e.1 && l < e.0) {
+                *e = (l, count);
+            }
+        }
+        if best.is_empty() {
+            return merged;
+        }
+        merged += best.len();
+        for v in 0..lab.len() {
+            if comp[v] != NONE {
+                if let Some(&(l, _)) = best.get(&comp[v]) {
+                    lab[v] = l;
+                }
+            }
         }
     }
+    merged
+}
 
-    /// Corner `k` of triangle `t`, on the surface or sunk.
-    fn id(&mut self, t: u32, k: usize, sunk: bool) -> u32 {
-        let v = self.painted.tris[t as usize][k] as usize;
-        // The body's own surface is never split: where it pinches, the pockets
-        // on either side are, and the walls round each pocket meet on it.
-        let group = if self.piece.solid && !sunk { v as u32 } else { find(&mut self.up, t * 3 + k as u32) };
-        let (outer, inner, positions) = (&self.painted.positions, self.inner, &mut self.piece.positions);
-        *self.ids.entry((group, sunk)).or_insert_with(|| {
-            positions.push(if sunk { inner[v] } else { outer[v] });
-            positions.len() as u32 - 1
-        })
+/// What decided each voxel's colour, to place the surface between two
+/// regions where that decision flips instead of half way between voxels.
+struct Field<'a> {
+    grid: &'a Grid,
+    lab: &'a [u8],
+    seeds: &'a [(Vec3, u8)],
+    seed_of: &'a [u32],
+    core: Option<u8>,
+    depth: f32,
+}
+
+impl Field<'_> {
+    fn dist(&self, v: usize, seed: u32) -> f32 {
+        geom::len(geom::sub(self.grid.center(v), self.seeds[seed as usize].0))
     }
 
-    fn tri(&mut self, t: u32, sunk: bool, flip: bool) {
-        let o = [0, 1, 2].map(|k| self.id(t, k, sunk));
-        self.piece.tris.push(if flip { [o[2], o[1], o[0]] } else { o });
-    }
-
-    /// The wall under edge `k` of triangle `t`, which stays on the surface,
-    /// down to the sunk corners of `low` (`t` itself for a shell, the
-    /// neighbouring pocket for the body).
-    fn wall(&mut self, t: u32, k: usize, low: u32) {
-        let tri = self.painted.tris[t as usize];
-        let (a, c) = (tri[k], tri[(k + 1) % 3]);
-        let lt = self.painted.tris[low as usize];
-        let (Some(la), Some(lc)) = ((0..3).find(|&j| lt[j] == a), (0..3).find(|&j| lt[j] == c)) else { return };
-        let (ao, co) = (self.id(t, k, false), self.id(t, (k + 1) % 3, false));
-        let (ai, ci) = (self.id(low, la, true), self.id(low, lc, true));
-        // The same diagonal whichever piece builds the wall, so a shell's wall
-        // and its pocket's are the same two triangles back to back.
-        if a < c {
-            self.piece.tris.push([co, ao, ci]);
-            self.piece.tris.push([ao, ai, ci]);
-        } else {
-            self.piece.tris.push([co, ao, ai]);
-            self.piece.tris.push([co, ai, ci]);
+    /// The voxel's seed and whether it fell in the core, if its label still
+    /// comes from them (crumb merging may have overruled it).
+    fn origin(&self, v: usize) -> Option<(u32, bool)> {
+        let s = self.seed_of[v];
+        if s == NONE {
+            return None;
         }
+        let in_core = self.core.is_some() && self.dist(v, s) > self.depth;
+        let natural = if in_core { self.core } else { Some(self.seeds[s as usize].1) };
+        (natural == Some(self.lab[v])).then_some((s, in_core))
+    }
+
+    /// Fraction of the way from `a` to `b` (`a` < `b`) where the colour changes.
+    fn crossing(&self, a: usize, b: usize) -> f32 {
+        let t = match (self.origin(a), self.origin(b)) {
+            // Equidistant from the two seeds: the Voronoi face between them.
+            (Some((sa, false)), Some((sb, false))) => {
+                let ga = self.dist(a, sa) - self.dist(a, sb);
+                let gb = self.dist(b, sa) - self.dist(b, sb);
+                if ga < 0.0 && gb > 0.0 {
+                    ga / (ga - gb)
+                } else {
+                    0.5
+                }
+            }
+            // At `depth` from the coloured side's seed.
+            (Some((s, false)), Some((_, true))) | (Some((_, true)), Some((s, false))) => {
+                let (fa, fb) = (self.dist(a, s) - self.depth, self.dist(b, s) - self.depth);
+                if (fa < 0.0) != (fb < 0.0) {
+                    fa / (fa - fb)
+                } else {
+                    0.5
+                }
+            }
+            _ => 0.5,
+        };
+        t.clamp(0.05, 0.95)
     }
 }
 
-/// One closed piece per colour of `painted`, from slot 0 up; slots with no paint give none.
-pub fn pieces_of(painted: &Painted, slots: usize, thickness: f32, main: Option<u8>) -> Vec<ColorPiece> {
-    let inner = inward(&painted.positions, &painted.tris, thickness);
-    let labels = &painted.labels;
-    // The triangle on the left of each directed edge.
-    let mut across: HashMap<(u32, u32), u32> = HashMap::with_capacity(painted.tris.len() * 3);
-    for (i, t) in painted.tris.iter().enumerate() {
-        for k in 0..3 {
-            across.insert((t[k], t[(k + 1) % 3]), i as u32);
-        }
-    }
-    // A body can have complementary pockets only if the original surface
-    // encloses a volume. Open sources get printable shells for every colour.
-    let closed = across.len() == painted.tris.len() * 3 && across.keys().all(|&(a, b)| across.contains_key(&(b, a)));
-    let mut out = vec![];
-    for slot in (0..slots.min(256)).map(|slot| slot as u8) {
-        if !labels.contains(&slot) {
+/// Marching tetrahedra over the cells around one region's boundary.
+fn mesh_region(
+    field: &Field,
+    comp: &[u32],
+    id: u32,
+    boundary: &[usize],
+    pins: Option<&Pins>,
+    bvh: &Bvh,
+    soup: &TriSoup,
+) -> RegionMesh {
+    let (grid, lab) = (field.grid, field.lab);
+    let (nx, ny) = (grid.n[0], grid.n[1]);
+    let corner: [usize; 8] = std::array::from_fn(|b| (b & 1) + nx * (((b >> 1) & 1) + ny * (b >> 2)));
+    let mut cells: Vec<usize> = boundary.iter().flat_map(|&v| (0..8).map(move |b| v - corner[b])).collect();
+    cells.sort_unstable();
+    cells.dedup();
+
+    let member = |v: usize| comp[v] == id;
+    let mut verts: HashMap<EdgeKey, u32> = HashMap::new();
+    let mut positions = Vec::new();
+    let mut keys = Vec::new();
+    let mut tris = Vec::new();
+    // Where the surface crosses the edge from voxel `a` (in the region) to `b`
+    // (not): on the model surface if `b` is outside, else where the colour
+    // changes. Both regions compute the same point, so they mate exactly;
+    // except round a pin, where each has its own surface (see [`pins`]).
+    let mut point = |a: usize, b: usize, positions: &mut Vec<Vec3>| -> u32 {
+        let pinned = pins.and_then(|z| z.crossing(grid, lab, a, b));
+        let key = (a.min(b), a.max(b), if pinned.is_some_and(|(_, own)| own) { id } else { NONE });
+        *verts.entry(key).or_insert_with(|| {
+            keys.push(key);
+            let (pa, pb) = (grid.center(a), grid.center(b));
+            let p = if let Some((p, _)) = pinned {
+                p
+            } else if lab[b] == OUT {
+                bvh.raycast(soup, pa, geom::sub(pb, pa))
+                    .filter(|hit| hit.t <= 1.0)
+                    .map_or(geom::scale(geom::add(pa, pb), 0.5), |hit| hit.point)
+            } else {
+                let (lo, hi) = (a.min(b), a.max(b));
+                let (plo, phi) = (grid.center(lo), grid.center(hi));
+                geom::add(plo, geom::scale(geom::sub(phi, plo), field.crossing(lo, hi)))
+            };
+            positions.push(p);
+            positions.len() as u32 - 1
+        })
+    };
+    for cell in cells {
+        let ids: [usize; 8] = corner.map(|c| cell + c);
+        let ins = ids.map(member);
+        if ins.iter().all(|&x| x) || ins.iter().all(|&x| !x) {
             continue;
         }
-        let solid = closed && main == Some(slot);
-        // A shell draws its colour; the body everything, its colour on the surface and the rest sunk.
-        let kind = |t: usize| if solid { Some(labels[t] != slot) } else { (labels[t] == slot).then_some(false) };
-        let mut b = Builder::new(painted, &inner, &across, kind, slot, solid);
-        for (ti, t) in painted.tris.iter().enumerate() {
-            let ti = ti as u32;
-            if labels[ti as usize] != slot {
-                if solid {
-                    // Another colour's patch, sunk: the floor of its pocket.
-                    b.tri(ti, true, false);
+        for tet in TETS {
+            let v = tet.map(|k| ids[k]);
+            let inn: Vec<usize> = (0..4).filter(|&k| ins[tet[k]]).map(|k| v[k]).collect();
+            let out: Vec<usize> = (0..4).filter(|&k| !ins[tet[k]]).map(|k| v[k]).collect();
+            // Each face as the tetrahedron edges it crosses.
+            let faces: Vec<[(usize, usize); 3]> = match (inn.len(), out.len()) {
+                (1, 3) => vec![[(inn[0], out[0]), (inn[0], out[1]), (inn[0], out[2])]],
+                (3, 1) => vec![[(inn[0], out[0]), (inn[1], out[0]), (inn[2], out[0])]],
+                (2, 2) => {
+                    let (ac, ad, bd, bc) = ((inn[0], out[0]), (inn[0], out[1]), (inn[1], out[1]), (inn[1], out[0]));
+                    vec![[ac, ad, bd], [ac, bd, bc]]
                 }
-                continue;
+                _ => continue,
+            };
+            // Face away from the region, judged on the edge midpoints so that a
+            // face squashed flat on the model surface still gets a definite side.
+            let centroid = |s: &[usize]| {
+                let sum = s.iter().fold([0.0f32; 3], |acc, &i| geom::add(acc, grid.center(i)));
+                geom::scale(sum, 1.0 / s.len() as f32)
+            };
+            let outward = geom::sub(centroid(&out), centroid(&inn));
+            for f in faces {
+                let m = f.map(|(a, b)| geom::scale(geom::add(grid.center(a), grid.center(b)), 0.5));
+                let n = geom::cross(geom::sub(m[1], m[0]), geom::sub(m[2], m[0]));
+                let ids = f.map(|(a, b)| point(a, b, &mut positions));
+                tris.push(if geom::dot(n, outward) < 0.0 { [ids[0], ids[2], ids[1]] } else { ids });
             }
-            b.tri(ti, false, false);
-            if !solid {
-                // Its inside face, looking in.
-                b.tri(ti, true, true);
+        }
+    }
+    RegionMesh { positions, keys, tris }
+}
+
+/// Every directed edge is matched by as many in the opposite direction: the
+/// solid is sealed and its inside well defined, though an edge may be shared
+/// by four triangles where two sheets touch (slicers accept that).
+pub fn watertight(tris: &[[u32; 3]]) -> bool {
+    let mut edges: HashMap<(u32, u32), i32> = HashMap::with_capacity(tris.len() * 3);
+    for t in tris {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            if a == b {
+                return false;
             }
+            *edges.entry((a.min(b), a.max(b))).or_default() += if a < b { 1 } else { -1 };
+        }
+    }
+    !tris.is_empty() && edges.values().all(|&n| n == 0)
+}
+
+/// Drops pairs of triangles on the same three vertices facing opposite ways:
+/// a fold left where a collapse flattened a thin spot.
+fn cancel_folds(tris: Vec<[u32; 3]>) -> Vec<[u32; 3]> {
+    let key = |t: &[u32; 3]| {
+        let mut k = *t;
+        k.sort_unstable();
+        k
+    };
+    let mut count: HashMap<[u32; 3], u32> = HashMap::with_capacity(tris.len());
+    for t in &tris {
+        *count.entry(key(t)).or_default() += 1;
+    }
+    if count.len() == tris.len() {
+        return tris;
+    }
+    tris.into_iter().filter(|t| count[&key(t)] == 1).collect()
+}
+
+/// The voxel edge a vertex lies on, and the region that owns it alone, or
+/// `NONE` when the regions either side share it.
+type EdgeKey = (usize, usize, u32);
+
+/// One region's surface straight from marching tetrahedra. Each vertex
+/// remembers the voxel edge it lies on; a neighbouring region's surface uses
+/// the same edge for the same point, which is how the polish below keeps
+/// mating faces together.
+struct RegionMesh {
+    positions: Vec<Vec3>,
+    keys: Vec<EdgeKey>,
+    tris: Vec<[u32; 3]>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// On a pin or its socket: exact already.
+    Fixed,
+    /// On the model's surface.
+    Outer,
+    /// Where two pieces meet, beside the model's surface: the colour border.
+    Seam,
+    /// Where two pieces meet, inside.
+    Mate,
+}
+
+/// Rounds of smoothing on the model's surface and between pieces; each moves a
+/// vertex at most half way to its neighbours. Steps one voxel high need many.
+const SURFACE_ROUNDS: usize = 6;
+const MATE_ROUNDS: usize = 40;
+/// How far simplification may move a surface, in millimetres: well under a
+/// layer, so the facets do not show in the print.
+const SURFACE_ERROR_MM: f32 = 0.05;
+
+/// Takes the voxel steps out of the surfaces, the same way for every piece so
+/// they still mate exactly, then simplifies what only one piece owns.
+///
+/// - The colour border is pulled onto the model's surface, so neighbouring
+///   colours meet there without a groove, and straightened along its length.
+/// - Faces on the model slide along it to even out (tangential smoothing,
+///   pushed back onto the model each round), losing the lumps of the grid.
+/// - Faces between pieces are smoothed in place (Taubin, which does not shrink).
+///
+/// With `grow`, also the same surfaces with the outside pushed that far out,
+/// for [`skin::clip`].
+fn polish(
+    regions: &[RegionMesh],
+    comp: &[u32],
+    bvh: &Bvh,
+    soup: &TriSoup,
+    h: f32,
+    grow: Option<f32>,
+) -> (Vec<MeshData>, Option<Vec<MeshData>>) {
+    let mut id: HashMap<EdgeKey, u32> = HashMap::new();
+    let (mut pos, mut kind) = (Vec::new(), Vec::new());
+    let mut local: Vec<Vec<u32>> = Vec::with_capacity(regions.len());
+    for r in regions {
+        let mut ids = Vec::with_capacity(r.keys.len());
+        for (&k, &p) in r.keys.iter().zip(&r.positions) {
+            ids.push(*id.entry(k).or_insert_with(|| {
+                pos.push(p);
+                kind.push(if k.2 != NONE {
+                    Kind::Fixed
+                } else if comp[k.0] == NONE || comp[k.1] == NONE {
+                    Kind::Outer
+                } else {
+                    Kind::Mate
+                });
+                pos.len() as u32 - 1
+            }));
+        }
+        local.push(ids);
+    }
+    drop(id);
+    let mut nbrs: Vec<Vec<u32>> = vec![Vec::new(); pos.len()];
+    for (r, ids) in regions.iter().zip(&local) {
+        for t in &r.tris {
+            let g = t.map(|v| ids[v as usize]);
             for k in 0..3 {
-                let (a, c) = (t[k], t[(k + 1) % 3]);
-                // A wall where the neighbour is another colour: round the
-                // shell's patch, or down into a pocket of the body.
-                match across.get(&(c, a)).copied() {
-                    Some(u) if labels[u as usize] != slot => b.wall(ti, k, if solid { u } else { ti }),
-                    // An original boundary also needs a wall from the outer face
-                    // to the inner face when it belongs to a colour shell.
-                    None if !solid => b.wall(ti, k, ti),
+                let (a, b) = (g[k], g[(k + 1) % 3]);
+                nbrs[a as usize].push(b);
+                nbrs[b as usize].push(a);
+            }
+        }
+    }
+    nbrs.par_iter_mut().for_each(|n| {
+        n.sort_unstable();
+        n.dedup();
+    });
+    let seam: Vec<bool> = (0..pos.len())
+        .map(|v| kind[v] == Kind::Mate && nbrs[v].iter().any(|&n| kind[n as usize] == Kind::Outer))
+        .collect();
+    for (v, s) in seam.iter().enumerate() {
+        if *s {
+            kind[v] = Kind::Seam;
+        }
+    }
+
+    // Nearest point of the model and its normal, if within `reach`.
+    let onto = |q: Vec3, reach: f32| -> Option<(Vec3, Vec3)> {
+        let (t, b) = bvh.nearest_within(soup, q, reach)?;
+        let c = &soup.corners[t as usize];
+        Some((geom::at(c, b), geom::normalize(geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0])))))
+    };
+    let average = |pos: &[Vec3], v: usize, keep: &dyn Fn(Kind) -> bool| -> Option<Vec3> {
+        let (mut sum, mut n) = ([0.0f32; 3], 0);
+        for &w in &nbrs[v] {
+            if keep(kind[w as usize]) {
+                sum = geom::add(sum, pos[w as usize]);
+                n += 1;
+            }
+        }
+        (n > 0).then(|| geom::scale(sum, 1.0 / n as f32))
+    };
+    // The surface vertices with the model's normal under each; seams start
+    // on the model, wherever the grid left them.
+    let surface: Vec<usize> = (0..pos.len()).filter(|&v| matches!(kind[v], Kind::Outer | Kind::Seam)).collect();
+    let mut normal: Vec<Option<Vec3>> = vec![None; pos.len()];
+    let first: Vec<(Vec3, Option<Vec3>)> = surface
+        .par_iter()
+        .map(|&v| {
+            let reach = if kind[v] == Kind::Seam { 1.5 * h } else { 0.75 * h };
+            onto(pos[v], reach).map_or((pos[v], None), |(p, n)| (p, Some(n)))
+        })
+        .collect();
+    for (&v, (p, n)) in surface.iter().zip(first) {
+        pos[v] = p;
+        normal[v] = n;
+    }
+    // Faces on the model slide along it; the border runs along itself.
+    for _ in 0..SURFACE_ROUNDS {
+        let moved: Vec<(Vec3, Option<Vec3>)> = surface
+            .par_iter()
+            .map(|&v| {
+                let (p, n) = (pos[v], normal[v]);
+                let Some(n) = n else { return (p, None) };
+                let avg = if kind[v] == Kind::Seam {
+                    average(&pos, v, &|k| k == Kind::Seam)
+                } else {
+                    average(&pos, v, &|k| matches!(k, Kind::Outer | Kind::Seam))
+                };
+                let Some(avg) = avg else { return (p, Some(n)) };
+                let mut d = geom::sub(avg, p);
+                if kind[v] == Kind::Outer {
+                    d = geom::sub(d, geom::scale(n, geom::dot(d, n)));
+                }
+                onto(geom::add(p, geom::scale(d, 0.5)), 0.75 * h).map_or((p, Some(n)), |(q, m)| (q, Some(m)))
+            })
+            .collect();
+        for (&v, (p, n)) in surface.iter().zip(moved) {
+            pos[v] = p;
+            normal[v] = n;
+        }
+    }
+    // Taubin, a shrinking step and an inflating one, for the faces between pieces.
+    let inside: Vec<usize> = (0..pos.len()).filter(|&v| kind[v] == Kind::Mate).collect();
+    for f in std::iter::repeat_n([0.5f32, -0.53], MATE_ROUNDS).flatten() {
+        let moved: Vec<Vec3> = inside
+            .par_iter()
+            .map(|&v| {
+                average(&pos, v, &|_| true)
+                    .map_or(pos[v], |avg| geom::add(pos[v], geom::scale(geom::sub(avg, pos[v]), f)))
+            })
+            .collect();
+        for (&v, p) in inside.iter().zip(moved) {
+            pos[v] = p;
+        }
+    }
+
+    let grown = grow.map(|g| {
+        let mut out = pos.clone();
+        for &v in &surface {
+            if let Some(n) = normal[v] {
+                out[v] = geom::add(out[v], geom::scale(n, g));
+            }
+        }
+        simplify_patches(regions, &local, comp, &out, SURFACE_ERROR_MM)
+    });
+    (simplify_patches(regions, &local, comp, &pos, SURFACE_ERROR_MM), grown)
+}
+
+/// A region and what lies across its patch: another region, `NONE` for the
+/// outside, or a junction of several.
+type PatchKey = (u32, u32);
+
+/// Simplifies the surfaces patch by patch: each region's skin on the model,
+/// and each face between two regions once, used as is by one and flipped by
+/// the other, so they keep mating exactly. Vertices that more than one patch
+/// uses stay put, which keeps every piece sealed. Faces where three regions,
+/// or two and the outside, meet are left as they are.
+fn simplify_patches(
+    regions: &[RegionMesh],
+    local: &[Vec<u32>],
+    comp: &[u32],
+    pos: &[Vec3],
+    error: f32,
+) -> Vec<MeshData> {
+    // The patch of each face: the region on the other side of all its
+    // vertices (`NONE` for the outside, `PINNED` round a pin), or `JUNCTION`
+    // when they disagree.
+    const JUNCTION: u32 = NONE - 1;
+    const PINNED: u32 = NONE - 2;
+    let patch_of: Vec<Vec<u32>> = regions
+        .iter()
+        .enumerate()
+        .map(|(r, m)| {
+            let other = |v: u32| {
+                let (a, b, own) = m.keys[v as usize];
+                if own != NONE {
+                    PINNED
+                } else if comp[a] == r as u32 {
+                    comp[b]
+                } else {
+                    comp[a]
+                }
+            };
+            m.tris
+                .iter()
+                .map(|t| {
+                    let o = other(t[0]);
+                    if other(t[1]) == o && other(t[2]) == o {
+                        o
+                    } else {
+                        JUNCTION
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let key = |r: usize, o: u32| -> PatchKey {
+        match o {
+            NONE | JUNCTION | PINNED => (r as u32, o),
+            _ => ((r as u32).min(o), (r as u32).max(o)),
+        }
+    };
+    // A vertex is free only while one patch alone uses it.
+    let mut owner: Vec<Option<PatchKey>> = vec![None; pos.len()];
+    let mut shared = vec![false; pos.len()];
+    for (r, (m, ids)) in regions.iter().zip(local).enumerate() {
+        for (t, &o) in m.tris.iter().zip(&patch_of[r]) {
+            let k = key(r, o);
+            for &v in t {
+                let g = ids[v as usize] as usize;
+                match owner[g] {
+                    None => owner[g] = Some(k),
+                    Some(x) if x != k || o == JUNCTION => shared[g] = true,
                     _ => {}
                 }
             }
         }
-        out.push(b.piece);
     }
-    out
-}
-
-/// `trees[part][tri]` is each triangle's painting. `thickness` is in mesh units.
-pub fn color_pieces(
-    mesh: &Mesh,
-    trees: &[Vec<Node>],
-    slots: usize,
-    thickness: f32,
-    solid_slot: Option<u8>,
-) -> Vec<ColorPiece> {
-    let mut all: Vec<Option<ColorPiece>> = (0..slots.min(256)).map(|_| None).collect();
-    for (part, nodes) in mesh.parts.iter().zip(trees) {
-        let surface = painted(part, nodes);
-        for piece in pieces_of(&surface, slots, thickness, solid_slot) {
-            let entry = &mut all[piece.slot as usize];
-            if let Some(into) = entry {
-                let base = into.positions.len() as u32;
-                into.positions.extend(piece.positions);
-                into.tris.extend(piece.tris.into_iter().map(|t| t.map(|v| v + base)));
-                into.solid &= piece.solid;
+    drop(owner);
+    // Faces of each patch in global vertices: from the lower region, and
+    // between two regions from the higher one too.
+    let mut patches: HashMap<PatchKey, [Vec<[u32; 3]>; 2]> = HashMap::new();
+    let mut junctions: Vec<Vec<[u32; 3]>> = vec![Vec::new(); regions.len()];
+    for (r, (m, ids)) in regions.iter().zip(local).enumerate() {
+        for (t, &o) in m.tris.iter().zip(&patch_of[r]) {
+            let g = t.map(|v| ids[v as usize]);
+            if o == JUNCTION {
+                junctions[r].push(g);
             } else {
-                *entry = Some(piece);
+                let k = key(r, o);
+                patches.entry(k).or_default()[usize::from(k.0 != r as u32)].push(g);
             }
         }
     }
-    all.into_iter().flatten().collect()
+    // A face between two regions is used by one and flipped by the other only
+    // where both sides are the same faces; otherwise each keeps its own.
+    let canon = |t: [u32; 3]| {
+        let k = (0..3).min_by_key(|&k| t[k]).unwrap_or(0);
+        [t[k], t[(k + 1) % 3], t[(k + 2) % 3]]
+    };
+    let mut jobs: Vec<(PatchKey, Vec<[u32; 3]>)> = Vec::with_capacity(patches.len());
+    for (k, [low, high]) in patches {
+        if (k.1 as usize) < regions.len() {
+            let mut a: Vec<_> = low.iter().map(|&t| canon(t)).collect();
+            let mut b: Vec<_> = high.iter().map(|&t| canon([t[0], t[2], t[1]])).collect();
+            a.sort_unstable();
+            b.sort_unstable();
+            if a != b {
+                junctions[k.0 as usize].extend(low);
+                if let Some(j) = junctions.get_mut(k.1 as usize) {
+                    j.extend(high);
+                }
+                continue;
+            }
+        }
+        jobs.push((k, low));
+    }
+    let adapter = meshopt::VertexDataAdapter::new(meshopt::typed_to_bytes(pos), std::mem::size_of::<Vec3>(), 0);
+    let simplified: Vec<(PatchKey, Vec<[u32; 3]>)> = jobs
+        .into_par_iter()
+        .map(|(k, tris)| {
+            let Ok(adapter) = &adapter else { return (k, tris) };
+            let indices: Vec<u32> = tris.iter().flatten().copied().collect();
+            let out = meshopt::simplify_with_locks(
+                &indices,
+                adapter,
+                &shared,
+                0,
+                // A pin and its socket keep their clearance.
+                if k.1 == PINNED { error * 0.2 } else { error },
+                meshopt::SimplifyOptions::ErrorAbsolute
+                    | meshopt::SimplifyOptions::Sparse
+                    | meshopt::SimplifyOptions::LockBorder
+                    | meshopt::SimplifyOptions::RegularizeLight,
+                None,
+            );
+            let out: Vec<[u32; 3]> = out.as_chunks::<3>().0.to_vec();
+            (k, if out.is_empty() { tris } else { out })
+        })
+        .collect();
+    let mut faces = junctions;
+    for ((r, o), tris) in simplified {
+        faces[r as usize].extend_from_slice(&tris);
+        if let Some(f) = faces.get_mut(o as usize) {
+            f.extend(tris.iter().map(|t| [t[0], t[2], t[1]]));
+        }
+    }
+    faces
+        .into_par_iter()
+        .map(|tris| {
+            let tris = cancel_folds(tris);
+            let mut remap: HashMap<u32, u32> = HashMap::new();
+            let mut positions = Vec::new();
+            let tris = tris
+                .iter()
+                .map(|t| {
+                    t.map(|g| {
+                        *remap.entry(g).or_insert_with(|| {
+                            positions.push(pos[g as usize]);
+                            positions.len() as u32 - 1
+                        })
+                    })
+                })
+                .collect();
+            (positions, tris)
+        })
+        .collect()
+}
+
+/// `soup` is the painted surface in millimetres; `label(soup_tri, bary)` is the
+/// colour at a point of it.
+pub fn split(soup: &TriSoup, label: impl Fn(u32, Bary) -> u8 + Sync, params: SplitParams) -> Split {
+    if soup.is_empty() {
+        return Split { voxel_mm: params.voxel_mm, ..Default::default() };
+    }
+    let bvh = Bvh::build(soup);
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in soup.corners.iter().flatten() {
+        lo = std::array::from_fn(|a| lo[a].min(p[a]));
+        hi = std::array::from_fn(|a| hi[a].max(p[a]));
+    }
+    let mut h = params.voxel_mm.max(0.05);
+    let dims = |h: f32| -> [usize; 3] { std::array::from_fn(|a| ((hi[a] - lo[a]) / h).ceil() as usize + 4) };
+    while dims(h).iter().product::<usize>() > MAX_VOXELS {
+        h *= 1.1;
+    }
+    let grid = Grid { origin: std::array::from_fn(|a| lo[a] - 2.0 * h), h, n: dims(h) };
+
+    let inside = inside(&grid, &bvh, soup);
+    let off6 = grid.offsets(&N6);
+    let surface: Vec<usize> =
+        (0..grid.len()).into_par_iter().filter(|&i| inside[i] && off6.iter().any(|&o| !inside[step(i, o)])).collect();
+    // The nearest painted point to every surface voxel seeds the colours.
+    let seeds: Vec<(Vec3, u8)> = surface
+        .par_iter()
+        .map(|&i| {
+            let q = grid.center(i);
+            bvh.nearest(soup, q).map(|(t, b)| (geom::at(&soup.corners[t as usize], b), label(t, b))).unwrap_or((q, 0))
+        })
+        .collect();
+
+    // Spread each seed inward, keeping for every voxel the nearest seed.
+    let off26 = grid.offsets(&N26);
+    let mut seed_of = vec![NONE; grid.len()];
+    let mut queue: VecDeque<usize> = VecDeque::with_capacity(surface.len() * 2);
+    for (k, &i) in surface.iter().enumerate() {
+        seed_of[i] = k as u32;
+        queue.push_back(i);
+    }
+    let d2 = |a: Vec3, b: Vec3| {
+        let d = geom::sub(a, b);
+        geom::dot(d, d)
+    };
+    while let Some(v) = queue.pop_front() {
+        let s = seed_of[v];
+        let sp = seeds[s as usize].0;
+        for &o in &off26 {
+            let n = step(v, o);
+            if !inside[n] || seed_of[n] == s {
+                continue;
+            }
+            let c = grid.center(n);
+            if seed_of[n] == NONE || d2(c, sp) < d2(c, seeds[seed_of[n] as usize].0) - 1e-9 {
+                seed_of[n] = s;
+                queue.push_back(n);
+            }
+        }
+    }
+
+    let core = (params.depth_mm > 0.0).then(|| {
+        params.core_slot.unwrap_or_else(|| {
+            let mut count = [0usize; 256];
+            seeds.iter().for_each(|s| count[s.1 as usize] += 1);
+            (0..256).max_by_key(|&l| count[l]).unwrap_or(0) as u8
+        })
+    });
+    let depth2 = params.depth_mm * params.depth_mm;
+    let mut lab: Vec<u8> = (0..grid.len())
+        .into_par_iter()
+        .map(|i| {
+            if !inside[i] {
+                return OUT;
+            }
+            let s = seed_of[i];
+            if s == NONE {
+                return core.unwrap_or(0);
+            }
+            let (p, l) = seeds[s as usize];
+            match core {
+                Some(c) if d2(grid.center(i), p) > depth2 => c,
+                _ => l,
+            }
+        })
+        .collect();
+    drop(inside);
+
+    let min_voxels = (params.min_piece_mm3 / (h * h * h)).ceil().max(1.0) as u32;
+    let merged = merge_crumbs(&grid, &mut lab, min_voxels);
+    let (mut comp, mut sizes, mut labels) = components(&grid, &lab);
+    let pins = params.pins.map(|p| {
+        let pins = pins::place(&grid, &mut lab, &comp, &labels, &sizes, &p);
+        (comp, sizes, labels) = components(&grid, &lab);
+        pins
+    });
+
+    // Contact area between regions, and each region's boundary voxels.
+    let mut faces: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut boundary: Vec<Vec<usize>> = vec![vec![]; sizes.len()];
+    let off14 = grid.offsets(&N14);
+    for v in 0..grid.len() {
+        let c = comp[v];
+        if c == NONE {
+            continue;
+        }
+        for &o in &off6[..] {
+            let n = comp[step(v, o)];
+            if n != NONE && n > c {
+                *faces.entry((c, n)).or_default() += 1;
+            }
+        }
+        if off14.iter().any(|&o| comp[step(v, o)] != c) {
+            boundary[c as usize].push(v);
+        }
+    }
+
+    let field = Field { grid: &grid, lab: &lab, seeds: &seeds, seed_of: &seed_of, core, depth: params.depth_mm };
+    let regions: Vec<RegionMesh> = (0..sizes.len())
+        .into_par_iter()
+        .map(|c| mesh_region(&field, &comp, c as u32, &boundary[c], pins.as_ref(), &bvh, soup))
+        .collect();
+    let (mut meshes, grown) = polish(&regions, &comp, &bvh, soup, h, params.exact_skin.then_some(h));
+    let mut exact_skin = params.exact_skin.then_some(0);
+    if let (Some(grown), Some(body)) = (grown, params.exact_skin.then(|| skin::body(soup)).flatten()) {
+        let clipped: Vec<Option<MeshData>> = grown.par_iter().map(|g| skin::clip(&body, g)).collect();
+        for (m, c) in meshes.iter_mut().zip(clipped) {
+            if let Some(c) = c.filter(|c| watertight(&c.1)) {
+                *m = c;
+                exact_skin = exact_skin.map(|n| n + 1);
+            }
+        }
+    }
+
+    // Order by colour, then largest first, and renumber the contacts.
+    let mut order: Vec<usize> = (0..sizes.len()).filter(|&c| !meshes[c].1.is_empty()).collect();
+    let dropped = sizes.len() - order.len();
+    order.sort_by_key(|&c| (labels[c], std::cmp::Reverse(sizes[c])));
+    let mut new_id = vec![usize::MAX; sizes.len()];
+    for (k, &c) in order.iter().enumerate() {
+        new_id[c] = k;
+    }
+    let mut pieces: Vec<Piece> = Vec::with_capacity(order.len());
+    let mut meshes: Vec<Option<MeshData>> = meshes.into_iter().map(Some).collect();
+    for &c in &order {
+        let (positions, tris) = meshes[c].take().unwrap_or_default();
+        pieces.push(Piece {
+            slot: labels[c],
+            positions,
+            tris,
+            volume_mm3: sizes[c] as f32 * h * h * h,
+            contacts: vec![],
+        });
+    }
+    for ((a, b), n) in faces {
+        let (a, b) = (new_id[a as usize], new_id[b as usize]);
+        if a != usize::MAX && b != usize::MAX {
+            let area = n as f32 * h * h;
+            pieces[a].contacts.push((b, area));
+            pieces[b].contacts.push((a, area));
+        }
+    }
+    for p in &mut pieces {
+        p.contacts.sort_by(|x, y| y.1.total_cmp(&x.1));
+    }
+    // Each pin between the pieces its two ends lie in.
+    let piece_at = |p: Vec3| -> Option<usize> {
+        let c: [isize; 3] = std::array::from_fn(|a| ((p[a] - grid.origin[a]) / h).floor() as isize);
+        if (0..3).any(|a| c[a] < 0 || c[a] as usize >= grid.n[a]) {
+            return None;
+        }
+        let r = comp[grid.index(c.map(|x| x as usize))];
+        new_id.get(r as usize).copied().filter(|&i| i != usize::MAX)
+    };
+    let (pin_pairs, unpinned) = pins.map_or((vec![], 0), |z| {
+        let pairs = z
+            .pins
+            .iter()
+            .filter_map(|p| Some(PinJoin { pin: piece_at(p.base(h))?, socket: piece_at(p.tip(h))?, axis: p.axis() }))
+            .collect();
+        (pairs, z.missed)
+    });
+    Split { pieces, voxel_mm: h, merged, dropped, pins: pin_pairs, unpinned, exact_skin }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::mesh::RepairReport;
 
-    fn cube() -> Mesh {
-        let positions = vec![
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [10.0, 10.0, 0.0],
-            [0.0, 10.0, 0.0],
-            [0.0, 0.0, 10.0],
-            [10.0, 0.0, 10.0],
-            [10.0, 10.0, 10.0],
-            [0.0, 10.0, 10.0],
-        ];
+    /// A closed box from `lo` to `hi`, outward normals.
+    pub(crate) fn cuboid(lo: Vec3, hi: Vec3) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let p = (0..8).map(|b| [[lo[0], hi[0]][b & 1], [lo[1], hi[1]][(b >> 1) & 1], [lo[2], hi[2]][b >> 2]]).collect();
         let tris = vec![
             [0, 2, 1],
-            [0, 3, 2],
+            [1, 2, 3],
             [4, 5, 6],
-            [4, 6, 7],
-            [0, 1, 5],
-            [0, 5, 4],
-            [1, 2, 6],
-            [1, 6, 5],
-            [2, 3, 7],
-            [2, 7, 6],
-            [3, 0, 4],
-            [3, 4, 7],
+            [5, 7, 6],
+            [0, 1, 4],
+            [1, 5, 4],
+            [2, 6, 3],
+            [3, 6, 7],
+            [0, 4, 2],
+            [2, 4, 6],
+            [1, 3, 5],
+            [3, 7, 5],
         ];
-        Mesh {
-            parts: vec![MeshPart { name: "c".into(), positions, tris, origin: None }],
-            repair: RepairReport::default(),
-        }
+        (p, tris)
     }
 
-    /// Every directed edge used once, with its opposite used once too.
-    fn closed(p: &ColorPiece) -> bool {
-        let mut e: HashMap<(u32, u32), u32> = HashMap::new();
-        for t in &p.tris {
-            for k in 0..3 {
-                *e.entry((t[k], t[(k + 1) % 3])).or_insert(0) += 1;
-            }
+    fn soup(p: &[Vec3], tris: &[[u32; 3]]) -> TriSoup {
+        let mut s = TriSoup::default();
+        for (i, t) in tris.iter().enumerate() {
+            s.push(t.map(|v| p[v as usize]), 0, i as u32);
         }
-        e.iter().all(|(&(a, b), &n)| n == 1 && e.get(&(b, a)) == Some(&1))
+        s
     }
 
-    fn volume(p: &ColorPiece) -> f32 {
+    fn volume(p: &Piece) -> f32 {
         p.tris
             .iter()
             .map(|t| {
@@ -420,158 +1048,238 @@ mod tests {
             .sum()
     }
 
-    fn leaf(l: u8) -> Node {
-        Node::Leaf(l)
-    }
-
-    fn split(k: [Node; 4]) -> Node {
-        Node::Split(Box::new(k))
-    }
-
-    /// The top split twice on one triangle and not on its neighbour: T-junctions on the diagonal.
-    fn painted_cube() -> Vec<Vec<Node>> {
-        let mut nodes: Vec<Node> = (0..12).map(|_| leaf(0)).collect();
-        nodes[2] = split([split([leaf(1), leaf(1), leaf(0), leaf(1)]), leaf(1), leaf(0), leaf(1)]);
-        nodes[3] = leaf(1);
-        vec![nodes]
+    /// A 20 mm cube whose top face is colour 1 and the rest colour 0.
+    fn painted_cube(params: SplitParams) -> Split {
+        let (p, t) = cuboid([0.0; 3], [20.0; 3]);
+        let s = soup(&p, &t);
+        let top = |tri: u32, _b: Bary| u8::from(tri == 2 || tri == 3);
+        split(&s, top, params)
     }
 
     #[test]
-    fn painted_surface_follows_the_leaves_and_stays_closed() {
-        let m = cube();
-        let s = painted(&m.parts[0], &painted_cube()[0]);
-        assert!(s.labels.iter().filter(|&&l| l == 1).count() > 2, "the leaves are kept, not the main colour");
-        let all = ColorPiece { slot: 0, positions: s.positions.clone(), tris: s.tris.clone(), solid: false };
-        assert!(closed(&all), "T-junctions are stitched");
-        assert!((volume(&all) - 1000.0).abs() < 1e-2);
+    fn colours_become_solid_closed_pieces_that_fill_the_part() {
+        let s = painted_cube(SplitParams { voxel_mm: 1.0, ..Default::default() });
+        assert_eq!(s.pieces.len(), 2);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+        // Solid, not skins: together they fill the 8000 mm³ cube.
+        let total: f32 = s.pieces.iter().map(volume).sum();
+        assert!((total - 8000.0).abs() < 400.0, "{total}");
+        let top = s.pieces.iter().find(|p| p.slot == 1).unwrap();
+        // Nearest-surface split of a cube: the top colour is a pyramid to the centre.
+        assert!(volume(top) > 1000.0 && volume(top) < 1700.0, "{}", volume(top));
+        assert!(s.pieces.iter().all(|p| p.contacts.len() == 1 && p.contacts[0].1 > 100.0));
+        // Where they meet, both sides find the faces to glue. The contact counts
+        // voxel faces, a staircase; the meshes are smooth, so a bit smaller.
+        let (a, b) = (&s.pieces[0], &s.pieces[1]);
+        for (x, y) in [(a, b), (b, a)] {
+            let area: f32 = crate::kit::contact_faces(x, y, s.voxel_mm * 0.5)
+                .iter()
+                .map(|&t| {
+                    let c = x.tris[t].map(|v| x.positions[v as usize]);
+                    0.5 * crate::geom::len(crate::geom::cross(
+                        crate::geom::sub(c[1], c[0]),
+                        crate::geom::sub(c[2], c[0]),
+                    ))
+                })
+                .sum();
+            let staircase = x.contacts[0].1;
+            assert!(area > 0.7 * staircase && area < 1.05 * staircase, "{area} vs {staircase}");
+        }
     }
 
     #[test]
-    fn each_colour_is_a_closed_shell() {
-        let m = cube();
-        let pieces = color_pieces(&m, &painted_cube(), 2, 0.5, None);
-        assert_eq!(pieces.len(), 2);
-        assert!(pieces.iter().all(closed));
-        assert!(pieces.iter().all(|p| volume(p) > 0.0));
+    fn depth_limits_the_colour_and_leaves_a_core() {
+        let s = painted_cube(SplitParams {
+            voxel_mm: 1.0,
+            depth_mm: 3.0,
+            core_slot: Some(0),
+            min_piece_mm3: 1.0,
+            ..Default::default()
+        });
+        let top = s.pieces.iter().find(|p| p.slot == 1).unwrap();
+        // A 20 × 20 × 3 mm slab, minus the edges where the sides are nearer.
+        assert!(volume(top) > 600.0 && volume(top) < 1300.0, "{}", volume(top));
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
     }
 
     #[test]
-    fn open_painted_surface_exports_closed_shells_even_with_a_main_colour() {
-        let mesh = Mesh {
-            parts: vec![MeshPart {
-                name: "sheet".into(),
-                positions: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]],
-                tris: vec![[0, 1, 2], [0, 2, 3]],
-                origin: None,
-            }],
-            repair: RepairReport::default(),
+    fn crumbs_join_their_neighbour() {
+        let (p, t) = cuboid([0.0; 3], [20.0; 3]);
+        let s = soup(&p, &t);
+        // A dot of colour 1 near one corner of the top face.
+        let dot = |tri: u32, b: Bary| {
+            let q = geom::at(&s.corners[tri as usize], b);
+            u8::from(q[2] > 19.9 && q[0] < 4.0 && q[1] < 4.0)
         };
-        let trees = vec![vec![leaf(0), leaf(255)]];
-        for main in [None, Some(0)] {
-            let pieces = color_pieces(&mesh, &trees, 256, 0.5, main);
-            assert_eq!(pieces.iter().map(|p| p.slot).collect::<Vec<_>>(), [0, 255]);
-            assert!(pieces.iter().all(|p| !p.solid && closed(p)));
-            for piece in &pieces {
-                assert!((volume(piece) - 25.0).abs() < 1e-3);
+        let kept = split(&s, dot, SplitParams { voxel_mm: 1.0, min_piece_mm3: 0.5, ..Default::default() });
+        assert_eq!(kept.pieces.len(), 2);
+        let merged = split(&s, dot, SplitParams { voxel_mm: 1.0, min_piece_mm3: 50.0, ..Default::default() });
+        assert_eq!(merged.pieces.len(), 1);
+        assert!(watertight(&merged.pieces[0].tris));
+    }
+
+    #[test]
+    fn outer_surface_stays_on_the_model() {
+        let s = painted_cube(SplitParams { voxel_mm: 0.7, ..Default::default() });
+        for p in &s.pieces {
+            for v in &p.positions {
+                assert!(v.iter().all(|&c| (-0.01..=20.01).contains(&c)), "{v:?}");
             }
         }
     }
 
     #[test]
-    fn the_main_body_has_pockets_the_shells_fill_exactly() {
-        let m = cube();
-        let trees = painted_cube();
-        let pieces = color_pieces(&m, &trees, 2, 0.5, Some(0));
-        let body = pieces.iter().find(|p| p.solid).unwrap();
-        let shell = pieces.iter().find(|p| !p.solid).unwrap();
-        assert!(closed(body) && closed(shell));
-        // Body and shell make up the cube, without overlapping.
-        assert!((volume(body) + volume(shell) - 1000.0).abs() < 1e-2, "{} + {}", volume(body), volume(shell));
-        assert!(volume(body) < 1000.0 - 1.0);
+    fn faces_between_pieces_are_mirror_images() {
+        let s = painted_cube(SplitParams { voxel_mm: 1.0, ..Default::default() });
+        let (a, b) = (&s.pieces[0], &s.pieces[1]);
+        let key = |p: Vec3| p.map(f32::to_bits);
+        let mirrored: std::collections::HashSet<_> = b
+            .tris
+            .iter()
+            .flat_map(|t| {
+                let [x, y, z] = t.map(|v| key(b.positions[v as usize]));
+                // Every rotation of the triangle, wound the other way.
+                [[x, z, y], [z, y, x], [y, x, z]]
+            })
+            .collect();
+        let contact = crate::kit::contact_faces(a, b, 0.25);
+        let matched =
+            contact.iter().filter(|&&t| mirrored.contains(&a.tris[t].map(|v| key(a.positions[v as usize])))).count();
+        // All but the strip where both meet the outside.
+        assert!(matched as f32 > 0.9 * contact.len() as f32, "{matched} of {}", contact.len());
     }
 
     #[test]
-    fn three_colours_meeting_keep_every_piece_closed() {
-        let m = cube();
-        let mut nodes: Vec<Node> = (0..12).map(|_| leaf(0)).collect();
-        nodes[2] = split([leaf(1), leaf(2), leaf(1), leaf(2)]);
-        nodes[3] = leaf(2);
-        nodes[6] = leaf(1);
-        let trees = vec![nodes];
-        for main in [None, Some(0)] {
-            let pieces = color_pieces(&m, &trees, 3, 0.4, main);
-            assert_eq!(pieces.len(), 3);
-            assert!(pieces.iter().all(closed), "{main:?}");
-            if main.is_some() {
-                let total: f32 = pieces.iter().map(volume).sum();
-                assert!((total - 1000.0).abs() < 1e-2, "{total}");
+    fn colours_meet_on_the_surface_without_a_groove() {
+        // The top quarter of a cube in another colour: the border runs round
+        // the flat sides at z = 15.
+        let (p, t) = cuboid([0.0; 3], [20.0; 3]);
+        let model = soup(&p, &t);
+        let band = |tri: u32, b: Bary| u8::from(geom::at(&model.corners[tri as usize], b)[2] > 15.0);
+        let s = split(&model, band, SplitParams { voxel_mm: 1.0, ..Default::default() });
+        assert_eq!(s.pieces.len(), 2);
+        let mut all = TriSoup::default();
+        for p in &s.pieces {
+            for t in &p.tris {
+                all.push(t.map(|v| p.positions[v as usize]), 0, 0);
             }
         }
-    }
-
-    /// A closed UV sphere, faces outwards.
-    fn sphere(r: f32, rings: u32, segs: u32) -> Mesh {
-        let mut positions = vec![[0.0, 0.0, -r]];
-        for i in 1..rings {
-            let a = std::f32::consts::PI * i as f32 / rings as f32 - std::f32::consts::FRAC_PI_2;
-            for j in 0..segs {
-                let b = std::f32::consts::TAU * j as f32 / segs as f32;
-                positions.push([r * a.cos() * b.cos(), r * a.cos() * b.sin(), r * a.sin()]);
+        let bvh = Bvh::build(&all);
+        // Across the border on every side, away from the corners the grid rounds off.
+        for i in 4..37 {
+            let x = i as f32 * 0.5;
+            for z in [14.0, 14.5, 15.0, 15.5, 16.0] {
+                for q in [[x, 0.0, z], [x, 20.0, z], [0.0, x, z], [20.0, x, z]] {
+                    let (t, bb) = bvh.nearest(&all, q).unwrap();
+                    let d = geom::len(geom::sub(geom::at(&all.corners[t as usize], bb), q));
+                    assert!(d < 0.1, "{q:?} is {d} mm from the pieces");
+                }
             }
         }
-        positions.push([0.0, 0.0, r]);
-        let top = positions.len() as u32 - 1;
-        let at = |i: u32, j: u32| 1 + (i - 1) * segs + j % segs;
-        let mut tris = vec![];
-        for j in 0..segs {
-            tris.push([0, at(1, j + 1), at(1, j)]);
-            tris.push([top, at(rings - 1, j), at(rings - 1, j + 1)]);
-            for i in 1..rings - 1 {
-                tris.push([at(i, j), at(i, j + 1), at(i + 1, j + 1)]);
-                tris.push([at(i, j), at(i + 1, j + 1), at(i + 1, j)]);
-            }
-        }
-        Mesh {
-            parts: vec![MeshPart { name: "s".into(), positions, tris, origin: None }],
-            repair: RepairReport::default(),
-        }
-    }
-
-    /// A random painting: splits up to `depth` deep, three colours.
-    fn random_tree(seed: &mut u64, depth: u32) -> Node {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let r = (*seed >> 33) as u32;
-        if depth == 0 || !r.is_multiple_of(3) {
-            return Node::Leaf((r / 3 % 3) as u8);
-        }
-        split([
-            random_tree(seed, depth - 1),
-            random_tree(seed, depth - 1),
-            random_tree(seed, depth - 1),
-            random_tree(seed, depth - 1),
-        ])
     }
 
     #[test]
-    fn a_randomly_painted_sphere_splits_into_closed_pieces_that_add_up() {
-        let m = sphere(20.0, 16, 32);
-        let whole = {
-            let p = &m.parts[0];
-            ColorPiece { slot: 0, positions: p.positions.clone(), tris: p.tris.clone(), solid: false }
-        };
-        for seed0 in 1..6u64 {
-            let mut seed = seed0;
-            let trees = vec![(0..m.parts[0].tris.len()).map(|_| random_tree(&mut seed, 4)).collect::<Vec<_>>()];
-            let shells = color_pieces(&m, &trees, 3, 0.8, None);
-            assert!(shells.iter().all(closed), "seed {seed0}");
-            let with_body = color_pieces(&m, &trees, 3, 0.8, Some(0));
-            assert!(with_body.iter().all(closed), "seed {seed0}");
-            let total: f32 = with_body.iter().map(volume).sum();
-            assert!(
-                (total - volume(&whole)).abs() < volume(&whole) * 1e-4,
-                "seed {seed0}: {total} vs {}",
-                volume(&whole)
-            );
+    fn pins_key_two_halves_with_clearance() {
+        let (p, t) = cuboid([0.0; 3], [30.0; 3]);
+        let model = soup(&p, &t);
+        let halves = |tri: u32, b: Bary| u8::from(geom::at(&model.corners[tri as usize], b)[2] > 15.0);
+        let pins = PinParams::default();
+        let s = split(&model, halves, SplitParams { voxel_mm: 0.5, pins: Some(pins), ..Default::default() });
+        assert_eq!(s.pieces.len(), 2);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+        assert_eq!(s.pins.len(), 2, "{:?}", s.pins);
+        assert_eq!(s.unpinned, 0);
+        let PinJoin { pin, socket, .. } = s.pins[0];
+        assert_ne!(pin, socket);
+        // The pins stand out of their piece, and only that far.
+        let top = s.pieces[pin].positions.iter().map(|v| v[2]).fold(f32::MIN, f32::max);
+        let bottom = s.pieces[pin].positions.iter().map(|v| v[2]).fold(f32::MAX, f32::min);
+        let reach = if bottom < 1.0 { top - 15.0 } else { 15.0 - bottom };
+        assert!((reach - pins.depth_mm).abs() < 0.05, "{reach}");
+        // Every bit of a pin keeps about the clearance from its socket.
+        let mut other = TriSoup::default();
+        for t in &s.pieces[socket].tris {
+            other.push(t.map(|v| s.pieces[socket].positions[v as usize]), 0, 0);
         }
+        let bvh = Bvh::build(&other);
+        let gaps: Vec<f32> = s.pieces[pin]
+            .positions
+            .iter()
+            .filter(|v| (v[2] - 15.0).abs() > 0.3 && (v[2] - 15.0).abs() < pins.depth_mm + 0.01)
+            .filter(|v| (v[2] > 15.0) == (bottom < 1.0))
+            .map(|&q| {
+                let (t, b) = bvh.nearest(&other, q).unwrap();
+                geom::len(geom::sub(geom::at(&other.corners[t as usize], b), q))
+            })
+            .collect();
+        assert!(gaps.len() > 50);
+        let min = gaps.iter().copied().fold(f32::MAX, f32::min);
+        let mean = gaps.iter().sum::<f32>() / gaps.len() as f32;
+        assert!(min > 0.1 && (mean - pins.clearance_mm).abs() < 0.04, "min {min}, mean {mean}");
+    }
+
+    #[test]
+    fn the_pin_goes_where_its_socket_fits() {
+        // A small cube standing on a wide, thin plate: no room for a socket
+        // in the plate, so the pin stands out of the plate into the cube.
+        let (mut p, mut t) = cuboid([0.0; 3], [60.0, 60.0, 3.0]);
+        let (cp, ct) = cuboid([25.0, 25.0, 2.0], [37.0, 37.0, 14.0]);
+        let base = p.len() as u32;
+        p.extend(cp);
+        t.extend(ct.iter().map(|x| x.map(|v| v + base)));
+        let model = soup(&p, &t);
+        let cube = |tri: u32, b: Bary| u8::from(geom::at(&model.corners[tri as usize], b)[2] > 3.0);
+        let s =
+            split(&model, cube, SplitParams { voxel_mm: 0.5, pins: Some(PinParams::default()), ..Default::default() });
+        assert_eq!(s.pieces.len(), 2);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+        assert_eq!(s.pins.len(), 1, "{:?}", s.pins);
+        let PinJoin { pin, socket, .. } = s.pins[0];
+        assert_eq!((s.pieces[pin].slot, s.pieces[socket].slot), (0, 1));
+    }
+
+    #[test]
+    fn no_pin_where_none_fits() {
+        // Two slabs 2 mm thick: no socket fits in either.
+        let (p, t) = cuboid([0.0; 3], [30.0, 30.0, 4.0]);
+        let model = soup(&p, &t);
+        let slab = |tri: u32, b: Bary| u8::from(geom::at(&model.corners[tri as usize], b)[2] > 2.0);
+        let s =
+            split(&model, slab, SplitParams { voxel_mm: 0.5, pins: Some(PinParams::default()), ..Default::default() });
+        assert!(s.pins.is_empty());
+        assert_eq!(s.unpinned, 1);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+    }
+
+    #[test]
+    fn exact_skin_keeps_the_models_corners() {
+        let s = painted_cube(SplitParams { voxel_mm: 1.0, exact_skin: true, ..Default::default() });
+        assert_eq!(s.exact_skin, Some(2));
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
+        let total: f32 = s.pieces.iter().map(volume).sum();
+        assert!((total - 8000.0).abs() < 8.0, "{total}");
+        // Every corner of the cube is a vertex of some piece, not rounded off.
+        for b in 0..8 {
+            let c = [[0.0, 20.0][b & 1], [0.0, 20.0][(b >> 1) & 1], [0.0, 20.0][b >> 2]];
+            let near = s
+                .pieces
+                .iter()
+                .flat_map(|p| p.positions.iter())
+                .map(|&v| geom::len(geom::sub(v, c)))
+                .fold(f32::MAX, f32::min);
+            assert!(near < 1e-3, "corner {c:?} is {near} mm off");
+        }
+    }
+
+    #[test]
+    fn an_open_model_keeps_the_voxel_skin() {
+        let (p, mut t) = cuboid([0.0; 3], [20.0; 3]);
+        t.pop();
+        let model = soup(&p, &t);
+        let top = |tri: u32, _b: Bary| u8::from(tri == 2 || tri == 3);
+        let s = split(&model, top, SplitParams { voxel_mm: 1.0, exact_skin: true, ..Default::default() });
+        assert_eq!(s.exact_skin, Some(0));
+        assert_eq!(s.pieces.len(), 2);
+        assert!(s.pieces.iter().all(|p| watertight(&p.tris)));
     }
 }

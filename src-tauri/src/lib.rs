@@ -3,8 +3,10 @@
 mod commands;
 mod dto;
 mod error;
+mod filaments;
 mod prefs;
 mod profiles;
+mod saved;
 mod state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,6 +22,7 @@ pub fn run() {
             let state = app.state::<state::AppState>();
             *state.printers.lock().expect("printer store") = profiles::Store::load(dir.join("printers.json"));
             *state.prefs.lock().expect("settings") = prefs::Prefs::load(dir.join("settings.json"));
+            *state.filaments.lock().expect("filaments") = filaments::FilamentStore::load(dir.join("filaments.json"));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -27,8 +30,16 @@ pub fn run() {
             commands::initial_file,
             commands::set_blender_path,
             commands::open_blend,
+            commands::open_project,
+            commands::save_project,
             commands::inspect_model,
             commands::set_palette,
+            commands::filaments,
+            commands::set_filament_owned,
+            commands::save_filament,
+            commands::delete_filament,
+            commands::set_inventory_only,
+            commands::set_slot_filament,
             commands::suggest_palette,
             commands::reduce_palette,
             commands::merge_slots,
@@ -58,11 +69,15 @@ pub fn run() {
             commands::preview_mesh,
             commands::pick,
             commands::paint,
+            commands::bucket_pick,
+            commands::bucket,
             commands::end_stroke,
             commands::undo,
             commands::export_3mf,
             commands::export_color_zip,
+            commands::cancel_color_zip,
             commands::export_color_assembly,
+            commands::export_color_shells_zip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running BlendParser");
