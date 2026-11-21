@@ -8,15 +8,22 @@ import { findInstallers, mergeManifest } from "./publish-signed-windows.mjs";
 const nsis = { signature: "nsis-sig", url: "https://example/setup.exe" };
 const msi = { signature: "msi-sig", url: "https://example/app.msi" };
 
-test("windows entries are replaced and linux entries kept", () => {
+test("windows entries are replaced and Linux and both macOS architectures are kept", () => {
   const current = {
     version: "0.0.3",
     notes: "notas",
     pub_date: "2026-10-25T00:00:00Z",
-    platforms: { "linux-x86_64": { signature: "l", url: "u" }, "windows-x86_64": { signature: "old", url: "old" } },
+    platforms: {
+      "linux-x86_64": { signature: "l", url: "u" },
+      "darwin-x86_64": { signature: "mac-intel", url: "https://example/intel.app.tar.gz" },
+      "darwin-aarch64": { signature: "mac-arm", url: "https://example/arm.app.tar.gz" },
+      "windows-x86_64": { signature: "old", url: "old" },
+    },
   };
   const merged = mergeManifest(current, { version: "0.0.3", pubDate: "later", nsis, msi });
   assert.deepEqual(merged.platforms["linux-x86_64"], { signature: "l", url: "u" });
+  assert.deepEqual(merged.platforms["darwin-x86_64"], current.platforms["darwin-x86_64"]);
+  assert.deepEqual(merged.platforms["darwin-aarch64"], current.platforms["darwin-aarch64"]);
   assert.deepEqual(merged.platforms["windows-x86_64"], nsis);
   assert.deepEqual(merged.platforms["windows-x86_64-nsis"], nsis);
   assert.deepEqual(merged.platforms["windows-x86_64-msi"], msi);

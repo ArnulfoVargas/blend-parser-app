@@ -34,6 +34,9 @@ fn painted_free_cut_exports_both_objects_and_can_be_undone() {
         assert_eq!(pieces.len(), 2);
         assert_ne!(pieces[0].object, pieces[1].object);
         let model = bp_3mf::Model {
+            piece: "piece",
+            slots: vec![],
+            thumbnail: None,
             plate_count: 1,
             name: "free plane",
             parts: pieces

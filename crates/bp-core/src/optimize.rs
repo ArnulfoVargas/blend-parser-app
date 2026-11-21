@@ -3,50 +3,133 @@
 //! under a minimum area take the colour of the neighbour they share the most
 //! border with.
 
-use std::collections::HashMap;
+use rayon::prelude::*;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::geom;
 use crate::mesh::MeshPart;
 use crate::paint::Node;
 
-/// Triangle neighbours across shared edges, with the shared edge length.
-pub fn adjacency(part: &MeshPart) -> Vec<Vec<(u32, f32)>> {
-    let mut edges: HashMap<(u32, u32), Vec<u32>> = HashMap::with_capacity(part.tris.len() * 3 / 2);
-    for (i, t) in part.tris.iter().enumerate() {
-        for k in 0..3 {
-            let (a, b) = (t[k], t[(k + 1) % 3]);
-            edges.entry((a.min(b), a.max(b))).or_default().push(i as u32);
+/// Triangle neighbours across shared edges, with the shared edge length, packed
+/// in one buffer: `adj[t]` is the slice of triangle `t`'s neighbours. One
+/// allocation instead of one per triangle matters on meshes of millions.
+#[derive(Clone, Debug, Default)]
+pub struct Adjacency {
+    start: Vec<u32>,
+    items: Vec<(u32, f32)>,
+}
+
+impl Adjacency {
+    pub fn len(&self) -> usize {
+        self.start.len().saturating_sub(1)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &[(u32, f32)]> + '_ {
+        (0..self.len()).map(move |t| &self[t])
+    }
+}
+
+impl std::ops::Index<usize> for Adjacency {
+    type Output = [(u32, f32)];
+    #[inline]
+    fn index(&self, t: usize) -> &[(u32, f32)] {
+        &self.items[self.start[t] as usize..self.start[t + 1] as usize]
+    }
+}
+
+/// Triangles per block when filling the adjacency in parallel.
+const BLOCK: usize = 4096;
+
+/// Triangle neighbours across shared edges, with the shared edge length. Two
+/// triangles are neighbours across an edge once per edge they share.
+pub fn adjacency(part: &MeshPart) -> Adjacency {
+    let n = part.tris.len();
+    let nv = part.positions.len();
+    // Triangles round each vertex (counting sort).
+    let mut first = vec![0u32; nv + 1];
+    for t in &part.tris {
+        for &v in t {
+            first[v as usize + 1] += 1;
         }
     }
-    let mut adj = vec![Vec::new(); part.tris.len()];
-    for ((a, b), tris) in edges {
-        let l = geom::len(geom::sub(part.positions[a as usize], part.positions[b as usize]));
-        for &x in &tris {
-            for &y in &tris {
-                if x != y {
-                    adj[x as usize].push((y, l));
+    for i in 0..nv {
+        first[i + 1] += first[i];
+    }
+    let mut fill = first.clone();
+    let mut round = vec![0u32; n * 3];
+    for (i, t) in part.tris.iter().enumerate() {
+        for &v in t {
+            round[fill[v as usize] as usize] = i as u32;
+            fill[v as usize] += 1;
+        }
+    }
+    drop(fill);
+    // Every other triangle round `a` that has the edge a–b too, once per such edge.
+    let has_edge = |u: [u32; 3], a: u32, b: u32| {
+        (0..3).filter(|&k| (u[k] == a && u[(k + 1) % 3] == b) || (u[k] == b && u[(k + 1) % 3] == a)).count()
+    };
+    let visit = |t: usize, f: &mut dyn FnMut(u32, u32, u32)| {
+        let tri = part.tris[t];
+        for k in 0..3 {
+            let (a, b) = (tri[k], tri[(k + 1) % 3]);
+            for &u in &round[first[a as usize] as usize..first[a as usize + 1] as usize] {
+                if u as usize == t {
+                    continue;
+                }
+                for _ in 0..has_edge(part.tris[u as usize], a, b) {
+                    f(u, a, b);
                 }
             }
         }
+    };
+    let counts: Vec<u32> = (0..n)
+        .into_par_iter()
+        .map(|t| {
+            let mut c = 0;
+            visit(t, &mut |_, _, _| c += 1);
+            c
+        })
+        .collect();
+    let mut start = Vec::with_capacity(n + 1);
+    start.push(0u32);
+    for c in &counts {
+        start.push(start.last().unwrap() + c);
     }
-    adj
+    drop(counts);
+    let mut items = vec![(0u32, 0.0f32); *start.last().unwrap() as usize];
+    // Blocks of triangles own consecutive runs of `items`.
+    let mut blocks = Vec::with_capacity(n.div_ceil(BLOCK));
+    let mut rest = items.as_mut_slice();
+    for b in (0..n).step_by(BLOCK) {
+        let end = (b + BLOCK).min(n);
+        let (mine, tail) = rest.split_at_mut((start[end] - start[b]) as usize);
+        blocks.push((b, end, mine));
+        rest = tail;
+    }
+    blocks.into_par_iter().for_each(|(b, end, out)| {
+        let mut at = 0;
+        for t in b..end {
+            visit(t, &mut |u, a, bb| {
+                let l = geom::len(geom::sub(part.positions[a as usize], part.positions[bb as usize]));
+                out[at] = (u, l);
+                at += 1;
+            });
+        }
+    });
+    Adjacency { start, items }
 }
 
 /// Merges islands smaller than `min_area` (source units²) into their neighbours.
 /// Triangles marked in `locked` (painted by hand) are never changed.
 /// Returns how many triangles changed colour.
-pub fn despeckle(
-    part: &MeshPart,
-    adj: &[Vec<(u32, f32)>],
-    nodes: &mut [Node],
-    locked: &[bool],
-    min_area: f32,
-) -> usize {
+pub fn despeckle(part: &MeshPart, adj: &Adjacency, nodes: &mut [Node], locked: &[bool], min_area: f32) -> usize {
     let n = nodes.len();
     let mut changed = 0;
     // Two passes: merging one island can leave its neighbour small.
     for _ in 0..2 {
-        let label: Vec<u8> = nodes.iter().map(Node::dominant).collect();
+        let label: Vec<u8> = nodes.par_iter().map(Node::dominant).collect();
         let mut region = vec![u32::MAX; n];
         let mut stack = Vec::new();
         for seed in 0..n {
@@ -56,7 +139,7 @@ pub fn despeckle(
             let id = seed as u32;
             let mut members = vec![seed as u32];
             let mut area = 0.0f32;
-            let mut border: HashMap<u8, f32> = HashMap::new();
+            let mut border: HashMap<u8, f32> = HashMap::default();
             let mut has_lock = false;
             region[seed] = id;
             stack.push(seed as u32);
@@ -93,8 +176,8 @@ pub fn despeckle(
 }
 
 /// How many islands of one colour are smaller than `min_area` (source units²).
-pub fn small_islands(part: &MeshPart, adj: &[Vec<(u32, f32)>], nodes: &[Node], min_area: f32) -> usize {
-    let label: Vec<u8> = nodes.iter().map(Node::dominant).collect();
+pub fn small_islands(part: &MeshPart, adj: &Adjacency, nodes: &[Node], min_area: f32) -> usize {
+    let label: Vec<u8> = nodes.par_iter().map(Node::dominant).collect();
     let mut seen = vec![false; nodes.len()];
     let mut stack = Vec::new();
     let mut count = 0;

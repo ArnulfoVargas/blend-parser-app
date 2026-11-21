@@ -31,4 +31,3 @@ export function cutExtent(positions: ArrayLike<number>, ranges: { previewStart: 
   }
   return { low, high, segments: new Float32Array(segments), boxes };
 }
-

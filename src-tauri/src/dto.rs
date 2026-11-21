@@ -7,9 +7,35 @@ use serde::{Deserialize, Serialize};
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::state::Document;
 
-/// Prime tower width and brim the 3MF asks Bambu Studio for.
-pub const TOWER_WIDTH_MM: f32 = 20.0;
+/// Prime tower brim the 3MF asks Bambu Studio for.
 pub const TOWER_BRIM_MM: f32 = 3.0;
+
+/// What the colour kit export produced.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitDto {
+    pub pieces: usize,
+    pub plates: usize,
+    /// Pieces larger than the plate.
+    pub oversize: usize,
+    /// Pieces to look at before printing them, and regions too thin to make a piece.
+    pub review: usize,
+    pub dropped: usize,
+    /// Pins keying pieces together, and joins with no room for one.
+    pub pins: usize,
+    pub unpinned: usize,
+    /// Size of the ZIP written.
+    pub bytes: u64,
+}
+
+/// How far the colour kit export has got: `split`, `plates`, `pictures` or
+/// `files`, with how many of `total` are done (0 of 0 when it cannot tell).
+#[derive(Clone, Serialize)]
+pub struct KitProgressDto {
+    pub stage: String,
+    pub done: usize,
+    pub total: usize,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,7 +60,13 @@ pub struct MaterialDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlotDto {
+    /// The colour it prints: its filament's, or the one found in the model.
     pub hex: String,
+    /// The colour found in the model, which decides what the slot paints.
+    pub detected_hex: String,
+    /// The filament picked for it, and its ΔE from the colour found.
+    pub filament: Option<bp_3mf::filament::Filament>,
+    pub filament_delta_e: Option<f32>,
     pub triangles: usize,
     /// Closest other slot (0-based) and the ΔE between them.
     pub nearest: Option<(usize, f32)>,
@@ -119,6 +151,8 @@ pub struct PlateDto {
     pub can_undo_cut: bool,
     /// Printed objects: the model and the pieces cut off it that were kept.
     pub objects: usize,
+    /// Their ids, which number their names in the 3MF (see `bp_3mf::object_name`).
+    pub object_ids: Vec<u32>,
     /// Split across plates, each plate's check; empty on one plate (the fields above say it all).
     pub plates: Vec<PlateGroupDto>,
 }
@@ -191,6 +225,8 @@ pub struct Summary {
     pub undo_label: Option<String>,
     /// Triangles painted by hand; a new colour detection discards them.
     pub painted_triangles: usize,
+    /// How the colour kit was last cut, to fill its dialog.
+    pub kit: Option<bp_3mf::project_file::KitSettings>,
 }
 
 /// A turn: the new summary and, when the preview could follow as it is,
@@ -220,6 +256,36 @@ pub struct HitDto {
     pub normal: [f32; 3],
 }
 
+/// What the bucket would fill, to show before it does.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketPickDto {
+    /// The colour target it found, `#RRGGBB`; the clicked colour itself when it is added.
+    pub target_hex: String,
+    /// Whether that colour is a new target rather than one the palette has.
+    pub added: bool,
+    /// The slot that colour paints now; `None` for an added colour.
+    pub slot: Option<u8>,
+    /// The model's colour under the click and its ΔE to the target.
+    pub sample_hex: String,
+    pub delta_e: f32,
+    /// Global ids of the triangles it reaches.
+    pub tris: Vec<u32>,
+}
+
+impl From<bp_core::project::BucketPick> for BucketPickDto {
+    fn from(p: bp_core::project::BucketPick) -> Self {
+        Self {
+            target_hex: bp_core::color::to_hex(p.target_rgb),
+            added: p.target.is_none(),
+            slot: p.target.map(|_| p.slot),
+            sample_hex: bp_core::color::to_hex(p.sample),
+            delta_e: p.delta_e,
+            tris: p.tris,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaintDto {
@@ -227,6 +293,23 @@ pub struct PaintDto {
     pub normal: [f32; 3],
     /// Global ids of the triangles that changed.
     pub tris: Vec<u32>,
+}
+
+/// Every filament to pick from, the user's inventory, and whether colours come only from it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilamentsDto {
+    pub filaments: Vec<bp_3mf::filament::Filament>,
+    pub owned: Vec<String>,
+    pub inventory_only: bool,
+}
+
+pub fn filaments(store: &crate::filaments::FilamentStore) -> FilamentsDto {
+    FilamentsDto {
+        filaments: store.all(),
+        owned: store.owned.iter().cloned().collect(),
+        inventory_only: store.inventory_only,
+    }
 }
 
 /// Every printer to pick from, the current pick, and what a custom one can use.
@@ -258,14 +341,23 @@ pub fn layer_mm(printer: &bp_3mf::Printer, prefs: &WastePrefs) -> f32 {
 /// Flush per swap between every pair of slots, the user's values first.
 pub fn flush_matrix(doc: &Document) -> (Vec<f32>, Vec<bool>) {
     let pal = doc.project.palette();
+    // Typed flush follows the slots' colours; the estimate, the colours and
+    // materials they print, as Bambu Studio's flush table works it out.
+    let shown = doc.slot_colors();
+    let kinds: Vec<Option<&str>> = doc.slot_filaments().iter().map(|f| f.map(|f| f.kind.as_str())).collect();
+    let least = doc.printer.flush_min_mm3();
     let n = pal.len();
     let mut volumes = Vec::with_capacity(n * n);
     let mut set = Vec::with_capacity(n * n);
-    for &a in pal {
-        for &b in pal {
+    for ((&a, &sa), &ka) in pal.iter().zip(&shown).zip(&kinds) {
+        for ((&b, &sb), &kb) in pal.iter().zip(&shown).zip(&kinds) {
             let key = (bp_core::color::to_hex(a), bp_core::color::to_hex(b));
             let typed = doc.flush.get(&key).copied().filter(|_| a != b);
-            volumes.push(typed.unwrap_or_else(|| bp_core::waste::default_flush(a, b)));
+            let estimate = || match bp_core::waste::default_flush(sa, sb, least) {
+                0.0 => 0.0,
+                v => bp_3mf::filament::flush(ka, kb, v),
+            };
+            volumes.push(typed.unwrap_or_else(estimate));
             set.push(typed.is_some());
         }
     }
@@ -284,7 +376,6 @@ pub fn waste_params(doc: &Document, prefs: &Prefs) -> WasteParams {
         prime_mm3: w.prime_mm3,
         flush_reuse: w.flush_reuse,
         tower: doc.project.palette().len() > 1,
-        tower_width_mm: TOWER_WIDTH_MM,
         tower_depth_mm: prefs.plate.tower_depth_mm,
         tower_brim_mm: TOWER_BRIM_MM,
         purge_chute: doc.printer.purges_into_chute(),
@@ -303,11 +394,12 @@ pub fn waste_and_plate(
     let params = waste_params(doc, prefs);
     let waste = bp_core::waste::waste(swaps, &params, |a, b| matrix[a as usize * n + b as usize]);
     let needs_tower = params.tower;
-    // With no swap yet the tower still has to be planned: as deep as it is wide.
+    // Square, as Bambu Studio 2 prints it. With no swap yet it is still planned:
+    // as for one swap on the model's height.
     let tower_mm = match (prefs.plate.tower_depth_mm, waste.tower_footprint_mm) {
-        (Some(d), _) => [TOWER_WIDTH_MM + 2.0 * TOWER_BRIM_MM, d + 2.0 * TOWER_BRIM_MM],
+        (Some(d), _) => [d + 2.0 * TOWER_BRIM_MM; 2],
         (None, f) if f[1] > 0.0 => f,
-        _ => [TOWER_WIDTH_MM + 2.0 * TOWER_BRIM_MM; 2],
+        _ => [bp_core::waste::tower_side(params.prime_mm3, params.layer_mm, size[2]) + 2.0 * TOWER_BRIM_MM; 2],
     };
     let reserve = bp_3mf::Reserve {
         tower: prefs.plate.tower && needs_tower,
@@ -362,6 +454,7 @@ pub fn waste_and_plate(
         rotated: doc.project.is_rotated(),
         can_undo_cut: doc.project.can_undo_cut(),
         objects: doc.project.object_count(),
+        object_ids: doc.project.object_ids(),
     };
     (waste, plate)
 }
@@ -428,9 +521,18 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         slots: p
             .palette()
             .iter()
+            .zip(doc.slot_colors())
+            .zip(doc.slot_filaments())
             .zip(&stats.per_slot)
             .zip(&stats.nearest)
-            .map(|((c, &n), &nearest)| SlotDto { hex: bp_core::color::to_hex(*c), triangles: n, nearest })
+            .map(|((((c, shown), f), &n), &nearest)| SlotDto {
+                hex: bp_core::color::to_hex(shown),
+                detected_hex: bp_core::color::to_hex(*c),
+                filament: f.cloned(),
+                filament_delta_e: f.map(|_| bp_core::palette::delta_e(*c, shown)),
+                triangles: n,
+                nearest,
+            })
             .collect(),
         source_triangles: stats.source_triangles,
         triangles: stats.triangles,
@@ -502,6 +604,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         can_undo: p.can_undo(),
         undo_label: p.undo_label().map(str::to_string),
         painted_triangles: p.painted_count(),
+        kit: doc.kit,
     }
 }
 

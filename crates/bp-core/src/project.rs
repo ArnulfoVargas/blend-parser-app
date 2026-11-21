@@ -1,6 +1,8 @@
 //! The open document and its use cases: palette, size, mesh operations, colour
 //! clean-up, hand painting with undo, preview data and export data.
 
+use rayon::prelude::*;
+
 use crate::bvh::{Bvh, RayHit, TriSoup};
 use crate::color::{to_u8, Classifier, Rgb};
 use crate::connect;
@@ -16,7 +18,7 @@ use crate::paint::{self, Node, PaintParams};
 use crate::palette;
 use crate::scene::{Part, Scene};
 use crate::separate;
-use crate::split::{self, ColorPiece};
+use crate::split::{self, ColorPiece, Split, SplitParams};
 use std::collections::HashMap;
 
 mod plates;
@@ -87,7 +89,7 @@ pub struct Stats {
     pub size_mm: Vec3,
     pub contact_mm2: f32,
     pub swaps: SwapEstimate,
-    /// For each slot, the closest other slot and their ΔE.
+    /// For each slot, the closest other slot and their Î”E.
     pub nearest: Vec<Option<(usize, f32)>>,
     pub repair: RepairReport,
 }
@@ -232,7 +234,7 @@ struct Change {
     painted: u8,
 }
 
-/// Everything a slot merge changes, to undo it.
+/// Everything a slot merge or a bucket fill changes, to undo it.
 #[derive(Clone)]
 struct SlotSnapshot {
     palette: Vec<Rgb>,
@@ -240,18 +242,60 @@ struct SlotSnapshot {
     trees: Vec<Vec<Node>>,
     painted: Vec<Vec<u8>>,
     cut_painted: Vec<Vec<Vec<u8>>>,
+    regions: Vec<RegionRule>,
 }
 
 #[derive(Clone)]
 enum UndoEntry {
     Stroke(Vec<Change>),
     Slots(Box<SlotSnapshot>),
+    Bucket(Box<SlotSnapshot>),
     Geometry(Box<Project>),
     AddPlate(usize),
     Cut,
 }
 
+/// A model colour sent to another slot in one connected region only.
+#[derive(Clone, Debug)]
+struct RegionRule {
+    /// Index into the targets; `None` for `extra`.
+    target: Option<usize>,
+    /// A colour that was no target, classified into `slot` in this region only.
+    extra: Option<Rgb>,
+    slot: u8,
+    /// The triangles of the working mesh it covers, as (part, triangle).
+    tris: Vec<(u32, u32)>,
+}
+
+/// The targets as a region rule sees them: its colour sent to its slot.
+fn apply_rule(targets: &mut Vec<(Rgb, u8)>, rule: &RegionRule) {
+    match (rule.target, rule.extra) {
+        (Some(i), _) if i < targets.len() => targets[i].1 = rule.slot,
+        (None, Some(c)) => targets.push((c, rule.slot)),
+        _ => {}
+    }
+}
+
+/// What the bucket finds under a click.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BucketPick {
+    /// The colour target the model's colour there belongs to (index and colour);
+    /// `None` when the colour is added as a target of its own.
+    pub target: Option<usize>,
+    pub target_rgb: Rgb,
+    /// The slot that colour paints now.
+    pub slot: u8,
+    /// The model's colour under the click, and its Î”E to the target.
+    pub sample: Rgb,
+    pub delta_e: f32,
+    /// Global ids of the triangles the fill reaches.
+    pub tris: Vec<u32>,
+}
+
 const NO_LABEL: u8 = u8::MAX;
+
+/// Triangles per block when the preview is filled in parallel.
+const PREVIEW_BLOCK: usize = 2048;
 
 /// Rows of a 3×3 rotation.
 pub type Mat3 = [[f32; 3]; 3];
@@ -293,6 +337,33 @@ fn rotation_between(from: Vec3, to: Vec3) -> Mat3 {
 pub struct RigidMove {
     pub matrix: Mat3,
     pub shift: Vec3,
+}
+
+impl RigidMove {
+    pub const IDENTITY: RigidMove = RigidMove { matrix: IDENTITY, shift: [0.0; 3] };
+
+    /// This move done after `first`.
+    fn after(self, first: RigidMove) -> RigidMove {
+        RigidMove {
+            matrix: mat_mul(self.matrix, first.matrix),
+            shift: geom::add(mat_vec(self.matrix, first.shift), self.shift),
+        }
+    }
+
+    /// A ray taken back to before the move.
+    fn ray_back(&self, origin: Vec3, dir: Vec3) -> (Vec3, Vec3) {
+        let back = transpose(&self.matrix);
+        (mat_vec(back, geom::sub(origin, self.shift)), mat_vec(back, dir))
+    }
+
+    /// A hit from before the move, where it is now.
+    fn hit(&self, h: RayHit) -> RayHit {
+        RayHit {
+            point: geom::add(mat_vec(self.matrix, h.point), self.shift),
+            normal: mat_vec(self.matrix, h.normal),
+            ..h
+        }
+    }
 }
 
 /// What a cut replaced, to undo it.
@@ -495,10 +566,15 @@ pub struct Project {
     work: Mesh,
     trees: Vec<Vec<Node>>,
     /// Triangle neighbours of each part of `work`.
-    adjacency: Vec<Vec<Vec<(u32, f32)>>>,
+    adjacency: Vec<optimize::Adjacency>,
     /// Hand-painted label per triangle, NO_LABEL where the model's colour applies.
     painted: Vec<Vec<u8>>,
+    /// Bucket fills limited to a region, in the order they were made.
+    regions: Vec<RegionRule>,
     picker: (Bvh, TriSoup),
+    /// Where the picker's triangles have moved since it was built, by whole
+    /// turns: rays are taken back to where it was built instead of building it again.
+    picker_frame: RigidMove,
     tri_offsets: Vec<u32>,
     /// Triangles picked for a region, per part of `work`. It never changes the painting.
     selection: Vec<Vec<bool>>,
@@ -536,8 +612,10 @@ impl Project {
             trees: vec![],
             adjacency: vec![],
             painted: vec![],
-            picker: (Bvh::default(), TriSoup::default()),
+            regions: vec![],
             selection: vec![],
+            picker: (Bvh::default(), TriSoup::default()),
+            picker_frame: RigidMove::IDENTITY,
             tri_offsets: vec![],
             stroke: vec![],
             undo: vec![],
@@ -652,16 +730,16 @@ impl Project {
             self.placement = geom::add(mat_vec(turn, self.placement), shift);
             self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
             self.measure_source();
-            let soup = self.work.soup();
-            self.picker = (Bvh::build(&soup), soup);
-            return Some(RigidMove { matrix: turn, shift });
+            let moved = RigidMove { matrix: turn, shift };
+            self.picker_frame = moved.after(self.picker_frame);
+            return Some(moved);
         }
         self.rotation = rotation;
         self.place_from_file();
         let before: Vec<usize> = self.work.parts.iter().map(|p| p.tris.len()).collect();
         self.rebuild_geometry_keep_paint();
         if self.work.parts.iter().map(|p| p.tris.len()).ne(before) {
-            self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
+            self.clear_hand_paint();
         }
         self.rebuild_paint();
         None
@@ -1785,6 +1863,16 @@ impl Project {
         Ok(PlannedSplit { parts: out, paint: out_paint, transfers, report: SplitReport { joints, ..report } })
     }
 
+    /// The printed objects there are, in order: 0 for the model, the rest for
+    /// pieces cut off it. Ids stay as they were given, gaps and all, so a piece
+    /// keeps its number (and its name in the 3MF) when another goes.
+    pub fn object_ids(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.scene.parts.iter().map(|p| p.object).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Puts back what the last cut took, in the orientation the model has now.
     pub fn undo_cut(&mut self) -> bool {
         self.can_undo_cut() && self.undo_parts()
@@ -1941,6 +2029,7 @@ impl Project {
         self.undo.last().map(|e| match e {
             UndoEntry::Stroke(_) => "stroke",
             UndoEntry::Slots(_) => "merge",
+            UndoEntry::Bucket(_) => "bucket",
             UndoEntry::Geometry(_) => "fix",
             UndoEntry::AddPlate(_) => "addPlate",
             UndoEntry::Cut => self.cut_history.last().map_or("cut", |c| c.kind),
@@ -1960,6 +2049,14 @@ impl Project {
         palette::auto_palette(&samples, n.clamp(1, 16))
     }
 
+    /// Indices of up to `n` candidate spool colours that minimize the total
+    /// ΔE from the model's colours (see [`palette::pick_from`]).
+    pub fn suggest_from(&self, candidates: &[Rgb], n: usize) -> Vec<usize> {
+        let field = ColorField::new(&self.scene, &self.shape);
+        let samples = palette::surface_samples(&field, &self.shape, 300_000, 1);
+        palette::pick_from(&samples, candidates, n.clamp(1, 16))
+    }
+
     /// Replaces the target colours and repaints. With the same number of slots,
     /// each slot keeps the colours merged into it; otherwise merges are reset.
     /// Hand painting on slots that no longer exist is dropped.
@@ -1975,6 +2072,7 @@ impl Project {
             }
         } else {
             self.targets = colors.iter().enumerate().map(|(i, &c)| (c, i as u8)).collect();
+            self.regions.clear();
         }
         self.palette = colors;
         for l in self.painted.iter_mut().chain(self.cut_history.iter_mut().flat_map(|s| &mut s.painted)).flatten() {
@@ -1985,7 +2083,7 @@ impl Project {
         self.rebuild_paint();
     }
 
-    /// Merges the closest slots (ΔE) until `target` remain. Painting is
+    /// Merges the closest slots (Î”E) until `target` remain. Painting is
     /// relabelled, not recomputed, so hand painting survives.
     pub fn reduce_palette(&mut self, target: usize) {
         let weights = self.stats_per_slot();
@@ -2004,15 +2102,12 @@ impl Project {
 
     fn apply_slot_map(&mut self, palette: Vec<Rgb>, map: &[u8]) {
         self.end_stroke();
-        let snapshot = SlotSnapshot {
-            palette: self.palette.clone(),
-            targets: self.targets.clone(),
-            trees: self.trees.clone(),
-            painted: self.painted.clone(),
-            cut_painted: self.cut_history.iter().map(|s| s.painted.clone()).collect(),
-        };
+        let snapshot = self.slot_snapshot();
         for t in &mut self.targets {
             t.1 = map[t.1 as usize];
+        }
+        for r in &mut self.regions {
+            r.slot = map[r.slot as usize];
         }
         for nodes in &mut self.trees {
             for n in nodes.iter_mut() {
@@ -2087,7 +2182,7 @@ impl Project {
             self.rebuild_geometry_keep_paint();
             // Hand painting is per triangle: it only survives when the triangles do.
             if self.work.parts.iter().map(|p| p.tris.len()).ne(before) {
-                self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
+                self.clear_hand_paint();
             }
         }
         self.rebuild_paint();
@@ -2134,7 +2229,13 @@ impl Project {
 
     fn rebuild_geometry(&mut self) {
         self.rebuild_geometry_keep_paint();
+        self.clear_hand_paint();
+    }
+
+    /// Hand painting and bucket regions are per triangle: they go when the triangles change.
+    fn clear_hand_paint(&mut self) {
         self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
+        self.regions.clear();
     }
 
     fn rebuild_geometry_keep_paint(&mut self) {
@@ -2144,6 +2245,7 @@ impl Project {
         self.adjacency = self.work.parts.iter().map(optimize::adjacency).collect();
         let soup = self.work.soup();
         self.picker = (Bvh::build(&soup), soup);
+        self.picker_frame = RigidMove::IDENTITY;
         let mut acc = 0u32;
         self.tri_offsets = self
             .work
@@ -2163,13 +2265,52 @@ impl Project {
 
     // ---- painting from the model -----------------------------------------
 
-    fn rebuild_paint(&mut self) {
-        let field = ColorField::new(&self.scene, &self.shape);
-        let cls = Classifier::with_slots(&self.targets);
+    fn paint_params(&self) -> PaintParams {
         // Borders are not cut finer than half a nozzle: the printer cannot draw them.
         let min_edge = self.print_ops.nozzle_mm / 2.0 / self.scale;
-        let params = PaintParams { max_depth: self.color_ops.border_detail, min_edge };
+        PaintParams { max_depth: self.color_ops.border_detail, min_edge }
+    }
+
+    /// Paints from the model again and forgets what could be undone.
+    fn rebuild_paint(&mut self) {
+        self.repaint();
+        self.stroke.clear();
+        self.undo.clear();
+    }
+
+    /// Paints from the model: the targets everywhere, each bucket region with
+    /// its own targets, hand painting over both, then the island clean-up.
+    fn repaint(&mut self) {
+        let field = ColorField::new(&self.scene, &self.shape);
+        let cls = Classifier::with_slots(&self.targets);
+        let params = self.paint_params();
         self.trees = paint::build(&field, &self.shape, &cls, params);
+        // Regions are painted with every rule that covers them, in order, like
+        // the whole model: borders inside them stay as fine as anywhere.
+        let mut rules: std::collections::HashMap<(u32, u32), Vec<usize>> = std::collections::HashMap::new();
+        for (i, r) in self.regions.iter().enumerate() {
+            for &t in &r.tris {
+                rules.entry(t).or_default().push(i);
+            }
+        }
+        let mut classifiers: std::collections::HashMap<Vec<usize>, Classifier> = std::collections::HashMap::new();
+        let mut locked: Vec<Vec<bool>> =
+            self.painted.iter().map(|p| p.iter().map(|&l| l != NO_LABEL).collect()).collect();
+        for ((p, i), which) in rules {
+            let (p, i) = (p as usize, i as usize);
+            if p >= self.trees.len() || i >= self.trees[p].len() {
+                continue;
+            }
+            let cls = classifiers.entry(which.clone()).or_insert_with(|| {
+                let mut targets = self.targets.clone();
+                for &k in &which {
+                    apply_rule(&mut targets, &self.regions[k]);
+                }
+                Classifier::with_slots(&targets)
+            });
+            self.trees[p][i] = paint::build_one(&field, &self.shape, cls, params, p, i);
+            locked[p][i] = true;
+        }
         for (nodes, painted) in self.trees.iter_mut().zip(&self.painted) {
             for (n, &l) in nodes.iter_mut().zip(painted) {
                 if l != NO_LABEL {
@@ -2180,20 +2321,129 @@ impl Project {
         if self.color_ops.min_island_mm2 > 0.0 {
             let min_area = self.color_ops.min_island_mm2 / (self.scale * self.scale);
             let parts = self.work.parts.iter().zip(&self.adjacency);
-            for ((part, adj), (nodes, painted)) in parts.zip(self.trees.iter_mut().zip(&self.painted)) {
-                let locked: Vec<bool> = painted.iter().map(|&l| l != NO_LABEL).collect();
-                optimize::despeckle(part, adj, nodes, &locked, min_area);
+            for ((part, adj), (nodes, locked)) in parts.zip(self.trees.iter_mut().zip(&locked)) {
+                optimize::despeckle(part, adj, nodes, locked, min_area);
             }
         }
-        self.stroke.clear();
-        self.undo.clear();
+    }
+
+    fn slot_snapshot(&self) -> SlotSnapshot {
+        SlotSnapshot {
+            palette: self.palette.clone(),
+            targets: self.targets.clone(),
+            trees: self.trees.clone(),
+            painted: self.painted.clone(),
+            regions: self.regions.clone(),
+            cut_painted: self.cut_history.iter().map(|s| s.painted.clone()).collect(),
+        }
+    }
+
+    // ---- bucket -------------------------------------------------------------
+
+    /// What a bucket click along the ray would change: the colour target the
+    /// model's colour there belongs to (or, with `add`, that colour as a target
+    /// of its own) and the triangles where it shows. With `region`, only those
+    /// connected to the click; otherwise all of them.
+    pub fn bucket_pick(&self, origin: Vec3, dir: Vec3, region: bool, add: bool) -> Option<BucketPick> {
+        let hit = self.pick(origin, dir)?;
+        let (part, tri) = self.picker.1.owner[hit.tri as usize];
+        let (part, tri) = (part as usize, tri as usize);
+        let field = ColorField::new(&self.scene, &self.shape);
+        let sample = field.sample(&self.shape, part, tri, hit.bary);
+        // Each target labelled by its own index; the added colour after them all.
+        let mut ids: Vec<(Rgb, u8)> = self.targets.iter().enumerate().map(|(i, t)| (t.0, i as u8)).collect();
+        if add {
+            ids.push((sample.rgb(), ids.len() as u8));
+        }
+        let by_target = Classifier::with_slots(&ids);
+        let label = by_target.nearest(sample.lab());
+        let target = (!add).then_some(label as usize);
+        let target_rgb = ids[label as usize].0;
+        let slot = target.map_or(u8::MAX, |t| self.targets[t].1);
+        let params = self.paint_params();
+        let shows = |p: usize, t: usize| paint::build_one(&field, &self.shape, &by_target, params, p, t).has(label);
+        let mut found: Vec<(u32, u32)> = vec![];
+        if region {
+            let mut seen: Vec<bool> = vec![false; self.work.parts[part].tris.len()];
+            let mut stack = vec![tri as u32];
+            seen[tri] = true;
+            while let Some(t) = stack.pop() {
+                // The clicked triangle always counts, even where its majority went elsewhere.
+                if t as usize != tri && !shows(part, t as usize) {
+                    continue;
+                }
+                found.push((part as u32, t));
+                for &(o, _) in &self.adjacency[part][t as usize] {
+                    if !std::mem::replace(&mut seen[o as usize], true) {
+                        stack.push(o);
+                    }
+                }
+            }
+        } else {
+            use rayon::prelude::*;
+            for (p, mp) in self.work.parts.iter().enumerate() {
+                let hits: Vec<u32> =
+                    (0..mp.tris.len() as u32).into_par_iter().filter(|&t| shows(p, t as usize)).collect();
+                found.extend(hits.into_iter().map(|t| (p as u32, t)));
+            }
+        }
+        found.sort_unstable();
+        Some(BucketPick {
+            target,
+            target_rgb,
+            slot,
+            sample: sample.rgb(),
+            delta_e: crate::color::dist2(sample.lab(), crate::color::srgb_to_lab(target_rgb)).sqrt(),
+            tris: found.iter().map(|&(p, t)| self.tri_offsets[p as usize] + t).collect(),
+        })
+    }
+
+    /// Sends the model colour under the click to `slot`, everywhere or, with
+    /// `region`, in the connected region only; with `add`, that exact colour
+    /// becomes a target of its own first. Borders follow the model's colours as
+    /// finely as elsewhere, hand painting stays on top, and it survives
+    /// repainting (nozzle, border detail, islands) while the triangles do. One
+    /// undoable step; returns the triangles it reached.
+    pub fn bucket(&mut self, origin: Vec3, dir: Vec3, slot: u8, region: bool, add: bool) -> Option<usize> {
+        if slot as usize >= self.palette.len() {
+            return None;
+        }
+        let pick = self.bucket_pick(origin, dir, region, add)?;
+        self.end_stroke();
+        let snapshot = self.slot_snapshot();
+        if region {
+            let tris = pick
+                .tris
+                .iter()
+                .map(|&g| {
+                    let p = self.tri_offsets.partition_point(|&o| o <= g) - 1;
+                    (p as u32, g - self.tri_offsets[p])
+                })
+                .collect();
+            let extra = pick.target.is_none().then_some(pick.sample);
+            self.regions.push(RegionRule { target: pick.target, extra, slot, tris });
+        } else {
+            match pick.target {
+                Some(t) => self.targets[t].1 = slot,
+                None => self.targets.push((pick.sample, slot)),
+            }
+        }
+        self.repaint();
+        self.undo.push(UndoEntry::Bucket(Box::new(snapshot)));
+        Some(pick.tris.len())
     }
 
     // ---- hand painting ----------------------------------------------------
 
     /// Ray in model space (millimetres before scaling, as the preview shows it).
     pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<RayHit> {
-        self.picker.0.raycast(&self.picker.1, origin, geom::normalize(dir))
+        self.pick_built(origin, dir).map(|h| self.picker_frame.hit(h))
+    }
+
+    /// [`Self::pick`] where the picker was built.
+    fn pick_built(&self, origin: Vec3, dir: Vec3) -> Option<RayHit> {
+        let (o, d) = self.picker_frame.ray_back(origin, geom::normalize(dir));
+        self.picker.0.raycast(&self.picker.1, o, d)
     }
 
     /// Paints every triangle within `radius_mm` (final size) of where the ray
@@ -2202,7 +2452,7 @@ impl Project {
         if slot as usize >= self.palette.len() {
             return None;
         }
-        let hit = self.pick(origin, dir)?;
+        let hit = self.pick_built(origin, dir)?;
         let mut found = vec![hit.tri];
         self.picker.0.sphere(&self.picker.1, hit.point, radius_mm / self.scale, &mut found);
         found.sort_unstable();
@@ -2220,7 +2470,7 @@ impl Project {
             self.painted[p][i] = slot;
             changed.push(self.tri_offsets[p] + ti);
         }
-        Some((hit, changed))
+        Some((self.picker_frame.hit(hit), changed))
     }
 
     pub fn end_stroke(&mut self) {
@@ -2253,7 +2503,7 @@ impl Project {
                 self.set_print_ops(print_ops);
                 true
             }
-            Some(UndoEntry::Slots(s)) => {
+            Some(UndoEntry::Slots(s) | UndoEntry::Bucket(s)) => {
                 let s = *s;
                 self.palette = s.palette;
                 self.targets = s.targets;
@@ -2262,6 +2512,7 @@ impl Project {
                 for (cut, painted) in self.cut_history.iter_mut().zip(s.cut_painted) {
                     cut.painted = painted;
                 }
+                self.regions = s.regions;
                 true
             }
         }
@@ -2269,31 +2520,86 @@ impl Project {
 
     // ---- read models ------------------------------------------------------
 
-    pub fn preview(&self) -> Preview {
+    /// The preview as the UI receives it, one little-endian blob:
+    /// `u32 leaves, u32 tris | f32 positions[9 * leaves] | u32 offsets[tris + 1] | u8 labels[leaves] | u8 rgb[3 * leaves]`.
+    /// Filled in parallel, straight into the buffer that goes out, so a model
+    /// of millions of leaves is not held twice on its way to the UI.
+    pub fn preview_bytes(&self) -> Vec<u8> {
         let field = ColorField::new(&self.scene, &self.shape);
-        let leaves: usize = self.trees.iter().flatten().map(Node::leaf_count).sum();
-        let mut pv = Preview {
-            positions: Vec::with_capacity(leaves * 9),
-            labels: Vec::with_capacity(leaves),
-            source_rgb: Vec::with_capacity(leaves * 3),
-            offsets: Vec::with_capacity(self.work.triangle_count() + 1),
-        };
-        for (pi, (part, nodes)) in self.work.parts.iter().zip(&self.trees).enumerate() {
-            for (ti, node) in nodes.iter().enumerate() {
-                pv.offsets.push(pv.labels.len() as u32);
-                let c = part.corners(ti);
-                node.for_each_leaf(&ROOT, &mut |t, label| {
-                    for &b in t {
-                        pv.positions.extend(geom::at(&c, b));
-                    }
-                    pv.labels.push(label);
-                    let centre = geom::bary_in(t, [1.0 / 3.0; 3]);
-                    pv.source_rgb.extend(to_u8(field.sample(&self.shape, pi, ti, centre).rgb()));
-                });
+        let mut offsets = Vec::with_capacity(self.work.triangle_count() + 1);
+        offsets.push(0u32);
+        for nodes in &self.trees {
+            let counts: Vec<u32> = nodes.par_iter().map(|n| n.leaf_count() as u32).collect();
+            for c in counts {
+                offsets.push(offsets.last().unwrap() + c);
             }
         }
-        pv.offsets.push(pv.labels.len() as u32);
-        pv
+        let tris = offsets.len() - 1;
+        let leaves = *offsets.last().unwrap() as usize;
+        let mut out = vec![0u8; 8 + leaves * 36 + (tris + 1) * 4 + leaves * 4];
+        let (head, rest) = out.split_at_mut(8);
+        head[..4].copy_from_slice(&(leaves as u32).to_le_bytes());
+        head[4..].copy_from_slice(&(tris as u32).to_le_bytes());
+        let (mut positions, rest) = rest.split_at_mut(leaves * 36);
+        let (offset_bytes, rest) = rest.split_at_mut((tris + 1) * 4);
+        let (mut labels, mut rgb) = rest.split_at_mut(leaves);
+        for (o, b) in offsets.iter().zip(offset_bytes.chunks_exact_mut(4)) {
+            b.copy_from_slice(&o.to_le_bytes());
+        }
+        // Blocks of triangles own consecutive runs of every array.
+        let mut blocks = vec![];
+        let mut first = 0;
+        for (pi, nodes) in self.trees.iter().enumerate() {
+            for from in (0..nodes.len()).step_by(PREVIEW_BLOCK) {
+                let to = (from + PREVIEW_BLOCK).min(nodes.len());
+                let n = (offsets[first + to] - offsets[first + from]) as usize;
+                let (p, p_rest) = positions.split_at_mut(n * 36);
+                let (l, l_rest) = labels.split_at_mut(n);
+                let (c, c_rest) = rgb.split_at_mut(n * 3);
+                (positions, labels, rgb) = (p_rest, l_rest, c_rest);
+                blocks.push((pi, from, to, p, l, c));
+            }
+            first += nodes.len();
+        }
+        blocks.into_par_iter().for_each(|(pi, from, to, positions, labels, rgb)| {
+            let part = &self.work.parts[pi];
+            let mut li = 0;
+            for ti in from..to {
+                let c = part.corners(ti);
+                self.trees[pi][ti].for_each_leaf(&ROOT, &mut |t, label| {
+                    for (k, &b) in t.iter().enumerate() {
+                        for (j, v) in geom::at(&c, b).into_iter().enumerate() {
+                            let at = (li * 9 + k * 3 + j) * 4;
+                            positions[at..at + 4].copy_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                    labels[li] = label;
+                    let centre = geom::bary_in(t, [1.0 / 3.0; 3]);
+                    rgb[li * 3..li * 3 + 3].copy_from_slice(&to_u8(field.sample(&self.shape, pi, ti, centre).rgb()));
+                    li += 1;
+                });
+            }
+        });
+        out
+    }
+
+    /// The preview as arrays: [`Self::preview_bytes`] read back.
+    pub fn preview(&self) -> Preview {
+        let bytes = self.preview_bytes();
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let (leaves, tris) = (word(0) as usize, word(4) as usize);
+        let positions_at = 8;
+        let offsets_at = positions_at + leaves * 36;
+        let labels_at = offsets_at + (tris + 1) * 4;
+        let rgb_at = labels_at + leaves;
+        Preview {
+            positions: (0..leaves * 9)
+                .map(|i| f32::from_le_bytes(bytes[positions_at + i * 4..][..4].try_into().unwrap()))
+                .collect(),
+            offsets: (0..=tris).map(|i| word(offsets_at + i * 4)).collect(),
+            labels: bytes[labels_at..rgb_at].to_vec(),
+            source_rgb: bytes[rgb_at..].to_vec(),
+        }
     }
 
     /// Leaf ranges in the binary preview, one for each scene part.
@@ -2352,19 +2658,170 @@ impl Project {
             .sum()
     }
 
-    /// One closed piece per colour in final millimetres: shells `thickness_mm`
-    /// deep, or with `main_solid` the colour with most triangles as the whole part.
+    /// One closed piece per colour in final millimetres, following the painted
+    /// borders: shells `thickness_mm` deep, and with `main_solid` the colour
+    /// with most triangles as the body, with a pocket for each shell.
     pub fn color_pieces(&self, thickness_mm: f32, main_solid: bool) -> Vec<ColorPiece> {
-        let labels: Vec<Vec<u8>> = self.trees.iter().map(|n| n.iter().map(Node::dominant).collect()).collect();
         let per = self.stats_per_slot();
         let main = main_solid.then(|| (0..per.len()).max_by_key(|&i| per[i]).unwrap_or(0) as u8);
-        let mut pieces = split::color_pieces(&self.work, &labels, self.palette.len(), thickness_mm / self.scale, main);
+        let mut pieces =
+            split::color_pieces(&self.work, &self.trees, self.palette.len(), thickness_mm / self.scale, main);
         for p in &mut pieces {
             for v in &mut p.positions {
                 *v = geom::scale(*v, self.scale);
             }
         }
         pieces
+    }
+
+    /// The model as solid pieces per colour, in final millimetres, that fit
+    /// back together into the whole part.
+    pub fn split_by_color(&self, params: SplitParams) -> Split {
+        let mut soup = self.work.soup();
+        for c in soup.corners.iter_mut().flatten() {
+            *c = geom::scale(*c, self.scale);
+        }
+        let label = |t: u32, b: geom::Bary| {
+            let (part, tri) = soup.owner[t as usize];
+            self.trees[part as usize][tri as usize].label_at(b)
+        };
+        split::split(&soup, label, params)
+    }
+
+    // ---- saving -------------------------------------------------------------
+
+    /// The document as bytes (see [`crate::snapshot`]): the scene and every
+    /// setting, hand painting and bucket region; not the undo history.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use crate::snapshot::{self as s, Writer};
+        let mut w = Writer::new();
+        s::write_scene(&mut w, &self.scene);
+        let points = |w: &mut Writer, parts: &Vec<Vec<Vec3>>| w.vec(parts, |w, ps| w.vec(ps, |w, v| w.f32s(*v)));
+        points(&mut w, &self.source_positions);
+        points(&mut w, &self.unrotated);
+        w.f32s(self.source_size);
+        w.f32(self.source_height);
+        w.f32(self.scale);
+        w.f32s(self.stretch);
+        w.f32s(self.size_mm);
+        self.rotation.iter().for_each(|row| w.f32s(*row));
+        w.f32s(self.placement);
+        w.u32(self.minimum_plates as u32);
+        s::write_mesh_ops(&mut w, &self.mesh_ops);
+        s::write_ops(&mut w, &self.color_ops, &self.print_ops);
+        w.vec(&self.palette, s::write_rgb);
+        w.vec(&self.targets, |w, t| {
+            s::write_rgb(w, &t.0);
+            w.u8(t.1);
+        });
+        w.vec(&self.painted, |w, p| w.bytes(p));
+        w.vec(&self.regions, |w, r| {
+            w.u32(r.target.map_or(u32::MAX, |t| t as u32));
+            w.bool(r.extra.is_some());
+            s::write_rgb(w, &r.extra.unwrap_or_default());
+            w.u8(r.slot);
+            w.vec(&r.tris, |w, &(p, t)| {
+                w.u32(p);
+                w.u32(t);
+            });
+        });
+        w.0
+    }
+
+    /// A document saved with [`Self::to_bytes`], worked out again as it was.
+    /// Hand painting and bucket regions that no longer fit the triangles are
+    /// dropped rather than put on the wrong ones.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::SnapshotError> {
+        use crate::snapshot::{self as s, Reader, SnapshotError};
+        let mut r = Reader::new(bytes)?;
+        let scene = s::read_scene(&mut r)?;
+        let points = |r: &mut Reader| r.vec(|r| r.vec(|r| r.f32s()));
+        let source_positions = points(&mut r)?;
+        let unrotated = points(&mut r)?;
+        let (source_size, source_height, scale, stretch, size_mm) =
+            (r.f32s()?, r.f32()?, r.f32()?, r.f32s()?, r.f32s()?);
+        let rotation = [r.f32s()?, r.f32s()?, r.f32s()?];
+        let placement = r.f32s()?;
+        let minimum_plates = if r.version() >= 3 { r.u32()? as usize } else { 1 };
+        let mesh_ops = s::read_mesh_ops(&mut r)?;
+        let (color_ops, print_ops) = s::read_ops(&mut r)?;
+        let palette: Vec<Rgb> = r.vec(|r| r.f32s())?;
+        let targets: Vec<(Rgb, u8)> = r.vec(|r| Ok((r.f32s()?, r.u8()?)))?;
+        let painted = r.vec(|r| r.bytes())?;
+        let regions = r.vec(|r| {
+            let target = r.u32()?;
+            let has_extra = r.bool()?;
+            let extra: Rgb = r.f32s()?;
+            Ok(RegionRule {
+                target: (target != u32::MAX).then_some(target as usize),
+                extra: has_extra.then_some(extra),
+                slot: r.u8()?,
+                tris: r.vec(|r| Ok((r.u32()?, r.u32()?)))?,
+            })
+        })?;
+        let n = palette.len();
+        let fits = |parts: &Vec<Vec<Vec3>>| {
+            parts.len() == scene.parts.len()
+                && parts.iter().zip(&scene.parts).all(|(a, b)| a.len() == b.positions.len())
+        };
+        let finite = [scale, source_height].iter().chain(&stretch).chain(&size_mm).all(|v| v.is_finite() && *v > 0.0);
+        if !r.done()
+            || !(1..=65_536).contains(&minimum_plates)
+            || !fits(&source_positions)
+            || !fits(&unrotated)
+            || !finite
+            || !(1..=16).contains(&n)
+            || targets.iter().any(|t| t.1 as usize >= n)
+            || regions.iter().any(|g| g.slot as usize >= n || g.target.is_some_and(|t| t >= targets.len()))
+        {
+            return Err(SnapshotError::Corrupt);
+        }
+        let mut p = Self {
+            scene,
+            source_positions,
+            source_size,
+            source_height,
+            scale,
+            stretch,
+            size_mm,
+            size_history: vec![],
+            unrotated,
+            rotation,
+            placement,
+            minimum_plates,
+            cut_history: vec![],
+            mesh_ops,
+            color_ops,
+            print_ops,
+            palette,
+            targets,
+            shape: Mesh::default(),
+            work: Mesh::default(),
+            trees: vec![],
+            adjacency: vec![],
+            painted: vec![],
+            regions: vec![],
+            selection: vec![],
+            picker: (Bvh::default(), TriSoup::default()),
+            picker_frame: RigidMove::IDENTITY,
+            tri_offsets: vec![],
+            stroke: vec![],
+            undo: vec![],
+        };
+        p.rebuild_geometry();
+        let counts: Vec<usize> = p.work.parts.iter().map(|w| w.tris.len()).collect();
+        let fit = painted.len() == counts.len() && painted.iter().zip(&counts).all(|(l, &c)| l.len() == c);
+        if fit && painted.iter().flatten().all(|&l| l == NO_LABEL || (l as usize) < n) {
+            p.painted = painted;
+        }
+        let inside = |g: &RegionRule| {
+            g.tris.iter().all(|&(part, t)| counts.get(part as usize).is_some_and(|&c| (t as usize) < c))
+        };
+        if fit {
+            p.regions = regions.into_iter().filter(inside).collect();
+        }
+        p.rebuild_paint();
+        Ok(p)
     }
 
     pub fn export_parts(&self) -> Vec<ExportPart> {
@@ -2456,6 +2913,203 @@ mod tests {
             plate: 0,
         };
         Scene { parts: vec![part], ..Default::default() }
+    }
+
+    /// Four quads stacked up Z, ten units each: red, beige, red, green.
+    fn bands() -> Scene {
+        let mut positions = vec![];
+        for z in 0..=4 {
+            positions.push([0.0, 0.0, z as f32 * 10.0]);
+            positions.push([10.0, 0.0, z as f32 * 10.0]);
+        }
+        let mut tris = vec![];
+        for q in 0..4u32 {
+            let (a, b, c, d) = (2 * q, 2 * q + 1, 2 * q + 3, 2 * q + 2);
+            tris.push([a, b, c]);
+            tris.push([a, c, d]);
+        }
+        let tri_loops = (0..tris.len() as u32).map(|t| [3 * t, 3 * t + 1, 3 * t + 2]).collect();
+        let part = Part {
+            name: "bands".into(),
+            positions,
+            tris,
+            tri_loops,
+            tri_source: vec![0, 0, 1, 1, 0, 0, 2, 2],
+            sources: vec![
+                ColorSource::Flat([0.85, 0.1, 0.1]),
+                ColorSource::Flat([0.9, 0.8, 0.6]),
+                ColorSource::Flat([0.1, 0.6, 0.2]),
+            ],
+            uv_layers: vec![],
+            color_layers: vec![],
+            object: 0,
+            plate: 0,
+        };
+        Scene { parts: vec![part], ..Default::default() }
+    }
+
+    fn slot_of(p: &Project, rgb: Rgb) -> u8 {
+        p.palette().iter().position(|&c| crate::color::dist2(c, rgb) < 0.01).unwrap() as u8
+    }
+
+    /// Dominant slot of each triangle.
+    fn labels(p: &Project) -> Vec<u8> {
+        p.trees.iter().flatten().map(Node::dominant).collect()
+    }
+
+    /// A ray at quad `q`, from the front (the model is centred on X).
+    fn at_band(q: usize) -> (Vec3, Vec3) {
+        ([-1.0, -20.0, q as f32 * 10.0 + 2.0], [0.0, 1.0, 0.0])
+    }
+
+    #[test]
+    fn bucket_sends_a_merged_colour_back_everywhere_or_in_its_region() {
+        let mut p = Project::new(bands(), 3);
+        let (red, beige) = (slot_of(&p, [0.85, 0.1, 0.1]), slot_of(&p, [0.9, 0.8, 0.6]));
+        p.merge_slots(red as usize, beige as usize);
+        let (beige, green) = (slot_of(&p, [0.9, 0.8, 0.6]), slot_of(&p, [0.1, 0.6, 0.2]));
+        assert_eq!(&labels(&p)[..6], &[beige; 6], "the red bands went beige");
+
+        // Region: only the band clicked, not the other red one.
+        let (o, d) = at_band(0);
+        let pick = p.bucket_pick(o, d, true, false).unwrap();
+        assert_eq!(pick.tris, vec![0, 1]);
+        assert!(pick.delta_e < 1.0);
+        assert_eq!(p.bucket(o, d, green, true, false), Some(2));
+        assert_eq!(labels(&p), vec![green, green, beige, beige, beige, beige, green, green]);
+        assert_eq!(p.undo_label(), Some("bucket"));
+
+        // It survives repainting: a new border detail and nozzle.
+        p.set_color_ops(ColorOps { border_detail: 3, ..p.color_ops() });
+        p.set_print_ops(PrintOps { nozzle_mm: 0.6, ..p.print_ops() });
+        assert_eq!(&labels(&p)[..2], &[green, green]);
+
+        // Hand painting stays on top of it.
+        let (o2, d2) = at_band(0);
+        p.paint(o2, d2, 0.1, beige).unwrap();
+        p.end_stroke();
+        p.set_color_ops(ColorOps { border_detail: 4, ..p.color_ops() });
+        assert!(labels(&p)[..2].contains(&beige));
+
+        // Global: both red bands, from the other one.
+        let mut p = Project::new(bands(), 3);
+        p.merge_slots(red as usize, slot_of(&p, [0.9, 0.8, 0.6]) as usize);
+        let before = labels(&p);
+        let (o, d) = at_band(2);
+        assert_eq!(p.bucket_pick(o, d, false, false).unwrap().tris, vec![0, 1, 4, 5]);
+        assert_eq!(p.bucket(o, d, green, false, false), Some(4));
+        assert_eq!(labels(&p), vec![green, green, beige, beige, green, green, green, green]);
+        assert!(p.undo());
+        assert_eq!(labels(&p), before);
+    }
+
+    #[test]
+    fn bucket_keeps_borders_as_fine_as_the_model() {
+        // One quad fading from red (bottom) to beige (top), by vertex colour.
+        let part = Part {
+            name: "fade".into(),
+            positions: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 10.0], [0.0, 0.0, 10.0]],
+            tris: vec![[0, 1, 2], [0, 2, 3]],
+            tri_loops: vec![[0, 1, 2], [3, 4, 5]],
+            tri_source: vec![0, 0],
+            sources: vec![ColorSource::VertexColor { attr: 0 }],
+            uv_layers: vec![],
+            color_layers: vec![{
+                let (r, b) = ([0.85, 0.1, 0.1], [0.9, 0.8, 0.6]);
+                vec![r, r, b, r, b, b]
+            }],
+            object: 0,
+            plate: 0,
+        };
+        let mut p = Project::new(Scene { parts: vec![part], ..Default::default() }, 2);
+        p.set_palette(vec![[0.85, 0.1, 0.1], [0.9, 0.8, 0.6], [0.1, 0.1, 0.9]]);
+        assert!(p.trees[0].iter().all(Node::is_split), "the fade splits both triangles");
+        p.merge_slots(0, 1);
+        assert!(p.trees[0].iter().all(|n| !n.is_split()), "merged, they are one colour");
+        let blue = slot_of(&p, [0.1, 0.1, 0.9]);
+        assert!(p.bucket([2.0, -20.0, 1.0], [0.0, 1.0, 0.0], blue, true, false).is_some());
+        // The red half comes back as blue, cut along the same border as before.
+        assert!(p.trees[0].iter().all(|n| n.is_split() && n.has(blue)), "{:?}", p.trees[0]);
+    }
+
+    #[test]
+    fn bucket_can_add_the_colour_it_finds() {
+        // Two slots for three colours: one of them is not a target of its own.
+        let mut p = Project::new(bands(), 2);
+        let slot = 0;
+        let targets = p.targets.len();
+        let (o, d) = at_band(3);
+        let pick = p.bucket_pick(o, d, true, true).unwrap();
+        assert_eq!(pick.target, None);
+        assert!(pick.delta_e < 1e-3);
+        p.bucket(o, d, slot, false, true).unwrap();
+        assert_eq!(p.targets.len(), targets + 1);
+        assert!(labels(&p)[6..].iter().all(|&l| l == slot));
+    }
+
+    #[test]
+    fn a_saved_project_opens_as_it_was() {
+        let mut p = Project::new(bands(), 3);
+        let (red, beige) = (slot_of(&p, [0.85, 0.1, 0.1]), slot_of(&p, [0.9, 0.8, 0.6]));
+        p.merge_slots(red as usize, beige as usize);
+        let green = slot_of(&p, [0.1, 0.6, 0.2]);
+        let (o, d) = at_band(0);
+        p.bucket(o, d, green, true, false).unwrap();
+        p.set_size_mm([20.0, 1.0, 80.0]);
+        p.rotate(2, 90.0);
+        p.set_color_ops(ColorOps { border_detail: 3, min_island_mm2: 0.0 });
+        // Turned a quarter about Z, the bands face X now.
+        p.paint([-50.0, 0.0, 30.0], [1.0, 0.0, 0.0], 0.1, green).expect("the ray hits the model");
+        p.end_stroke();
+        assert!(p.painted_count() > 0);
+
+        let bytes = p.to_bytes();
+        let q = Project::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            q.export_parts().iter().map(|x| &x.paint).collect::<Vec<_>>(),
+            p.export_parts().iter().map(|x| &x.paint).collect::<Vec<_>>()
+        );
+        assert_eq!(q.export_parts()[0].positions, p.export_parts()[0].positions);
+        assert_eq!(q.palette(), p.palette());
+        assert_eq!(q.size_mm(), p.size_mm());
+        assert_eq!(q.rotation(), p.rotation());
+        assert_eq!(q.painted_count(), p.painted_count());
+        assert_eq!(q.regions.len(), 1);
+        assert_eq!(q.to_bytes(), bytes, "saving again gives the same bytes");
+        assert!(!q.can_undo());
+
+        // Cut short, wrong or from a newer version: refused, never read wrong.
+        assert_eq!(Project::from_bytes(&bytes[..bytes.len() / 2]).err(), Some(crate::SnapshotError::Corrupt));
+        assert_eq!(Project::from_bytes(b"nope").err(), Some(crate::SnapshotError::Corrupt));
+        let mut newer = bytes.clone();
+        newer[4..8].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(Project::from_bytes(&newer).err(), Some(crate::SnapshotError::Version(99)));
+    }
+
+    #[test]
+    fn pieces_kept_from_cuts_never_overlap() {
+        let mut p = Project::new(scene(), 2);
+        assert!(p.cut(2, 0.5, true, true));
+        // The second cut goes through the model and the first piece both.
+        assert!(p.cut(2, 0.5, true, true));
+        assert_eq!(p.object_ids(), vec![0, 1, 2, 3]);
+        // Footprint of each object on the plate.
+        let mut boxes: Vec<(u32, [f32; 4])> = vec![];
+        for part in p.export_parts() {
+            let (lo, hi) = part.positions.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), v| {
+                ([lo[0].min(v[0]), lo[1].min(v[1])], [hi[0].max(v[0]), hi[1].max(v[1])])
+            });
+            match boxes.iter_mut().find(|b| b.0 == part.object) {
+                Some(b) => b.1 = [b.1[0].min(lo[0]), b.1[1].min(lo[1]), b.1[2].max(hi[0]), b.1[3].max(hi[1])],
+                None => boxes.push((part.object, [lo[0], lo[1], hi[0], hi[1]])),
+            }
+        }
+        for (i, a) in boxes.iter().enumerate() {
+            for b in &boxes[i + 1..] {
+                let apart = a.1[2] <= b.1[0] || b.1[2] <= a.1[0] || a.1[3] <= b.1[1] || b.1[3] <= a.1[1];
+                assert!(apart, "{a:?} overlaps {b:?}");
+            }
+        }
     }
 
     #[test]
@@ -2570,11 +3224,47 @@ mod tests {
     }
 
     #[test]
-    fn colour_pieces_cover_every_slot() {
-        let p = Project::new(scene(), 2);
-        let pieces = p.color_pieces(0.5, false);
+    fn split_by_color_scales_to_millimetres() {
+        let (positions, tris) = crate::split::tests::cuboid([0.0; 3], [10.0, 10.0, 20.0]);
+        let part = Part {
+            name: "b".into(),
+            tri_loops: (0..12).map(|i| [3 * i, 3 * i + 1, 3 * i + 2]).collect(),
+            tri_source: vec![0; 12],
+            positions,
+            tris,
+            sources: vec![ColorSource::Flat([0.9, 0.1, 0.1])],
+            uv_layers: vec![],
+            color_layers: vec![],
+            object: 0,
+            plate: 0,
+        };
+        let mut p = Project::new(Scene { parts: vec![part], ..Default::default() }, 1);
+        p.set_height_mm(40.0);
+        let s = p.split_by_color(SplitParams { voxel_mm: 1.0, ..Default::default() });
+        assert_eq!(s.pieces.len(), 1);
+        assert!((s.pieces[0].volume_mm3 - 20.0 * 20.0 * 40.0).abs() < 1600.0, "{}", s.pieces[0].volume_mm3);
+    }
+
+    #[test]
+    fn colour_pieces_of_a_painted_model_fit_back_together() {
+        let mut p = Project::new(tower(), 2);
+        p.set_height_mm(40.0);
+        let pieces = p.color_pieces(1.0, true);
         assert_eq!(pieces.len(), 2);
-        assert!(pieces.iter().all(|x| !x.solid && !x.tris.is_empty()));
+        assert_eq!(pieces.iter().filter(|x| x.solid).count(), 1);
+        let volume = |x: &ColorPiece| -> f32 {
+            x.tris
+                .iter()
+                .map(|t| {
+                    let [a, b, c] = t.map(|v| x.positions[v as usize]);
+                    geom::dot(a, geom::cross(b, c)) / 6.0
+                })
+                .sum()
+        };
+        // In final millimetres: the 10 x 10 x 20 tower at 40 mm tall is 20 x 20 x 40.
+        let total: f32 = pieces.iter().map(volume).sum();
+        assert!((total - 16000.0).abs() < 1.0, "{total}");
+        assert!(pieces.iter().all(|x| volume(x) > 0.0));
     }
 
     #[test]
@@ -3036,6 +3726,23 @@ mod tests {
         assert_eq!(p.preview().labels, before.labels);
     }
 
+    #[test]
+    fn split_plates_and_paint_survive_project_save_and_reopen() {
+        let mut p = Project::new(bar([300.0, 40.0, 30.0]), 2);
+        let target = brush_bar(&mut p);
+        let plan = SplitPlan { cuts: p.propose_split(&ROOM), ..Default::default() };
+        p.split_for_printer(&plan, &ROOM, "dowel").unwrap();
+        let bytes = p.to_bytes();
+        let q = Project::from_bytes(&bytes).unwrap();
+        assert_eq!(q.plate_count(), 2);
+        assert_eq!(object_boxes(&q), object_boxes(&p));
+        assert_eq!(q.preview().positions, p.preview().positions);
+        assert_eq!(q.preview().labels, p.preview().labels);
+        assert!((brush_area(&q, target) - brush_area(&p, target)).abs() < 1e-3);
+        assert_eq!(q.selection.len(), q.work.parts.len());
+        assert_eq!(q.to_bytes(), bytes);
+    }
+
     fn brush_bar(p: &mut Project) -> u8 {
         let target = 1 - p.trees[0][0].dominant();
         let (lo, hi) = p.work.bounds().unwrap();
@@ -3113,6 +3820,29 @@ mod tests {
         // A stretched model is rebuilt instead.
         p.set_size_mm([20.0, 20.0, 10.0]);
         assert!(p.rotate(2, 90.0).is_none());
+    }
+
+    #[test]
+    fn picking_after_whole_turns_matches_a_fresh_picker() {
+        let mut p = Project::new(tower(), 2);
+        p.rotate(0, 90.0).unwrap();
+        p.rotate(2, 30.0).unwrap();
+        p.rotate(1, -45.0).unwrap();
+        let mut fresh = p.clone();
+        let soup = fresh.work.soup();
+        fresh.picker = (Bvh::build(&soup), soup);
+        fresh.picker_frame = RigidMove::IDENTITY;
+        let (lo, hi) = p.work.bounds().unwrap();
+        let centre = geom::scale(geom::add(lo, hi), 0.5);
+        for dir in [[0.0, 1.0, 0.0], [1.0, 0.2, -0.3], [-0.4, -1.0, 0.1], [0.0, 0.0, -1.0]] {
+            let origin = geom::sub(centre, geom::scale(geom::normalize(dir), 100.0));
+            let (a, b) = (p.pick(origin, dir).expect("hits"), fresh.pick(origin, dir).expect("hits"));
+            assert_eq!(a.tri, b.tri);
+            assert!((0..3).all(|i| (a.point[i] - b.point[i]).abs() < 1e-3 && (a.normal[i] - b.normal[i]).abs() < 1e-4));
+            let (_, painted) = p.paint(origin, dir, 2.0, 1).unwrap();
+            let (_, expected) = fresh.paint(origin, dir, 2.0, 1).unwrap();
+            assert_eq!(painted, expected);
+        }
     }
 
     #[test]

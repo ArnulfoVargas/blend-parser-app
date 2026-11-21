@@ -3,7 +3,7 @@
 //! layer, and each side's opening is closed with a flat cap, holes included,
 //! so both pieces stay solid.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::geom::{self, Vec3};
 use crate::scene::Part;
@@ -220,7 +220,7 @@ fn slice(part: &Part, plane: Plane, eps: f32) -> Sliced {
     // Importers may duplicate positions at UV/material seams. Topology shares
     // positions, while face-corner attributes and source face indices stay separate.
     let mut welded = part.clone();
-    let mut by_position = HashMap::new();
+    let mut by_position = HashMap::default();
     let mut remap = Vec::with_capacity(part.positions.len());
     welded.positions.clear();
     for &p in &part.positions {
@@ -252,7 +252,7 @@ fn slice(part: &Part, plane: Plane, eps: f32) -> Sliced {
     let mut loops = Loops::new(part);
     let mut sides: [Vec<Tri>; 2] = [vec![], vec![]];
     let mut origins: [Vec<Option<u32>>; 2] = [vec![], vec![]];
-    let mut on_edge: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut on_edge: HashMap<(u32, u32), u32> = HashMap::default();
     for (ti, (&t, &l)) in part.tris.iter().zip(&part.tri_loops).enumerate() {
         let src = part.tri_source.get(ti).copied().unwrap_or(0);
         let d = t.map(|v| dist[v as usize]);
@@ -318,7 +318,7 @@ fn slice(part: &Part, plane: Plane, eps: f32) -> Sliced {
 /// material the cap takes there.
 fn rims(tris: &[Tri], on_plane: &[bool]) -> Vec<(Vec<u32>, u32, u16)> {
     // Edges on the plane that only one triangle of this side uses are the opening's rim.
-    let mut edges: HashMap<(u32, u32), (u32, u16)> = HashMap::new();
+    let mut edges: HashMap<(u32, u32), (u32, u16)> = HashMap::default();
     for (t, l, src) in tris {
         for k in 0..3 {
             let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -328,14 +328,14 @@ fn rims(tris: &[Tri], on_plane: &[bool]) -> Vec<(Vec<u32>, u32, u16)> {
         }
     }
     // The cap runs each rim edge the other way: from b to a.
-    let mut next: HashMap<u32, (u32, u32, u16)> = HashMap::new();
+    let mut next: HashMap<u32, (u32, u32, u16)> = HashMap::default();
     for (&(a, b), &(corner, src)) in &edges {
         if !edges.contains_key(&(b, a)) {
             next.insert(b, (a, corner, src));
         }
     }
     let mut rings: Vec<(Vec<u32>, u32, u16)> = vec![];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut starts: Vec<u32> = next.keys().copied().collect();
     starts.sort_unstable();
     for start in starts {
@@ -680,14 +680,14 @@ fn surface_is_closed(part: &Part, eps: f32) -> Option<bool> {
         return None;
     }
     // UV/material seams may duplicate positions in the original source.
-    let mut ids = HashMap::new();
+    let mut ids = HashMap::default();
     let canonical: Vec<_> = part
         .positions
         .iter()
         .enumerate()
         .map(|(i, p)| *ids.entry(p.map(|v| if v == 0.0 { 0 } else { v.to_bits() })).or_insert(i))
         .collect();
-    let mut edges = HashSet::new();
+    let mut edges = HashSet::default();
     let mut volume = 0.0;
     let origin = part.positions[0];
     for (i, t) in part.tris.iter().enumerate() {
@@ -771,7 +771,7 @@ mod tests {
 
     /// Every edge used once each way: a closed, consistently wound surface.
     fn closed(p: &Part) -> bool {
-        let mut e = HashMap::new();
+        let mut e = HashMap::default();
         for t in &p.tris {
             for k in 0..3 {
                 *e.entry((t[k], t[(k + 1) % 3])).or_insert(0) += 1;

@@ -12,10 +12,17 @@ import "./styles/section-line.css";
 import * as THREE from "three";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import {
   api,
   isAppError,
+  type BucketPick,
+  type Filament,
+  type Filaments,
+  type KitContents,
+  type KitPins,
+  type KitProgress,
   type PlatePrefs,
   type PrinterProfile,
   type Printers,
@@ -32,7 +39,7 @@ import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { setupPrintability } from "./printability";
-import { Viewer, sectionNormal, type Section, type Tool, type View } from "./viewer";
+import { Viewer, sectionNormal, type ThumbAngle, type Section, type Tool, type View } from "./viewer";
 import { CutPanel } from "./cut-panel";
 import { CutReview } from "./cut-review";
 import { SeparatePanel } from "./separate-panel";
@@ -52,8 +59,12 @@ const dims = (v: number[], d = 1) => `${v.map((x) => nf(x, d)).join(" × ")} mm`
 /** What Blender can import for us; `bp_blend::INPUT_EXTENSIONS` is the same list. */
 const MODEL_EXTENSIONS = ["blend", "obj", "fbx", "gltf", "glb", "ply"];
 const MODEL_EXT = new RegExp(`\\.(${MODEL_EXTENSIONS.join("|")})$`, "i");
+const PROJECT_EXT = /\.bpproj$/i;
 
 let summary: Summary | null = null;
+/** Where the open document was last saved or opened as a project, and whether it changed since. */
+let projectPath: string | null = null;
+let dirty = false;
 let printers: Printers | null = null;
 let prefs: Prefs | null = null;
 /** Swaps before the last change, to show what a setting did. */
@@ -150,6 +161,7 @@ const apply = (call: () => Promise<Summary | null>, done?: () => void) =>
     previousSwaps = summary?.estimate.swaps ?? null;
     const s = await call();
     if (s) {
+      dirty = true;
       render(s);
       await reloadMesh();
     }
@@ -171,7 +183,12 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   },
   endStroke: () => {
     previousSwaps = summary?.estimate.swaps ?? null;
+    dirty = true;
     void api.endStroke().then(render);
+  },
+  bucket: (o, d) => {
+    bucketRay = [o, d];
+    void probeBucket();
   },
   measure: (p) => {
     const st = summary?.size.stretch ?? [1, 1, 1];
@@ -196,7 +213,10 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   move: async (mm) => {
     previousSwaps = summary?.estimate.swaps ?? null;
     const s = summary ? await work(() => api.setOffset(mm)) : undefined;
-    if (s) render(s);
+    if (s) {
+      dirty = true;
+      render(s);
+    }
     return s !== undefined;
   },
   rotate: async (axis, degrees) => (summary ? turn(() => api.rotate(axis, degrees)) : false),
@@ -262,7 +282,11 @@ function renderPlace(s: Summary) {
   $<HTMLButtonElement>("#rotate-reset").disabled = !s.plate.rotated;
   $<HTMLButtonElement>("#cut-undo").disabled = !s.plate.canUndoCut;
 }
-$("#place-centre").addEventListener("click", () => void work(() => api.setOffset([0, 0])).then((s) => s && render(s)));
+$("#place-centre").addEventListener("click", () => void work(() => api.setOffset([0, 0])).then((s) => {
+  if (!s) return;
+  dirty = true;
+  render(s);
+}));
 
 /**
  * A turn. When the whole model turned as it is, the preview is moved where it
@@ -273,6 +297,7 @@ async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
   previousSwaps = summary?.estimate.swaps ?? null;
   const done = await work(async () => {
     const r = await call();
+    dirty = true;
     render(r.summary);
     if (r.rigid) {
       viewer.moveMesh(r.rigid.matrix, r.rigid.shift);
@@ -536,6 +561,68 @@ const regionPanel = new RegionPanel({
   error: errText,
 });
 
+// ---- bucket by original colour ---------------------------------------------------------
+
+/** The last bucket click and what it would fill; applied with the brush's slot. */
+let bucketRay: [Vec3, Vec3] | null = null;
+let bucketFound: BucketPick | null = null;
+let bucketRegion = true;
+const bucketAdd = $<HTMLInputElement>("#bucket-add");
+
+function syncBucket() {
+  document.querySelectorAll<HTMLButtonElement>("button[data-bucket-mode]").forEach((b) =>
+    b.setAttribute("aria-pressed", String((b.dataset.bucketMode === "region") === bucketRegion)));
+  const p = bucketFound;
+  $<HTMLButtonElement>("#bucket-apply").disabled = !p || !p.tris.length;
+  $<HTMLButtonElement>("#bucket-cancel").disabled = !p;
+  const out = document.querySelector<HTMLElement>('[data-bind="bucketPick"]')!;
+  if (!p) {
+    out.textContent = app.dataset.tool === "bucket" ? t("bucket.empty") : "";
+    return;
+  }
+  const swatch = Object.assign(document.createElement("span"), { className: "swatch" });
+  swatch.style.setProperty("--t", p.added ? p.sampleHex : p.targetHex);
+  const source = p.added || p.slot === null
+    ? t("bucket.sourceNew", { hex: p.sampleHex })
+    : t("bucket.source", { hex: p.targetHex, slot: p.slot + 1 });
+  const text = t("bucket.pick", { source, tris: t("bucket.tris", { count: p.tris.length, n: nf(p.tris.length) }), slot: brushSlot + 1 });
+  // Far from every target: the palette folded this shade into another.
+  const far = !p.added && p.deltaE > 12 ? ` ${t("bucket.far", { de: nf(p.deltaE) })}` : "";
+  out.replaceChildren(swatch, text + far);
+}
+
+/** Asks what the last click would fill, and tints it with the brush's colour. */
+async function probeBucket() {
+  if (!bucketRay || !summary) return;
+  const found = await work(() => api.bucketPick(bucketRay![0], bucketRay![1], bucketRegion, bucketAdd.checked));
+  bucketFound = found ?? null;
+  viewer.setHighlight(bucketFound?.tris ?? null, summary.slots[brushSlot]?.hex);
+  syncBucket();
+}
+
+function clearBucket() {
+  bucketRay = null;
+  bucketFound = null;
+  viewer.setHighlight(null);
+  syncBucket();
+}
+
+document.querySelectorAll<HTMLButtonElement>("button[data-bucket-mode]").forEach((b) => b.addEventListener("click", () => {
+  bucketRegion = b.dataset.bucketMode === "region";
+  syncBucket();
+  void probeBucket();
+}));
+bucketAdd.addEventListener("change", () => void probeBucket());
+$("#bucket-cancel").addEventListener("click", clearBucket);
+$("#bucket-apply").addEventListener("click", () => {
+  const ray = bucketRay;
+  if (!ray || !bucketFound) return;
+  const [region, add, slot] = [bucketRegion, bucketAdd.checked, brushSlot];
+  clearBucket();
+  void apply(() => api.bucket(ray[0], ray[1], slot, region, add), () =>
+    toast(t("bucket.done"), "ok", { label: t("undo.label"), run: () => void undo() }));
+});
+
 const radiusInput = $<HTMLInputElement>("#radius");
 const radiusMm = () => Number(radiusInput.value);
 function syncBrush() {
@@ -554,6 +641,8 @@ radiusInput.addEventListener("input", syncBrush);
 
 async function reloadMesh(frame = false) {
   viewer.load(await api.previewMesh(), frame);
+  // The triangles may have changed: a pending bucket pick no longer fits them.
+  if (bucketRay) clearBucket();
   syncBrush();
   syncMeasure();
   separatePanel.meshChanged();
@@ -1161,7 +1250,7 @@ function fillFlushTable(s: Summary) {
       <tbody>${s.slots.map((_, i) => `<tr><th scope="row" title="${t("slot.name", { n: i + 1 })}">${swatch(i)}</th>${s.slots.map((_, j) => (i === j
         ? `<td class="flush__self" aria-hidden="true">—</td>`
         : `<td><input class="input flush__cell${w.flushSet[i * n + j] ? " is-set" : ""}" type="number" inputmode="numeric" min="0" max="2000" step="10"
-            style="--heat:${Math.min(1, Math.max(0, (w.flushMm3Matrix[i * n + j] - 107) / 693)).toFixed(2)}"
+            style="--heat:${Math.min(1, Math.max(0, w.flushMm3Matrix[i * n + j] / 900)).toFixed(2)}"
             data-from="${i}" data-to="${j}" value="${Math.round(w.flushMm3Matrix[i * n + j])}"
             aria-label="${t("wasteForm.flushCell", { from: i + 1, to: j + 1 })}"></td>`)).join("")}</tr>`).join("")}</tbody>`;
   }
@@ -1195,8 +1284,10 @@ function renderSlots(s: Summary) {
         <strong class="mono">${slot.hex}</strong>
         <span class="slot__count">${t("slot.triangles", { count: slot.triangles, n: nf(slot.triangles) })}</span>
         <span class="slot__near${close ? " is-close" : ""}">${near ? t("slot.near", { n: near[0] + 1, de: nf(near[1]) }) : t("slot.only")}</span>
+        <span class="slot__filament"></span>
       </button>
-      <div class="slot__actions">${s.slots.length < 2 ? "" : `
+      <div class="slot__actions">
+        <button class="btn btn--quiet btn--sm slot__spool" type="button">${t("filaments.pick")}</button>${s.slots.length < 2 ? "" : `
         ${close ? `<button class="btn btn--quiet btn--sm slot__join" type="button">${t("slot.joinWith", { n: near![0] + 1 })}</button>` : ""}
         <label class="visually-hidden" for="merge-${i}">${t("slot.mergeLabel", { n })}</label>
         <select class="slot__merge" id="merge-${i}">
@@ -1208,17 +1299,38 @@ function renderSlots(s: Summary) {
     const input = li.querySelector<HTMLInputElement>('input[type="color"]')!;
     input.addEventListener("input", () => li.style.setProperty("--t", input.value));
     input.addEventListener("change", () => {
-      const colors = s.slots.map((x, j) => (j === i ? input.value : x.hex));
+      // The colours found in the model decide what each slot paints; filaments only change how it prints.
+      const colors = s.slots.map((x, j) => (j === i ? input.value : x.detectedHex));
       void apply(() => api.setPalette(colors));
     });
+    // From the inventory, a slot's colour is a spool's: picked, not typed.
+    input.disabled = inventoryActive();
+    if (input.disabled) input.parentElement!.title = t("filaments.inventoryLocked");
+    const spool = li.querySelector<HTMLElement>(".slot__filament")!;
+    if (slot.filament) {
+      const f = slot.filament;
+      const words = { brand: f.brand, kind: f.kind, name: filamentName(f) };
+      const far = (slot.filamentDeltaE ?? 0) > CLOSE_DELTA_E;
+      spool.classList.toggle("is-far", far);
+      spool.textContent = far ? t("filaments.far", { ...words, de: nf(slot.filamentDeltaE ?? 0) }) : t("filaments.onSlot", words);
+    } else {
+      spool.textContent = t("filaments.noneOnSlot");
+    }
+    li.querySelector(".slot__spool")!.addEventListener("click", () => void openSlotFilament(i));
     li.querySelector(".slot__pick")!.addEventListener("click", () => {
       brushSlot = i;
       list.querySelectorAll(".slot__pick").forEach((b, j) => {
         b.setAttribute("aria-pressed", String(j === i));
         b.querySelector(".slot__brush")!.textContent = j === i ? t("slot.brush") : t("slot.useBrush");
       });
-      setTool("brush");
-      syncBrush();
+      if (app.dataset.tool === "bucket") {
+        syncBrush();
+        if (bucketFound) viewer.setHighlight(bucketFound.tris, s.slots[i].hex);
+        syncBucket();
+      } else {
+        setTool("brush");
+        syncBrush();
+      }
     });
     const merge = (into: number) =>
       void apply(() => api.mergeSlots(i, into), () =>
@@ -1232,12 +1344,172 @@ function renderSlots(s: Summary) {
   }));
 }
 
+// ---- filaments ---------------------------------------------------------------------------
+
+let filaments: Filaments | null = null;
+/** Suggested colours come only from the owned spools: asked for, and there are some. */
+const inventoryActive = () => Boolean(filaments?.inventoryOnly && filaments.owned.length);
+const filamentName = (f: Filament) => (currentLang() === "es" ? f.nameEs : f.nameEn) || f.nameEn || f.nameEs;
+
+const filamentsDialog = $<HTMLDialogElement>("#filaments-dialog");
+const filamentSearch = $<HTMLInputElement>("#filament-search");
+const inventoryOnly = $<HTMLInputElement>("#inventory-only");
+
+/** Lower case, no accents: "maté" finds "Matte". */
+const folded = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+/** Every filament by line, the user's own first, filtered by the search; each with "I have it". */
+function renderFilaments() {
+  if (!filaments) return;
+  const f = filaments;
+  inventoryOnly.checked = f.inventoryOnly;
+  bind("ownedCount", t("filaments.owned", { count: f.owned.length }));
+  const q = folded(filamentSearch.value.trim());
+  const shown = f.filaments.filter((x) => !q || folded(`${x.brand} ${x.kind} ${x.nameEs} ${x.nameEn} ${x.hex}`).includes(q));
+  const groups = new Map<string, Filament[]>();
+  for (const x of shown) {
+    const key = x.custom ? t("filaments.mine") : x.kind;
+    groups.set(key, [...(groups.get(key) ?? []), x]);
+  }
+  const owned = new Set(f.owned);
+  const sections = [...groups].sort(([a], [b]) => (a === t("filaments.mine") ? -1 : b === t("filaments.mine") ? 1 : 0)).map(([kind, list]) => {
+    const section = Object.assign(document.createElement("section"), { className: "filaments__group" });
+    const ul = Object.assign(document.createElement("ul"), { className: "filaments__list" });
+    ul.append(...list.map((x) => {
+      const li = Object.assign(document.createElement("li"), { className: "filaments__item" });
+      const label = document.createElement("label");
+      const box = Object.assign(document.createElement("input"), { type: "checkbox", checked: owned.has(x.id) });
+      box.setAttribute("aria-label", t("filaments.have", { name: `${x.brand} ${x.kind} ${filamentName(x)}` }));
+      box.addEventListener("change", () => void updateFilaments(() => api.setFilamentOwned(x.id, box.checked)));
+      const dot = Object.assign(document.createElement("i"), { className: "swatch-dot" });
+      dot.style.setProperty("--t", x.hex);
+      const name = Object.assign(document.createElement("span"), { className: "name", textContent: x.custom ? `${x.brand} ${x.kind} ${filamentName(x)}`.trim() : filamentName(x), title: x.hex });
+      label.append(box, dot, name);
+      li.append(label);
+      if (x.custom) {
+        const del = Object.assign(document.createElement("button"), { className: "link", type: "button", textContent: t("filaments.delete") });
+        del.addEventListener("click", () => void updateFilaments(() => api.deleteFilament(x.id)));
+        li.append(del);
+      }
+      return li;
+    }));
+    section.append(Object.assign(document.createElement("h3"), { textContent: kind }), ul);
+    return section;
+  });
+  const list = $("#filament-list");
+  if (!sections.length) list.replaceChildren(Object.assign(document.createElement("p"), { className: "help", textContent: t("filaments.none", { q: filamentSearch.value.trim() }) }));
+  else list.replaceChildren(...sections);
+  $("#ff-kinds").replaceChildren(...[...new Set(f.filaments.map((x) => x.kind))].map((k) => new Option(k)));
+}
+
+/** Runs a change to the user's filaments, then shows them again. */
+async function updateFilaments(call: () => Promise<Filaments>) {
+  try {
+    filaments = await call();
+    renderFilaments();
+    if (summary) render(summary);
+  } catch (e) {
+    toast(errText(e), "error");
+  }
+}
+
+async function openFilaments() {
+  if (document.querySelector("dialog[open]")) return;
+  filaments = await api.filaments();
+  filamentSearch.value = "";
+  $("#filament-error").hidden = true;
+  renderFilaments();
+  filamentsDialog.showModal();
+  filamentSearch.focus();
+}
+filamentSearch.addEventListener("input", renderFilaments);
+inventoryOnly.addEventListener("change", () => void updateFilaments(() => api.setInventoryOnly(inventoryOnly.checked)));
+$("#filaments-close").addEventListener("click", () => filamentsDialog.close());
+$("#filament-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = (id: string) => $<HTMLInputElement>(id).value.trim();
+  const draft: Filament = { id: "", brand: v("#ff-brand"), kind: v("#ff-kind"), nameEs: v("#ff-name"), nameEn: "", hex: v("#ff-hex"), custom: true };
+  void (async () => {
+    try {
+      filaments = await api.saveFilament(draft);
+      $("#filament-error").hidden = true;
+      ["#ff-name"].forEach((id) => ($<HTMLInputElement>(id).value = ""));
+      renderFilaments();
+    } catch (err) {
+      const box = $("#filament-error");
+      box.textContent = errText(err);
+      box.hidden = false;
+    }
+  })();
+});
+
+// Picking the filament for one slot: the owned ones when colours come from the inventory.
+const slotDialog = $<HTMLDialogElement>("#slot-filament-dialog");
+let slotEditing = 0;
+const slotPickerTexts = (): PickerTexts => ({
+  label: t("filaments.picker"),
+  placeholder: t("filaments.search"),
+  searchLabel: t("filaments.search"),
+  none: t("filaments.pickerNone"),
+  empty: (q) => t("filaments.none", { q }),
+});
+const slotPicker = new Picker($("#slot-filament-picker"), {
+  ...slotPickerTexts(),
+  onPick: (id) => {
+    slotDialog.close();
+    void apply(() => api.setSlotFilament(slotEditing, id));
+  },
+});
+
+async function openSlotFilament(slot: number) {
+  if (!summary) return;
+  filaments = await api.filaments();
+  slotEditing = slot;
+  const owned = new Set(filaments.owned);
+  const pool = inventoryActive() ? filaments.filaments.filter((f) => owned.has(f.id)) : filaments.filaments;
+  // What the user has first, then the rest by line.
+  const sorted = [...pool.filter((f) => owned.has(f.id)), ...pool.filter((f) => !owned.has(f.id))];
+  slotPicker.setItems(sorted.map((f) => ({
+    value: f.id,
+    label: filamentName(f),
+    group: f.custom ? t("filaments.mine") : f.kind,
+    detail: `${f.brand} · ${f.hex}`,
+    keywords: `${f.brand} ${f.kind} ${f.nameEs} ${f.nameEn} ${f.hex}`,
+    full: `${f.brand} ${f.kind} ${filamentName(f)}`,
+    swatch: f.hex,
+  })));
+  slotPicker.setValue(summary.slots[slot]?.filament?.id ?? "");
+  bind("slotFilamentTitle", t("filaments.slotTitle", { n: slot + 1 }));
+  bind("slotFilamentHelp", inventoryActive() ? `${t("filaments.slotHelp")} ${t("filaments.slotHelpOwned")}` : t("filaments.slotHelp"));
+  $<HTMLButtonElement>("#slot-filament-clear").disabled = !summary.slots[slot]?.filament;
+  slotDialog.showModal();
+  slotPicker.button.focus();
+}
+$("#slot-filament-clear").addEventListener("click", () => {
+  slotDialog.close();
+  void apply(() => api.setSlotFilament(slotEditing, null));
+});
+$("#slot-filament-close").addEventListener("click", () => slotDialog.close());
+
 // ---- opening files ---------------------------------------------------------------------
 
 let unlistenProgress: (() => void) | null = null;
 
+/** Whether the open document may be replaced: unsaved changes are confirmed first. */
+async function mayDiscard(): Promise<boolean> {
+  if (!dirty || !summary || state !== "ready") return true;
+  return ask(t("project.unsaved", { name: projectName() }), {
+    title: t("project.unsavedTitle"),
+    kind: "warning",
+    okLabel: t("project.discard"),
+    cancelLabel: t("common.cancel"),
+  });
+}
+
 /** `extras`: files dropped with the model, offered for what it references. */
 async function openFile(path: string, extras: string[] = []) {
+  if (!(await mayDiscard())) return;
+  if (PROJECT_EXT.test(path)) return openProject(path);
   const lower = path.toLowerCase();
   const name = path.split(/[\\/]/).pop() ?? path;
   if (/\.blend\d+$/.test(lower)) return setState("error", { key: "error.backupFile", params: { name } });
@@ -1256,6 +1528,8 @@ async function openFile(path: string, extras: string[] = []) {
     previousSwaps = null;
     measured = [];
     render(await api.openBlend(path, added));
+    projectPath = null;
+    dirty = false;
     setSection(null);
     await reloadMesh(true);
     setState("ready");
@@ -1271,8 +1545,107 @@ async function openFile(path: string, extras: string[] = []) {
 }
 
 $("#choose").addEventListener("click", async () => {
-  const path = await open({ multiple: false, directory: false, filters: [{ name: t("import.formats"), extensions: MODEL_EXTENSIONS }] });
+  const path = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: t("import.formats"), extensions: [...MODEL_EXTENSIONS, "bpproj"] }, { name: t("project.filter"), extensions: ["bpproj"] }],
+  });
   if (typeof path === "string") await openFile(path);
+});
+
+// ---- projects ------------------------------------------------------------------------------
+
+/** The project's name as the user knows it: its file, or the model's before it is saved. */
+const projectName = () => (projectPath ?? summary?.fileName ?? "").split(/[\\/]/).pop() ?? "";
+
+/** Opens a saved project; Blender is not needed. A failure keeps what is open. */
+async function openProject(path: string) {
+  const was = state;
+  step = { key: "project", name: "" };
+  setState("converting");
+  hideToast();
+  try {
+    previousSwaps = null;
+    measured = [];
+    render(await api.openProject(path));
+    projectPath = path;
+    dirty = false;
+    remember(path);
+    setSection(null);
+    await reloadMesh(true);
+    setState("ready");
+  } catch (e) {
+    if (summary && was === "ready") {
+      setState("ready");
+      toast(errText(e), "error");
+    } else {
+      setState("error", e);
+    }
+  }
+}
+
+/** Saves the project where it was, or asks where with `as` or the first time. */
+async function saveProject(as = false) {
+  if (!summary || state !== "ready") return;
+  let path = as ? null : projectPath;
+  if (!path) {
+    path = await save({
+      defaultPath: projectPath ?? summary.fileName.replace(MODEL_EXT, ".bpproj"),
+      filters: [{ name: t("project.filter"), extensions: ["bpproj"] }],
+    });
+    if (!path) return;
+  }
+  const target = path;
+  const ok = await work(async () => {
+    await api.saveProject(target);
+    return true;
+  });
+  if (!ok) return;
+  projectPath = target;
+  dirty = false;
+  remember(target);
+  toast(t("project.saved", { path: target }));
+}
+
+// Recent projects, newest first, in the File menu.
+const RECENT_KEY = "blendparser.recent";
+const RECENT_MAX = 6;
+function recents(): string[] {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+    return Array.isArray(list) ? list.filter((x): x is string => typeof x === "string").slice(0, RECENT_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+function remember(path: string) {
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify([path, ...recents().filter((p) => p !== path)].slice(0, RECENT_MAX)));
+  } catch {
+    // Not remembered.
+  }
+  renderRecents();
+}
+function renderRecents() {
+  const sep = $("#recent-sep");
+  sep.parentElement!.querySelectorAll("[data-recent]").forEach((li) => li.remove());
+  const list = recents();
+  sep.hidden = list.length === 0;
+  sep.after(...list.map((path, i) => {
+    const li = Object.assign(document.createElement("li"), { role: "none" });
+    li.dataset.recent = "";
+    const item = Object.assign(document.createElement("button"), { className: "menu__item", type: "button", title: path });
+    item.setAttribute("role", "menuitem");
+    item.dataset.cmd = `recent:${i}`;
+    item.textContent = t("menu.recent", { name: path.split(/[\\/]/).pop() ?? path });
+    li.append(item);
+    return li;
+  }));
+}
+
+// Closing the window with unsaved changes asks first.
+void getCurrentWindow().onCloseRequested(async (e) => {
+  if (!(await mayDiscard())) e.preventDefault();
 });
 
 $("#find-blender").addEventListener("click", async () => {
@@ -1302,7 +1675,7 @@ void getCurrentWebview().onDragDropEvent((e) => {
   else app.classList.remove("is-dragging");
   if (p.type === "drop" && p.paths.length && app.dataset.state !== "converting") {
     // A model dropped with its .mtl, .bin or textures: the rest go along with it.
-    const model = p.paths.find((f) => MODEL_EXT.test(f) || /\.blend\d+$/i.test(f)) ?? p.paths[0];
+    const model = p.paths.find((f) => MODEL_EXT.test(f) || PROJECT_EXT.test(f) || /\.blend\d+$/i.test(f)) ?? p.paths[0];
     void openFile(model, p.paths.filter((f) => f !== model));
   }
 });
@@ -1320,7 +1693,32 @@ async function confirmOversize(): Promise<boolean> {
   });
 }
 
-$("#export").addEventListener("click", async () => {
+/** The name a printed object has in the 3MF: the model's, or the model's with its piece number. */
+function objectName(id: number): string {
+  const model = summary?.fileName.replace(MODEL_EXT, "") ?? "";
+  return id === 0 ? model : t("export.pieceName", { model, n: id + 1 });
+}
+
+// Where the 3MF's thumbnail is drawn from, remembered between sessions.
+const thumbSelect = $<HTMLSelectElement>("#thumb-angle");
+const THUMB_KEY = "blendparser.thumbAngle";
+try {
+  const saved = localStorage.getItem(THUMB_KEY);
+  if (saved === "iso" || saved === "front" || saved === "current") thumbSelect.value = saved;
+} catch {
+  // Storage blocked: three-quarter view.
+}
+thumbSelect.addEventListener("change", () => {
+  try {
+    localStorage.setItem(THUMB_KEY, thumbSelect.value);
+  } catch {
+    // Not remembered; it still applies now.
+  }
+});
+const thumbAngle = () => thumbSelect.value as ThumbAngle;
+
+/** Saves the 3MF with `objects` (all when null). */
+async function export3mf(objects: number[] | null) {
   const btn = $<HTMLButtonElement>("#export");
   if (app.dataset.state !== "ready" || !summary?.parts.length || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
@@ -1330,8 +1728,11 @@ $("#export").addEventListener("click", async () => {
   btn.setAttribute("aria-disabled", "true");
   bind("exportLabel", t("export.busy"));
   try {
-    await api.export3mf(path);
-    toast(t("export.saved", { path }));
+    // Without pictures the file still goes out; Bambu Studio draws its own.
+    const pngs = await viewer.snapshot([512, 128], thumbAngle()).catch(() => null);
+    await api.export3mf(path, currentLang(), objects, pngs && [pngs[0], pngs[1]]);
+    const n = objects?.length ?? summary.plate.objectIds.length;
+    toast(n > 1 ? t("export.piecesSaved", { count: n, path }) : t("export.saved", { path }));
   } catch (e) {
     toast(errText(e), "error");
   } finally {
@@ -1339,13 +1740,231 @@ $("#export").addEventListener("click", async () => {
     btn.setAttribute("aria-disabled", "false");
     bind("exportLabel", t("export.label"));
   }
+}
+
+// With pieces cut off the model, the user picks which go in; all are ticked.
+const piecesDialog = $<HTMLDialogElement>("#pieces-dialog");
+const piecesList = $<HTMLFieldSetElement>("#pieces-list");
+function fillPieces(ids: number[]) {
+  piecesList.replaceChildren(...ids.map((id) => {
+    const label = Object.assign(document.createElement("label"), { className: "check" });
+    const input = Object.assign(document.createElement("input"), { type: "checkbox", checked: true, value: String(id) });
+    label.append(input, " ", Object.assign(document.createElement("span"), { textContent: objectName(id) }));
+    return label;
+  }));
+  $("#pieces-error").hidden = true;
+}
+$("#export").addEventListener("click", () => {
+  if (app.dataset.state !== "ready" || !summary) return;
+  const ids = summary.plate.objectIds;
+  if (ids.length < 2) return void export3mf(null);
+  fillPieces(ids);
+  piecesDialog.showModal();
+});
+$("#export-pieces").addEventListener("click", () => {
+  const picked = [...piecesList.querySelectorAll<HTMLInputElement>("input:checked")].map((i) => Number(i.value));
+  if (!picked.length) {
+    $("#pieces-error").hidden = false;
+    return;
+  }
+  piecesDialog.close();
+  void export3mf(picked.length === summary?.plate.objectIds.length ? null : picked);
 });
 
 const zipDialog = $<HTMLDialogElement>("#zip-dialog");
-$("#open-zip").addEventListener("click", () => {
-  if (app.dataset.state === "ready" && summary?.parts.length) zipDialog.showModal();
+
+/** The core's colour only matters when colours stop short of the centre. */
+const syncCore = () => {
+  $<HTMLElement>("#core-field").hidden = !(Number($<HTMLInputElement>("#depth").value) > 0);
+};
+$("#depth").addEventListener("input", syncCore);
+const syncPins = () => {
+  $<HTMLElement>("#pin-sizes").hidden = !$<HTMLInputElement>("#zip-pins").checked;
+};
+$("#zip-pins").addEventListener("change", syncPins);
+/** The pins asked for, `null` for none, or `undefined` when a size is out of range (that field marked). */
+const pinOptions = (): KitPins | null | undefined => {
+  if (!$<HTMLInputElement>("#zip-pins").checked) return null;
+  const fields = [
+    ["#pin-diameter", 2, 20],
+    ["#pin-depth", 1, 20],
+    ["#pin-clearance", 0, 1],
+  ] as const;
+  const values: number[] = [];
+  for (const [id, min, max] of fields) {
+    const input = $<HTMLInputElement>(id);
+    const v = Number(input.value);
+    const ok = input.value !== "" && v >= min && v <= max;
+    input.setAttribute("aria-invalid", String(!ok));
+    if (!ok) {
+      input.focus();
+      return undefined;
+    }
+    values.push(v);
+  }
+  return { diameterMm: values[0], depthMm: values[1], clearanceMm: values[2] };
+};
+
+/** The last kit this session wrote: what a new one is estimated from. */
+let lastKit: { pieces: number; bytes: number; quality: KitContents["quality"] } | null = null;
+/** Picture weight against medium quality, and per piece at medium (pictures of its card and step). */
+const QUALITY_WEIGHT = { low: 0.6, medium: 1, high: 1.5 } as const;
+const PICTURES_PER_PIECE = 20_000;
+const size = (bytes: number) => (bytes >= 1e6 ? `${num(bytes / 1e6, 1)} MB` : `${num(Math.max(1, bytes / 1e3))} KB`);
+
+const zipContents = (): KitContents => ({
+  threeMf: $<HTMLInputElement>("#zip-3mf").checked,
+  stl: $<HTMLSelectElement>("#zip-stl").value as KitContents["stl"],
+  guide: $<HTMLInputElement>("#zip-guide").checked,
+  text: $<HTMLInputElement>("#zip-text").checked,
+  quality: $<HTMLSelectElement>("#zip-quality").value as KitContents["quality"],
 });
+/** Pictures only matter with the guide; the estimate follows the last kit when there is one. */
+const syncZipContents = () => {
+  const c = zipContents();
+  $<HTMLElement>("#zip-quality-field").hidden = !c.guide;
+  const nothing = !(c.threeMf || c.guide || c.text || c.stl !== "none");
+  $<HTMLElement>("#zip-error").hidden = !nothing;
+  const w = QUALITY_WEIGHT[c.quality];
+  $("#zip-estimate").textContent = lastKit
+    ? t("zip.estimateLast", { size: size((lastKit.bytes * w) / QUALITY_WEIGHT[lastKit.quality]), n: lastKit.pieces, count: lastKit.pieces })
+    : t("zip.estimate", { size: size(PICTURES_PER_PIECE * w) });
+};
+for (const id of ["#zip-3mf", "#zip-guide", "#zip-text", "#zip-stl", "#zip-quality"]) $(id).addEventListener("change", syncZipContents);
+
+$("#open-zip").addEventListener("click", () => {
+  if (app.dataset.state !== "ready" || !summary?.parts.length) return;
+  const core = $<HTMLSelectElement>("#core");
+  const keep = core.value;
+  core.replaceChildren(
+    new Option(t("zip.coreMost"), ""),
+    ...summary.slots.map((s, i) => new Option(`${t("slot.name", { n: i + 1 })} · ${s.hex}`, String(i))),
+  );
+  // The document remembers how its kit was last cut, project files included.
+  const last = summary.kit;
+  if (last) {
+    $<HTMLSelectElement>("#voxel").value = String(last.voxelMm);
+    $<HTMLInputElement>("#depth").value = String(last.depthMm);
+    $<HTMLInputElement>("#min-piece").value = String(last.minPieceMm3);
+    $<HTMLInputElement>("#zip-mix").checked = last.mix ?? false;
+    $<HTMLInputElement>("#zip-pins").checked = !!last.pins;
+    if (last.pins) {
+      $<HTMLInputElement>("#pin-diameter").value = String(last.pins.diameterMm);
+      $<HTMLInputElement>("#pin-depth").value = String(last.pins.depthMm);
+      $<HTMLInputElement>("#pin-clearance").value = String(last.pins.clearanceMm);
+    }
+    if (last.contents) {
+      $<HTMLInputElement>("#zip-3mf").checked = last.contents.threeMf;
+      $<HTMLSelectElement>("#zip-stl").value = last.contents.stl;
+      $<HTMLInputElement>("#zip-guide").checked = last.contents.guide;
+      $<HTMLInputElement>("#zip-text").checked = last.contents.text;
+      $<HTMLSelectElement>("#zip-quality").value = last.contents.quality;
+    }
+  }
+  const wanted = last ? (last.coreSlot === null ? "" : String(last.coreSlot)) : keep;
+  core.value = [...core.options].some((o) => o.value === wanted) ? wanted : "";
+  syncCore();
+  syncPins();
+  syncZipContents();
+  zipDialog.showModal();
+});
+
+const kitProgress = $<HTMLDialogElement>("#kit-progress");
+const meter = $<HTMLElement>("#kit-meter");
+/** Shows how far the kit has got: a stage, and a bar when it can count. */
+const showKitProgress = (p: KitProgress) => {
+  const counted = p.total > 0;
+  const pct = counted ? Math.round((100 * p.done) / p.total) : 0;
+  $("#kit-stage").textContent = counted
+    ? t(`zip.stage.${p.stage}Of` as Key, { done: p.done, total: p.total })
+    : t(`zip.stage.${p.stage}` as Key);
+  meter.toggleAttribute("data-indeterminate", !counted);
+  if (counted) meter.setAttribute("aria-valuenow", String(pct));
+  else meter.removeAttribute("aria-valuenow");
+  meter.querySelector("span")!.style.width = counted ? `${pct}%` : "";
+};
+$("#kit-cancel").addEventListener("click", () => {
+  $<HTMLButtonElement>("#kit-cancel").disabled = true;
+  $("#kit-stage").textContent = t("zip.cancelling");
+  void api.cancelColorZip();
+});
+// Escape cancels the export, it does not just hide the dialog.
+kitProgress.addEventListener("cancel", (e) => {
+  e.preventDefault();
+  $<HTMLButtonElement>("#kit-cancel").click();
+});
+
 $("#export-zip").addEventListener("click", async () => {
+  if (!summary) return;
+  const depth = $<HTMLInputElement>("#depth");
+  const minPiece = $<HTMLInputElement>("#min-piece");
+  const depthMm = Number(depth.value);
+  const minPieceMm3 = Number(minPiece.value);
+  const depthOk = depth.value !== "" && depthMm >= 0 && depthMm <= 50;
+  const minOk = minPiece.value !== "" && minPieceMm3 >= 0 && minPieceMm3 <= 10000;
+  depth.setAttribute("aria-invalid", String(!depthOk));
+  minPiece.setAttribute("aria-invalid", String(!minOk));
+  if (!depthOk || !minOk) {
+    (depthOk ? minPiece : depth).focus();
+    return;
+  }
+  const pins = pinOptions();
+  if (pins === undefined) return;
+  const contents = zipContents();
+  if (!(contents.threeMf || contents.guide || contents.text || contents.stl !== "none")) {
+    syncZipContents();
+    $<HTMLInputElement>("#zip-3mf").focus();
+    return;
+  }
+  const core = $<HTMLSelectElement>("#core").value;
+  const options = {
+    voxelMm: Number($<HTMLSelectElement>("#voxel").value),
+    depthMm,
+    coreSlot: depthMm > 0 && core !== "" ? Number(core) : null,
+    minPieceMm3,
+    mix: $<HTMLInputElement>("#zip-mix").checked,
+    contents,
+    pins,
+  };
+  zipDialog.close();
+  if (!(await confirmOversize())) return;
+  const suffix = currentLang() === "en" ? "_pieces.zip" : "_piezas.zip";
+  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  if (!path) return;
+  $<HTMLButtonElement>("#kit-cancel").disabled = false;
+  showKitProgress({ stage: "split", done: 0, total: 0 });
+  kitProgress.showModal();
+  const unlisten = await listen<KitProgress>("kitProgress", (e) => showKitProgress(e.payload));
+  app.classList.add("is-working");
+  try {
+    const r = await api.exportColorZip(path, options, currentLang());
+    lastKit = { pieces: r.pieces, bytes: r.bytes, quality: contents.quality };
+    const done = [
+      t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path, size: size(r.bytes) }),
+      r.pins ? t("zip.pinsMade", { count: r.pins, n: r.pins }) : "",
+      r.unpinned ? t("zip.unpinned", { count: r.unpinned, n: r.unpinned }) : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    // Anything to look at is said, never left for the user to find.
+    const notes = [
+      r.oversize ? t("zip.oversize", { count: r.oversize, n: r.oversize }) : "",
+      r.review > r.oversize ? t("zip.review", { count: r.review, n: r.review }) : "",
+      r.dropped ? t("zip.dropped", { count: r.dropped, n: r.dropped }) : "",
+    ].filter(Boolean);
+    toast([done, ...notes].join(" "), notes.length ? "error" : "ok");
+  } catch (e) {
+    // Cancelling is the user's choice, not an error; nothing was written.
+    if (isAppError(e) && e.key === "error.kitCancelled") toast(t("zip.cancelled"), "ok");
+    else toast(errText(e), "error");
+  } finally {
+    unlisten();
+    app.classList.remove("is-working");
+    kitProgress.close();
+  }
+});
+
+async function exportColourShells(format: "zip" | "3mf") {
   if (!summary) return;
   const shell = $<HTMLInputElement>("#shell");
   const thickness = Number(shell.value);
@@ -1355,16 +1974,24 @@ $("#export-zip").addEventListener("click", async () => {
     shell.focus();
     return;
   }
+  const mainSolid = $<HTMLInputElement>("#main-solid").checked;
   zipDialog.close();
   if (!(await confirmOversize())) return;
-  const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
-  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  const suffix = currentLang() === "en" ? "_colours" : "_colores";
+  const path = await save({
+    defaultPath: summary.fileName.replace(MODEL_EXT, `${suffix}.${format}`),
+    filters: [{ name: format.toUpperCase(), extensions: [format] }],
+  });
   if (!path) return;
   await work(async () => {
-    const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());
-    toast(t("zip.saved", { count: n, n, path }));
+    const n = format === "3mf"
+      ? await api.exportColorAssembly(path, thickness, mainSolid)
+      : await api.exportColorShellsZip(path, thickness, mainSolid, currentLang());
+    toast(t("zip.shellsSaved", { count: n, n, path }));
   });
-});
+}
+$("#export-color-shells").addEventListener("click", () => void exportColourShells("zip"));
+$("#export-color-assembly").addEventListener("click", () => void exportColourShells("3mf"));
 
 // ---- settings ----------------------------------------------------------------------------
 
@@ -1509,6 +2136,7 @@ async function choosePrinter(id: string, nozzle: number) {
     const s = await api.setPrinter(id, n);
     renderPrinterPick(id, n);
     if (s) {
+      dirty = true;
       render(s);
       await reloadMesh();
     }
@@ -1730,6 +2358,11 @@ function setTool(tool: Tool) {
   if (tool === "split") splitPanel.open(); else splitPanel.close();
   if (tool === "region") regionPanel.open(); else regionPanel.close();
   syncBrush();
+  if (tool !== "bucket") {
+    bucketRay = null;
+    bucketFound = null;
+  }
+  syncBucket();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
@@ -1804,6 +2437,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     void undo();
   } else if (e.key === "b") setTool("brush");
+  else if (e.key === "u") setTool("bucket");
   else if (e.key === "o") setTool("orbit");
   else if (e.key === "m") setTool("measure");
   else if (e.key === "s") setTool("size");
@@ -1902,8 +2536,11 @@ function openPrefs() {
 const ready = () => app.dataset.state === "ready";
 const COMMANDS: Record<string, { run: () => void; enabled?: () => boolean }> = {
   open: { run: () => $("#choose").click(), enabled: () => state !== "converting" },
+  save: { run: () => void saveProject(), enabled: ready },
+  saveAs: { run: () => void saveProject(true), enabled: ready },
   export: { run: () => $("#export").click(), enabled: ready },
   printers: { run: () => openPrinterDialog() },
+  filaments: { run: () => void openFilaments() },
   undo: { run: () => void undo(), enabled: () => ready() && Boolean(summary?.canUndo) },
   undoSize: { run: () => $("#size-undo").click(), enabled: () => ready() && Boolean(summary?.size.canUndo) },
   waste: { run: () => $("#open-waste").click(), enabled: ready },
@@ -1911,15 +2548,26 @@ const COMMANDS: Record<string, { run: () => void; enabled?: () => boolean }> = {
   updates: { run: () => versionBtn.click() },
   shortcuts: { run: () => toast(t("menu.shortcutList"), "ok", undefined, true) },
 };
+/** A recent project from the File menu. */
+function recentCommand(cmd: string): string | null {
+  const m = /^recent:(\d+)$/.exec(cmd);
+  return m ? recents()[Number(m[1])] ?? null : null;
+}
 menubar($("#menubar"), {
-  run: (cmd) => COMMANDS[cmd]?.run(),
-  enabled: (cmd) => COMMANDS[cmd]?.enabled?.() ?? true,
+  run: (cmd) => {
+    const recent = recentCommand(cmd);
+    if (recent) void openFile(recent);
+    else COMMANDS[cmd]?.run();
+  },
+  enabled: (cmd) => (recentCommand(cmd) ? state !== "converting" : COMMANDS[cmd]?.enabled?.() ?? true),
 });
+renderRecents();
 
 // Menu shortcuts work in any state and outside text fields.
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || document.querySelector("dialog[open]")) return;
-  const cmd = { o: "open", s: "export", ",": "prefs" }[e.key.toLowerCase()];
+  const key = e.key.toLowerCase();
+  const cmd = key === "s" && e.shiftKey ? "saveAs" : { o: "open", s: "save", e: "export", ",": "prefs" }[key];
   if (!cmd || !(COMMANDS[cmd].enabled?.() ?? true)) return;
   e.preventDefault();
   COMMANDS[cmd].run();
@@ -1939,6 +2587,8 @@ onLangChange(() => {
     renderPrinterList();
     $("#pf-nozzles legend").textContent = t("printers.nozzles");
   }
+  if (filamentsDialog.open) renderFilaments();
+  slotPicker.relabel(slotPickerTexts());
   if (wasteDialog.open) {
     const keep = readWasteForm();
     fillMaterials();
@@ -1949,7 +2599,7 @@ onLangChange(() => {
   setExpanded(toolbar.dataset.expanded === "true");
   syncLock();
   syncOutputs();
-  bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
+  renderRecents();
   if (summary) render(summary);
   separatePanel.update();
   connectPanel.update();
@@ -1997,7 +2647,6 @@ const printability = setupPrintability({
 // ---- start -------------------------------------------------------------------------------
 
 applyStatic();
-bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
 syncLock();
 setState("empty");
 setTool("orbit");
@@ -2006,6 +2655,7 @@ void api.printers().then((p) => {
   renderPrinterPick(p.selected, p.nozzleMm);
 });
 void api.prefs().then((p) => (prefs = p));
+void api.filaments().then((f) => (filaments = f));
 void currentVersion().then((v) => bind("version", `v${v}`));
 // Check quietly once the window has settled; only a newer version is announced.
 window.setTimeout(() => void checkForUpdates(true), 4000);
