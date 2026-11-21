@@ -274,15 +274,358 @@ pub async fn reset_rotation(app: AppHandle) -> CmdResult<TurnDto> {
     .await
 }
 
-/// Cuts the model `t` of the way along `axis` (0 to 1 over the preview) and
-/// keeps the low or the high side; with `keep_other`, the other side too, as an
-/// object of its own beside it.
+fn cut_error(error: bp_core::cut::CutError) -> AppError {
+    AppError::new(match error {
+        bp_core::cut::CutError::Misses => "error.cutMisses",
+        bp_core::cut::CutError::InvalidPlane => "error.cutPlane",
+        bp_core::cut::CutError::InvalidGeometry => "error.cutGeometry",
+    })
+}
+
+/// Dry run on a snapshot: validates the actual caps and retained geometry without
+/// changing the document, its paint or its undo history. Releases the document
+/// lock before the expensive cut so navigation and new file loads stay responsive.
 #[tauri::command]
-pub async fn cut_model(app: AppHandle, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> CmdResult<Summary> {
+pub async fn preview_cut(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    keep_low: bool,
+    keep_other: bool,
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+) -> CmdResult<usize> {
+    let mut project = with_doc(app, |d, _| Ok(d.project.clone())).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        project.cut_plane(point, normal, keep_low, keep_other, lay_on_cut, &selected).map_err(cut_error)?;
+        Ok(project.object_count())
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Cuts selected parts using the exact plane displayed by the preview.
+/// Both halves can be retained and optionally laid on their cut faces.
+#[tauri::command]
+pub async fn cut_model(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    keep_low: bool,
+    keep_other: bool,
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {
-        if !d.project.cut(axis, t, keep_low, keep_other) {
-            return Err(AppError::new("error.cutMisses"));
+        d.project.cut_plane(point, normal, keep_low, keep_other, lay_on_cut, &selected).map_err(cut_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// The connectors of a cut as the UI sends them.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectorsDto {
+    /// "pin" or "dowel".
+    kind: String,
+    /// Pins stand out of half A (below the plane) unless this is false.
+    pins_on_a: bool,
+    /// "round" or "square".
+    shape: String,
+    size_mm: f32,
+    depth_mm: f32,
+    clearance_mm: f32,
+    angle_deg: f32,
+    at: Vec<[f32; 3]>,
+}
+
+impl ConnectorsDto {
+    fn core(self) -> CmdResult<bp_core::connect::Connectors> {
+        use bp_core::connect::{Connectors, Kind, Shape};
+        let kind = match self.kind.as_str() {
+            "pin" => Kind::Pin { on_low: self.pins_on_a },
+            "dowel" => Kind::Dowel,
+            _ => return Err(AppError::new("error.connectParams")),
+        };
+        let shape = match self.shape.as_str() {
+            "round" => Shape::Round,
+            "square" => Shape::Square,
+            _ => return Err(AppError::new("error.connectParams")),
+        };
+        let c = Connectors {
+            kind,
+            shape,
+            size_mm: self.size_mm,
+            depth_mm: self.depth_mm,
+            clearance_mm: self.clearance_mm,
+            angle_deg: self.angle_deg,
+            at: self.at,
+        };
+        if !c.valid() || c.at.len() > 64 {
+            return Err(AppError::new("error.connectParams"));
         }
+        Ok(c)
+    }
+}
+
+fn issue_key(issue: Option<bp_core::connect::Issue>) -> Option<&'static str> {
+    use bp_core::connect::Issue;
+    issue.map(|i| match i {
+        Issue::Outside => "outside",
+        Issue::Overlap => "overlap",
+        Issue::ThinWall => "thinWall",
+        Issue::TooDeep => "tooDeep",
+    })
+}
+
+fn connect_error(e: bp_core::ConnectError) -> AppError {
+    match e {
+        bp_core::ConnectError::Cut(e) => cut_error(e),
+        bp_core::ConnectError::Params => AppError::new("error.connectParams"),
+        bp_core::ConnectError::NoConnectors => AppError::new("error.connectNone"),
+        bp_core::ConnectError::Connectors(_) => AppError::new("error.connectIssues"),
+    }
+}
+
+/// Where connectors of this size fit on the cut, in preview coordinates.
+#[tauri::command]
+pub async fn suggest_connectors(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+) -> CmdResult<Vec<[f32; 3]>> {
+    let c = connectors.core()?;
+    with_doc(app, move |d, _| d.project.suggest_connectors(point, normal, &selected, &c).map_err(cut_error)).await
+}
+
+/// Dry run of a cut with connectors on a copy: what is wrong with each
+/// connector or, when they are all fine, how many objects the cut leaves.
+#[tauri::command]
+pub async fn preview_connected_cut(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+) -> CmdResult<dto::ConnectReviewDto> {
+    let c = connectors.core()?;
+    let mut project = with_doc(app, |d, _| Ok(d.project.clone())).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let issues = project.check_connectors(point, normal, &selected, &c).map_err(cut_error)?;
+        if issues.iter().any(Option::is_some) || c.at.is_empty() {
+            return Ok(dto::ConnectReviewDto { issues: issues.into_iter().map(issue_key).collect(), objects: None });
+        }
+        let objects = project.cut_connected(point, normal, lay_on_cut, &selected, &c, "").map_err(connect_error)?;
+        Ok(dto::ConnectReviewDto { issues: vec![None; c.at.len()], objects: Some(objects) })
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Cuts keeping both halves with the connectors made in them; one undoable step.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn cut_connected(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+    dowel_label: String,
+) -> CmdResult<Summary> {
+    let c = connectors.core()?;
+    let label: String = dowel_label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        d.project.cut_connected(point, normal, lay_on_cut, &selected, &c, &label).map_err(connect_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// What a split for the printer asks for, as the UI sends it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitPlanDto {
+    /// Cut positions along X, Y and Z in preview coordinates.
+    cuts: [Vec<f32>; 3],
+    lay_on_cut: bool,
+    gap_mm: f32,
+    /// Dowels across the joints: "round" or "square", and their sizes.
+    dowels: Option<SplitDowelsDto>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitDowelsDto {
+    shape: String,
+    size_mm: f32,
+    depth_mm: f32,
+    clearance_mm: f32,
+}
+
+impl SplitPlanDto {
+    fn core(self) -> CmdResult<(bp_core::SplitPlan, f32)> {
+        let dowels = match self.dowels {
+            None => None,
+            Some(d) => Some(
+                ConnectorsDto {
+                    kind: "dowel".into(),
+                    pins_on_a: true,
+                    shape: d.shape,
+                    size_mm: d.size_mm,
+                    depth_mm: d.depth_mm,
+                    clearance_mm: d.clearance_mm,
+                    angle_deg: 0.0,
+                    at: vec![],
+                }
+                .core()?,
+            ),
+        };
+        in_range(self.gap_mm, 0.0..=50.0, "error.splitGap")?;
+        Ok((bp_core::SplitPlan { cuts: self.cuts, lay_on_cut: self.lay_on_cut, dowels }, self.gap_mm))
+    }
+}
+
+/// The room every plate has for pieces: centred, clear of the margin, the
+/// excluded zones and the tower, and as tall as the printer prints.
+fn plate_room(d: &Document, prefs: &Prefs, gap_mm: f32, offset_mm: [f32; 2]) -> bp_core::fit::Room {
+    let stats = d.project.stats();
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
+    let reserve = bp_3mf::Reserve {
+        tower: prefs.plate.tower && plate.needs_tower,
+        tower_mm: plate.tower_mm,
+        tower_gap_mm: prefs.plate.tower_gap_mm,
+        margin_mm: prefs.plate.margin_mm,
+    };
+    bp_core::fit::Room {
+        area_mm: bp_3mf::plate::centred_room_at(&d.printer, &reserve, offset_mm),
+        height_mm: d.printer.max_height_mm(),
+        gap_mm,
+    }
+}
+
+fn split_error(e: bp_core::SplitError) -> AppError {
+    match e {
+        bp_core::SplitError::NoCuts => AppError::new("error.splitNoCuts"),
+        bp_core::SplitError::Params => AppError::new("error.splitParams"),
+        bp_core::SplitError::Cut(e) => cut_error(e),
+        bp_core::SplitError::DoesNotFit(_) => AppError::new("error.splitDoesNotFit"),
+    }
+}
+
+/// Where to cut so every piece fits the printer, and the room it was worked out for.
+#[tauri::command]
+pub async fn propose_split(app: AppHandle, gap_mm: f32) -> CmdResult<dto::SplitProposalDto> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, [0.0; 2]);
+        let stats = d.project.stats();
+        Ok(dto::SplitProposalDto {
+            cuts: d.project.propose_split(&room),
+            room_mm: room.area_mm,
+            height_mm: room.height_mm,
+            size_mm: stats.size_mm,
+        })
+    })
+    .await
+}
+
+/// What a split would make, without changing the document.
+#[tauri::command]
+pub async fn preview_split(app: AppHandle, plan: SplitPlanDto) -> CmdResult<dto::SplitReportDto> {
+    let (plan, gap) = plan.core()?;
+    let (project, room) =
+        with_doc(app, move |d, prefs| Ok((d.project.clone(), plate_room(d, prefs, gap, [0.0; 2])))).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        project.preview_split(&plan, &room).map(dto::split_report).map_err(split_error)
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Splits the model into pieces that fit and shares them out across plates; one undoable step.
+#[tauri::command]
+pub async fn split_for_printer(app: AppHandle, plan: SplitPlanDto, dowel_label: String) -> CmdResult<Summary> {
+    let (plan, gap) = plan.core()?;
+    let label: String = dowel_label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap, [0.0; 2]);
+        d.project.split_for_printer(&plan, &room, &label).map_err(split_error)?;
+        // Each plate's pieces go on its centre.
+        d.offset_mm = [0.0; 2];
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+fn plate_edit_error(error: bp_core::PlateEditError) -> AppError {
+    AppError::new(match error {
+        bp_core::PlateEditError::Plate => "error.plateMissing",
+        bp_core::PlateEditError::Object => "error.plateObjectMissing",
+        bp_core::PlateEditError::ObjectLimit => "error.plateObjectLimit",
+        bp_core::PlateEditError::NoRoom => "error.noRoom",
+        bp_core::PlateEditError::DoesNotFit => "error.plateArrangeOversize",
+    })
+}
+
+#[tauri::command]
+pub async fn add_plate(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, |d, prefs| {
+        d.project.add_plate();
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn move_to_plate(app: AppHandle, object: u32, plate: u32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.move_to_plate(object, plate, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clone_object(app: AppHandle, object: u32, label: String, gap_mm: Option<f32>) -> CmdResult<Summary> {
+    if let Some(gap) = gap_mm {
+        in_range(gap, 0.0..=50.0, "error.splitGap")?;
+    }
+    let label: String = label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let width = d.printer.bed_mm().0;
+        if let Some(gap) = gap_mm {
+            let room = plate_room(d, prefs, gap, d.offset_mm);
+            d.project.clone_and_arrange(object, &label, &room, width)
+        } else {
+            d.project.clone_object(object, &label, width)
+        }
+        .map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn arrange_plates(app: AppHandle, gap_mm: f32) -> CmdResult<Summary> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, d.offset_mm);
+        d.project.arrange_plates(&room, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clear_plate(app: AppHandle, plate: u32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.clear_plate(plate).map_err(plate_edit_error)?;
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -292,6 +635,161 @@ pub async fn cut_model(app: AppHandle, axis: usize, t: f32, keep_low: bool, keep
 pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {
         d.project.undo_cut();
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Tolerance for welding corners when looking for pieces, in millimetres.
+const WELD_RANGE: std::ops::RangeInclusive<f32> = 0.0..=5.0;
+
+/// The model's disconnected pieces and, per preview triangle, the piece it is in.
+#[tauri::command]
+pub async fn detect_pieces(app: AppHandle, weld_mm: f32) -> CmdResult<dto::PiecesDto> {
+    in_range(weld_mm, WELD_RANGE, "error.weldRange")?;
+    with_doc(app, move |d, _| Ok(dto::pieces(&d.project, weld_mm))).await
+}
+
+/// Pieces with the same group become one object; `None` leaves a piece where it is.
+#[tauri::command]
+pub async fn separate_pieces(
+    app: AppHandle,
+    weld_mm: f32,
+    groups: Vec<Option<u32>>,
+    lay_flat: bool,
+) -> CmdResult<Summary> {
+    in_range(weld_mm, WELD_RANGE, "error.weldRange")?;
+    with_doc(app, move |d, prefs| {
+        d.project.separate_pieces(weld_mm, &groups, lay_flat).map_err(|e| {
+            AppError::new(match e {
+                bp_core::SeparateError::Stale => "error.separateStale",
+                bp_core::SeparateError::NothingToSeparate => "error.separateNothing",
+            })
+        })?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Planes to review for splitting a continuous mesh; nothing is cut here.
+#[tauri::command]
+pub async fn propose_cuts(app: AppHandle, selected: Vec<usize>) -> CmdResult<Vec<dto::ProposalDto>> {
+    with_doc(app, move |d, _| Ok(d.project.propose_cuts(&selected).into_iter().map(dto::proposal).collect())).await
+}
+
+/// Brush radius for the region selection, and how thick a shell or deep a cap can be, in millimetres.
+const REGION_RADIUS: std::ops::RangeInclusive<f32> = 0.1..=100.0;
+const CLOSURE_RANGE: std::ops::RangeInclusive<f32> = -50.0..=50.0;
+
+/// Adds to the region selection (or with `add` false, takes from it) where
+/// the ray lands; with `through`, the brush reaches walls behind the surface too.
+#[tauri::command]
+pub async fn select_region(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    radius_mm: f32,
+    add: bool,
+    through: bool,
+) -> CmdResult<Option<dto::SelectStrokeDto>> {
+    in_range(radius_mm, REGION_RADIUS, "error.radiusRange")?;
+    with_doc(app, move |d, _| {
+        Ok(d.project.select(origin, dir, radius_mm, add, through).map(|(h, tris)| dto::SelectStrokeDto {
+            point: h.point,
+            normal: h.normal,
+            tris,
+        }))
+    })
+    .await
+}
+
+/// Reshapes the region selection: "grow", "connected", "smooth", "invert" or "clear"; "get" only reads it.
+#[tauri::command]
+pub async fn selection_op(app: AppHandle, op: String) -> CmdResult<dto::SelectionDto> {
+    with_doc(app, move |d, _| {
+        match op.as_str() {
+            "grow" => d.project.grow_selection(),
+            "connected" => d.project.select_connected(),
+            "smooth" => d.project.smooth_selection(),
+            "invert" => d.project.invert_selection(),
+            "clear" => d.project.clear_selection(),
+            "get" => {}
+            _ => return Err(AppError::with("error.internal", json!({ "detail": op }))),
+        }
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
+fn closure(c: dto::ClosureDto) -> CmdResult<bp_core::region::Closure> {
+    let (dto::ClosureDto::Shell { mm, .. } | dto::ClosureDto::Cap { mm }) = c;
+    in_range(mm, CLOSURE_RANGE, "error.closureRange")?;
+    if let dto::ClosureDto::Shell { clearance_mm, .. } = c {
+        if mm <= 0.0 {
+            return Err(AppError::with("error.closureRange", json!({ "min": 0.0, "max": CLOSURE_RANGE.end() })));
+        }
+        in_range(clearance_mm, 0.0..=5.0, "error.clearanceRange")?;
+    }
+    Ok(c.into())
+}
+
+/// Selects (or with `add` false, deselects) the faces the same colour as
+/// preview triangle `seed`: only those joined to it with `contiguous`. With
+/// `base`, the selection is that first, so trying a pick again with another
+/// tolerance is one step that no other pick can come between.
+#[tauri::command]
+pub async fn select_by_colour(
+    app: AppHandle,
+    seed: u32,
+    how: dto::ColourMatchDto,
+    contiguous: bool,
+    add: bool,
+    base: Option<Vec<u32>>,
+) -> CmdResult<dto::SelectionDto> {
+    if let dto::ColourMatchDto::Similar { delta_e } = how {
+        in_range(delta_e, 0.0..=100.0, "error.deltaERange")?;
+    }
+    with_doc(app, move |d, _| {
+        if let Some(base) = base {
+            d.project.set_selection(&base);
+        }
+        d.project.select_by_colour(seed, how.into(), contiguous, add);
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
+/// Makes colour borders that cross triangles edges of the mesh; one undoable step.
+#[tauri::command]
+pub async fn refine_to_paint(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.refine_to_paint()?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// What cutting the selected region out would make; nothing changes.
+#[tauri::command]
+pub async fn preview_region(
+    app: AppHandle,
+    closure: dto::ClosureDto,
+    action: dto::RegionActionDto,
+) -> CmdResult<dto::RegionPreviewDto> {
+    let c = self::closure(closure)?;
+    with_doc(app, move |d, _| Ok(dto::region_preview(d.project.preview_region(c, action.into())?))).await
+}
+
+/// Cuts the selected region out as one undoable step.
+#[tauri::command]
+pub async fn apply_region(
+    app: AppHandle,
+    closure: dto::ClosureDto,
+    action: dto::RegionActionDto,
+) -> CmdResult<Summary> {
+    let c = self::closure(closure)?;
+    with_doc(app, move |d, prefs| {
+        d.project.apply_region(c, action.into())?;
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -530,6 +1028,9 @@ pub async fn export_color_zip(
     in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
     with_doc(app, move |d, _| {
         let pieces = d.project.color_pieces(thickness_mm, main_solid);
+        if pieces.is_empty() {
+            return Err(AppError::new("error.platesEmpty"));
+        }
         let hexes: Vec<String> =
             pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
         let files: Vec<bp_3mf::ColorFile> = pieces
@@ -550,10 +1051,14 @@ pub async fn export_color_zip(
 pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
     with_doc(app, move |d, prefs| {
         let parts = d.project.export_parts();
+        if parts.is_empty() {
+            return Err(AppError::new("error.platesEmpty"));
+        }
         let filaments = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let (volumes_mm3, _) = dto::flush_matrix(d);
         let model = bp_3mf::Model {
+            plate_count: d.project.plate_count(),
             name: &name,
             parts: parts
                 .iter()
@@ -563,6 +1068,7 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
                     tris: &p.tris,
                     paint: &p.paint,
                     object: p.object,
+                    plate: p.plate,
                 })
                 .collect(),
             filaments,
@@ -592,8 +1098,9 @@ fn printability_for_doc(
     let mut report = project.printability(params);
     report.printer = Some(d.printer.profile.id.clone());
     let stats = project.stats();
-    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
-    let fits = plate.fits && stats.size_mm[2] <= d.printer.max_height_mm();
+    let size = dto::printed_size(project, &stats);
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, size);
+    let fits = plate.fits && size[2] <= d.printer.max_height_mm();
     report.checks.push(bp_core::printability::Check::new(
         "buildVolume",
         "checked",

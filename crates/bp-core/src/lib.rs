@@ -3,10 +3,12 @@
 
 pub mod bvh;
 pub mod color;
+pub mod connect;
 pub mod cut;
 pub mod encode;
 pub mod estimate;
 pub mod field;
+pub mod fit;
 pub mod geom;
 pub mod mesh;
 pub mod optimize;
@@ -14,12 +16,19 @@ pub mod paint;
 pub mod palette;
 pub mod printability;
 pub mod project;
+pub mod refine;
+pub mod region;
 pub mod scene;
+pub mod separate;
 pub mod split;
 pub mod waste;
 
 pub use mesh::{MeshOps, RepairReport};
-pub use project::{ColorOps, ExportPart, Mat3, Preview, PrintOps, Project, Stats, IDENTITY};
+pub use project::{
+    ColorOps, ColourMatch, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, PlateEditError, PlateGroup,
+    Preview, PrintOps, Project, RefineFailure, RegionAction, RegionFailure, RegionPreview, SeparateError, SplitError,
+    SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
+};
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;
 pub use waste::{Waste, WasteParams};
