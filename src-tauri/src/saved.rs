@@ -26,6 +26,16 @@ pub fn save(doc: &Document, path: &str) -> CmdResult<()> {
         nozzle_mm: doc.printer.nozzle_mm,
         flush: doc.flush.iter().map(|((a, b), v)| (a.clone(), b.clone(), *v)).collect(),
         offset_mm: doc.offset_mm,
+        filaments: doc
+            .project
+            .palette()
+            .iter()
+            .filter_map(|c| {
+                let hex = bp_core::color::to_hex(*c);
+                doc.filaments.get(&hex).map(|f| (hex, f.clone()))
+            })
+            .collect(),
+        kit: doc.kit,
     };
     let json = serde_json::to_string_pretty(&settings).map_err(AppError::internal)?;
     let model = doc.project.to_bytes();
@@ -71,6 +81,8 @@ pub fn open(path: &str, store: &Store) -> CmdResult<Document> {
         printer,
         flush: s.flush.into_iter().map(|(a, b, v)| ((a, b), v)).collect(),
         offset_mm: s.offset_mm,
+        filaments: s.filaments.into_iter().collect(),
+        kit: s.kit,
     })
 }
 
@@ -105,6 +117,20 @@ mod tests {
             printer,
             flush: [(("#E61A1A".to_string(), "#1A1AE6".to_string()), 321.0)].into_iter().collect(),
             offset_mm: [12.0, -3.5],
+            filaments: Default::default(),
+            kit: Some(bp_3mf::project_file::KitSettings {
+                voxel_mm: 0.3,
+                depth_mm: 2.0,
+                core_slot: Some(1),
+                min_piece_mm3: 12.0,
+                mix: true,
+                contents: bp_3mf::project_file::KitContents {
+                    stl: bp_3mf::project_file::StlFiles::Colour,
+                    quality: bp_3mf::project_file::Quality::High,
+                    ..Default::default()
+                },
+                pins: Some(bp_3mf::project_file::KitPins { diameter_mm: 4.0, depth_mm: 3.0, clearance_mm: 0.2 }),
+            }),
         }
     }
 
@@ -119,6 +145,7 @@ mod tests {
         assert_eq!(o.file_name, "q.blend");
         assert_eq!(o.offset_mm, [12.0, -3.5]);
         assert_eq!(o.flush, d.flush);
+        assert_eq!(o.kit, d.kit);
         assert_eq!(o.printer.profile.id, d.printer.profile.id);
         assert!(o.import_warnings.is_empty());
         assert_eq!(o.project.export_parts()[0].paint, d.project.export_parts()[0].paint);

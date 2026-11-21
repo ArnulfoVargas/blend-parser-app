@@ -16,6 +16,11 @@ import {
   api,
   isAppError,
   type BucketPick,
+  type Filament,
+  type Filaments,
+  type KitContents,
+  type KitPins,
+  type KitProgress,
   type PlatePrefs,
   type PrinterProfile,
   type Printers,
@@ -908,7 +913,7 @@ function fillFlushTable(s: Summary) {
       <tbody>${s.slots.map((_, i) => `<tr><th scope="row" title="${t("slot.name", { n: i + 1 })}">${swatch(i)}</th>${s.slots.map((_, j) => (i === j
         ? `<td class="flush__self" aria-hidden="true">—</td>`
         : `<td><input class="input flush__cell${w.flushSet[i * n + j] ? " is-set" : ""}" type="number" inputmode="numeric" min="0" max="2000" step="10"
-            style="--heat:${Math.min(1, Math.max(0, (w.flushMm3Matrix[i * n + j] - 107) / 693)).toFixed(2)}"
+            style="--heat:${Math.min(1, Math.max(0, w.flushMm3Matrix[i * n + j] / 900)).toFixed(2)}"
             data-from="${i}" data-to="${j}" value="${Math.round(w.flushMm3Matrix[i * n + j])}"
             aria-label="${t("wasteForm.flushCell", { from: i + 1, to: j + 1 })}"></td>`)).join("")}</tr>`).join("")}</tbody>`;
   }
@@ -942,8 +947,10 @@ function renderSlots(s: Summary) {
         <strong class="mono">${slot.hex}</strong>
         <span class="slot__count">${t("slot.triangles", { count: slot.triangles, n: nf(slot.triangles) })}</span>
         <span class="slot__near${close ? " is-close" : ""}">${near ? t("slot.near", { n: near[0] + 1, de: nf(near[1]) }) : t("slot.only")}</span>
+        <span class="slot__filament"></span>
       </button>
-      <div class="slot__actions">${s.slots.length < 2 ? "" : `
+      <div class="slot__actions">
+        <button class="btn btn--quiet btn--sm slot__spool" type="button">${t("filaments.pick")}</button>${s.slots.length < 2 ? "" : `
         ${close ? `<button class="btn btn--quiet btn--sm slot__join" type="button">${t("slot.joinWith", { n: near![0] + 1 })}</button>` : ""}
         <label class="visually-hidden" for="merge-${i}">${t("slot.mergeLabel", { n })}</label>
         <select class="slot__merge" id="merge-${i}">
@@ -955,9 +962,24 @@ function renderSlots(s: Summary) {
     const input = li.querySelector<HTMLInputElement>('input[type="color"]')!;
     input.addEventListener("input", () => li.style.setProperty("--t", input.value));
     input.addEventListener("change", () => {
-      const colors = s.slots.map((x, j) => (j === i ? input.value : x.hex));
+      // The colours found in the model decide what each slot paints; filaments only change how it prints.
+      const colors = s.slots.map((x, j) => (j === i ? input.value : x.detectedHex));
       void apply(() => api.setPalette(colors));
     });
+    // From the inventory, a slot's colour is a spool's: picked, not typed.
+    input.disabled = inventoryActive();
+    if (input.disabled) input.parentElement!.title = t("filaments.inventoryLocked");
+    const spool = li.querySelector<HTMLElement>(".slot__filament")!;
+    if (slot.filament) {
+      const f = slot.filament;
+      const words = { brand: f.brand, kind: f.kind, name: filamentName(f) };
+      const far = (slot.filamentDeltaE ?? 0) > CLOSE_DELTA_E;
+      spool.classList.toggle("is-far", far);
+      spool.textContent = far ? t("filaments.far", { ...words, de: nf(slot.filamentDeltaE ?? 0) }) : t("filaments.onSlot", words);
+    } else {
+      spool.textContent = t("filaments.noneOnSlot");
+    }
+    li.querySelector(".slot__spool")!.addEventListener("click", () => void openSlotFilament(i));
     li.querySelector(".slot__pick")!.addEventListener("click", () => {
       brushSlot = i;
       list.querySelectorAll(".slot__pick").forEach((b, j) => {
@@ -984,6 +1006,153 @@ function renderSlots(s: Summary) {
     return li;
   }));
 }
+
+// ---- filaments ---------------------------------------------------------------------------
+
+let filaments: Filaments | null = null;
+/** Suggested colours come only from the owned spools: asked for, and there are some. */
+const inventoryActive = () => Boolean(filaments?.inventoryOnly && filaments.owned.length);
+const filamentName = (f: Filament) => (currentLang() === "es" ? f.nameEs : f.nameEn) || f.nameEn || f.nameEs;
+
+const filamentsDialog = $<HTMLDialogElement>("#filaments-dialog");
+const filamentSearch = $<HTMLInputElement>("#filament-search");
+const inventoryOnly = $<HTMLInputElement>("#inventory-only");
+
+/** Lower case, no accents: "maté" finds "Matte". */
+const folded = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+/** Every filament by line, the user's own first, filtered by the search; each with "I have it". */
+function renderFilaments() {
+  if (!filaments) return;
+  const f = filaments;
+  inventoryOnly.checked = f.inventoryOnly;
+  bind("ownedCount", t("filaments.owned", { count: f.owned.length }));
+  const q = folded(filamentSearch.value.trim());
+  const shown = f.filaments.filter((x) => !q || folded(`${x.brand} ${x.kind} ${x.nameEs} ${x.nameEn} ${x.hex}`).includes(q));
+  const groups = new Map<string, Filament[]>();
+  for (const x of shown) {
+    const key = x.custom ? t("filaments.mine") : x.kind;
+    groups.set(key, [...(groups.get(key) ?? []), x]);
+  }
+  const owned = new Set(f.owned);
+  const sections = [...groups].sort(([a], [b]) => (a === t("filaments.mine") ? -1 : b === t("filaments.mine") ? 1 : 0)).map(([kind, list]) => {
+    const section = Object.assign(document.createElement("section"), { className: "filaments__group" });
+    const ul = Object.assign(document.createElement("ul"), { className: "filaments__list" });
+    ul.append(...list.map((x) => {
+      const li = Object.assign(document.createElement("li"), { className: "filaments__item" });
+      const label = document.createElement("label");
+      const box = Object.assign(document.createElement("input"), { type: "checkbox", checked: owned.has(x.id) });
+      box.setAttribute("aria-label", t("filaments.have", { name: `${x.brand} ${x.kind} ${filamentName(x)}` }));
+      box.addEventListener("change", () => void updateFilaments(() => api.setFilamentOwned(x.id, box.checked)));
+      const dot = Object.assign(document.createElement("i"), { className: "swatch-dot" });
+      dot.style.setProperty("--t", x.hex);
+      const name = Object.assign(document.createElement("span"), { className: "name", textContent: x.custom ? `${x.brand} ${x.kind} ${filamentName(x)}`.trim() : filamentName(x), title: x.hex });
+      label.append(box, dot, name);
+      li.append(label);
+      if (x.custom) {
+        const del = Object.assign(document.createElement("button"), { className: "link", type: "button", textContent: t("filaments.delete") });
+        del.addEventListener("click", () => void updateFilaments(() => api.deleteFilament(x.id)));
+        li.append(del);
+      }
+      return li;
+    }));
+    section.append(Object.assign(document.createElement("h3"), { textContent: kind }), ul);
+    return section;
+  });
+  const list = $("#filament-list");
+  if (!sections.length) list.replaceChildren(Object.assign(document.createElement("p"), { className: "help", textContent: t("filaments.none", { q: filamentSearch.value.trim() }) }));
+  else list.replaceChildren(...sections);
+  $("#ff-kinds").replaceChildren(...[...new Set(f.filaments.map((x) => x.kind))].map((k) => new Option(k)));
+}
+
+/** Runs a change to the user's filaments, then shows them again. */
+async function updateFilaments(call: () => Promise<Filaments>) {
+  try {
+    filaments = await call();
+    renderFilaments();
+    if (summary) render(summary);
+  } catch (e) {
+    toast(errText(e), "error");
+  }
+}
+
+async function openFilaments() {
+  if (document.querySelector("dialog[open]")) return;
+  filaments = await api.filaments();
+  filamentSearch.value = "";
+  $("#filament-error").hidden = true;
+  renderFilaments();
+  filamentsDialog.showModal();
+  filamentSearch.focus();
+}
+filamentSearch.addEventListener("input", renderFilaments);
+inventoryOnly.addEventListener("change", () => void updateFilaments(() => api.setInventoryOnly(inventoryOnly.checked)));
+$("#filaments-close").addEventListener("click", () => filamentsDialog.close());
+$("#filament-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = (id: string) => $<HTMLInputElement>(id).value.trim();
+  const draft: Filament = { id: "", brand: v("#ff-brand"), kind: v("#ff-kind"), nameEs: v("#ff-name"), nameEn: "", hex: v("#ff-hex"), custom: true };
+  void (async () => {
+    try {
+      filaments = await api.saveFilament(draft);
+      $("#filament-error").hidden = true;
+      ["#ff-name"].forEach((id) => ($<HTMLInputElement>(id).value = ""));
+      renderFilaments();
+    } catch (err) {
+      const box = $("#filament-error");
+      box.textContent = errText(err);
+      box.hidden = false;
+    }
+  })();
+});
+
+// Picking the filament for one slot: the owned ones when colours come from the inventory.
+const slotDialog = $<HTMLDialogElement>("#slot-filament-dialog");
+let slotEditing = 0;
+const slotPickerTexts = (): PickerTexts => ({
+  label: t("filaments.picker"),
+  placeholder: t("filaments.search"),
+  searchLabel: t("filaments.search"),
+  none: t("filaments.pickerNone"),
+  empty: (q) => t("filaments.none", { q }),
+});
+const slotPicker = new Picker($("#slot-filament-picker"), {
+  ...slotPickerTexts(),
+  onPick: (id) => {
+    slotDialog.close();
+    void apply(() => api.setSlotFilament(slotEditing, id));
+  },
+});
+
+async function openSlotFilament(slot: number) {
+  if (!summary) return;
+  filaments = await api.filaments();
+  slotEditing = slot;
+  const owned = new Set(filaments.owned);
+  const pool = inventoryActive() ? filaments.filaments.filter((f) => owned.has(f.id)) : filaments.filaments;
+  // What the user has first, then the rest by line.
+  const sorted = [...pool.filter((f) => owned.has(f.id)), ...pool.filter((f) => !owned.has(f.id))];
+  slotPicker.setItems(sorted.map((f) => ({
+    value: f.id,
+    label: filamentName(f),
+    group: f.custom ? t("filaments.mine") : f.kind,
+    detail: `${f.brand} · ${f.hex}`,
+    keywords: `${f.brand} ${f.kind} ${f.nameEs} ${f.nameEn} ${f.hex}`,
+    full: `${f.brand} ${f.kind} ${filamentName(f)}`,
+    swatch: f.hex,
+  })));
+  slotPicker.setValue(summary.slots[slot]?.filament?.id ?? "");
+  bind("slotFilamentTitle", t("filaments.slotTitle", { n: slot + 1 }));
+  bind("slotFilamentHelp", inventoryActive() ? `${t("filaments.slotHelp")} ${t("filaments.slotHelpOwned")}` : t("filaments.slotHelp"));
+  $<HTMLButtonElement>("#slot-filament-clear").disabled = !summary.slots[slot]?.filament;
+  slotDialog.showModal();
+  slotPicker.button.focus();
+}
+$("#slot-filament-clear").addEventListener("click", () => {
+  slotDialog.close();
+  void apply(() => api.setSlotFilament(slotEditing, null));
+});
+$("#slot-filament-close").addEventListener("click", () => slotDialog.close());
 
 // ---- opening files ---------------------------------------------------------------------
 
@@ -1266,28 +1435,195 @@ $("#export-pieces").addEventListener("click", () => {
 });
 
 const zipDialog = $<HTMLDialogElement>("#zip-dialog");
-$("#open-zip").addEventListener("click", () => {
-  if (app.dataset.state === "ready") zipDialog.showModal();
+/** The core's colour only matters when colours stop short of the centre. */
+const syncCore = () => {
+  $<HTMLElement>("#core-field").hidden = !(Number($<HTMLInputElement>("#depth").value) > 0);
+};
+$("#depth").addEventListener("input", syncCore);
+const syncPins = () => {
+  $<HTMLElement>("#pin-sizes").hidden = !$<HTMLInputElement>("#zip-pins").checked;
+};
+$("#zip-pins").addEventListener("change", syncPins);
+/** The pins asked for, `null` for none, or `undefined` when a size is out of range (that field marked). */
+const pinOptions = (): KitPins | null | undefined => {
+  if (!$<HTMLInputElement>("#zip-pins").checked) return null;
+  const fields = [
+    ["#pin-diameter", 2, 20],
+    ["#pin-depth", 1, 20],
+    ["#pin-clearance", 0, 1],
+  ] as const;
+  const values: number[] = [];
+  for (const [id, min, max] of fields) {
+    const input = $<HTMLInputElement>(id);
+    const v = Number(input.value);
+    const ok = input.value !== "" && v >= min && v <= max;
+    input.setAttribute("aria-invalid", String(!ok));
+    if (!ok) {
+      input.focus();
+      return undefined;
+    }
+    values.push(v);
+  }
+  return { diameterMm: values[0], depthMm: values[1], clearanceMm: values[2] };
+};
+
+/** The last kit this session wrote: what a new one is estimated from. */
+let lastKit: { pieces: number; bytes: number; quality: KitContents["quality"] } | null = null;
+/** Picture weight against medium quality, and per piece at medium (pictures of its card and step). */
+const QUALITY_WEIGHT = { low: 0.6, medium: 1, high: 1.5 } as const;
+const PICTURES_PER_PIECE = 20_000;
+const size = (bytes: number) => (bytes >= 1e6 ? `${num(bytes / 1e6, 1)} MB` : `${num(Math.max(1, bytes / 1e3))} KB`);
+
+const zipContents = (): KitContents => ({
+  threeMf: $<HTMLInputElement>("#zip-3mf").checked,
+  stl: $<HTMLSelectElement>("#zip-stl").value as KitContents["stl"],
+  guide: $<HTMLInputElement>("#zip-guide").checked,
+  text: $<HTMLInputElement>("#zip-text").checked,
+  quality: $<HTMLSelectElement>("#zip-quality").value as KitContents["quality"],
 });
+/** Pictures only matter with the guide; the estimate follows the last kit when there is one. */
+const syncZipContents = () => {
+  const c = zipContents();
+  $<HTMLElement>("#zip-quality-field").hidden = !c.guide;
+  const nothing = !(c.threeMf || c.guide || c.text || c.stl !== "none");
+  $<HTMLElement>("#zip-error").hidden = !nothing;
+  const w = QUALITY_WEIGHT[c.quality];
+  $("#zip-estimate").textContent = lastKit
+    ? t("zip.estimateLast", { size: size((lastKit.bytes * w) / QUALITY_WEIGHT[lastKit.quality]), n: lastKit.pieces, count: lastKit.pieces })
+    : t("zip.estimate", { size: size(PICTURES_PER_PIECE * w) });
+};
+for (const id of ["#zip-3mf", "#zip-guide", "#zip-text", "#zip-stl", "#zip-quality"]) $(id).addEventListener("change", syncZipContents);
+
+$("#open-zip").addEventListener("click", () => {
+  if (app.dataset.state !== "ready" || !summary) return;
+  const core = $<HTMLSelectElement>("#core");
+  const keep = core.value;
+  core.replaceChildren(
+    new Option(t("zip.coreMost"), ""),
+    ...summary.slots.map((s, i) => new Option(`${t("slot.name", { n: i + 1 })} · ${s.hex}`, String(i))),
+  );
+  // The document remembers how its kit was last cut, project files included.
+  const last = summary.kit;
+  if (last) {
+    $<HTMLSelectElement>("#voxel").value = String(last.voxelMm);
+    $<HTMLInputElement>("#depth").value = String(last.depthMm);
+    $<HTMLInputElement>("#min-piece").value = String(last.minPieceMm3);
+    $<HTMLInputElement>("#zip-mix").checked = last.mix ?? false;
+    $<HTMLInputElement>("#zip-pins").checked = !!last.pins;
+    if (last.pins) {
+      $<HTMLInputElement>("#pin-diameter").value = String(last.pins.diameterMm);
+      $<HTMLInputElement>("#pin-depth").value = String(last.pins.depthMm);
+      $<HTMLInputElement>("#pin-clearance").value = String(last.pins.clearanceMm);
+    }
+    if (last.contents) {
+      $<HTMLInputElement>("#zip-3mf").checked = last.contents.threeMf;
+      $<HTMLSelectElement>("#zip-stl").value = last.contents.stl;
+      $<HTMLInputElement>("#zip-guide").checked = last.contents.guide;
+      $<HTMLInputElement>("#zip-text").checked = last.contents.text;
+      $<HTMLSelectElement>("#zip-quality").value = last.contents.quality;
+    }
+  }
+  const wanted = last ? (last.coreSlot === null ? "" : String(last.coreSlot)) : keep;
+  core.value = [...core.options].some((o) => o.value === wanted) ? wanted : "";
+  syncCore();
+  syncPins();
+  syncZipContents();
+  zipDialog.showModal();
+});
+
+const kitProgress = $<HTMLDialogElement>("#kit-progress");
+const meter = $<HTMLElement>("#kit-meter");
+/** Shows how far the kit has got: a stage, and a bar when it can count. */
+const showKitProgress = (p: KitProgress) => {
+  const counted = p.total > 0;
+  const pct = counted ? Math.round((100 * p.done) / p.total) : 0;
+  $("#kit-stage").textContent = counted
+    ? t(`zip.stage.${p.stage}Of` as Key, { done: p.done, total: p.total })
+    : t(`zip.stage.${p.stage}` as Key);
+  meter.toggleAttribute("data-indeterminate", !counted);
+  if (counted) meter.setAttribute("aria-valuenow", String(pct));
+  else meter.removeAttribute("aria-valuenow");
+  meter.querySelector("span")!.style.width = counted ? `${pct}%` : "";
+};
+$("#kit-cancel").addEventListener("click", () => {
+  $<HTMLButtonElement>("#kit-cancel").disabled = true;
+  $("#kit-stage").textContent = t("zip.cancelling");
+  void api.cancelColorZip();
+});
+// Escape cancels the export, it does not just hide the dialog.
+kitProgress.addEventListener("cancel", (e) => {
+  e.preventDefault();
+  $<HTMLButtonElement>("#kit-cancel").click();
+});
+
 $("#export-zip").addEventListener("click", async () => {
   if (!summary) return;
-  const shell = $<HTMLInputElement>("#shell");
-  const thickness = Number(shell.value);
-  const ok = thickness >= 0.2 && thickness <= 20;
-  shell.setAttribute("aria-invalid", String(!ok));
-  if (!ok) {
-    shell.focus();
+  const depth = $<HTMLInputElement>("#depth");
+  const minPiece = $<HTMLInputElement>("#min-piece");
+  const depthMm = Number(depth.value);
+  const minPieceMm3 = Number(minPiece.value);
+  const depthOk = depth.value !== "" && depthMm >= 0 && depthMm <= 50;
+  const minOk = minPiece.value !== "" && minPieceMm3 >= 0 && minPieceMm3 <= 10000;
+  depth.setAttribute("aria-invalid", String(!depthOk));
+  minPiece.setAttribute("aria-invalid", String(!minOk));
+  if (!depthOk || !minOk) {
+    (depthOk ? minPiece : depth).focus();
     return;
   }
+  const pins = pinOptions();
+  if (pins === undefined) return;
+  const contents = zipContents();
+  if (!(contents.threeMf || contents.guide || contents.text || contents.stl !== "none")) {
+    syncZipContents();
+    $<HTMLInputElement>("#zip-3mf").focus();
+    return;
+  }
+  const core = $<HTMLSelectElement>("#core").value;
+  const options = {
+    voxelMm: Number($<HTMLSelectElement>("#voxel").value),
+    depthMm,
+    coreSlot: depthMm > 0 && core !== "" ? Number(core) : null,
+    minPieceMm3,
+    mix: $<HTMLInputElement>("#zip-mix").checked,
+    contents,
+    pins,
+  };
   zipDialog.close();
   if (!(await confirmOversize())) return;
-  const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
+  const suffix = currentLang() === "en" ? "_pieces.zip" : "_piezas.zip";
   const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
   if (!path) return;
-  await work(async () => {
-    const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());
-    toast(t("zip.saved", { count: n, n, path }));
-  });
+  $<HTMLButtonElement>("#kit-cancel").disabled = false;
+  showKitProgress({ stage: "split", done: 0, total: 0 });
+  kitProgress.showModal();
+  const unlisten = await listen<KitProgress>("kitProgress", (e) => showKitProgress(e.payload));
+  app.classList.add("is-working");
+  try {
+    const r = await api.exportColorZip(path, options, currentLang());
+    lastKit = { pieces: r.pieces, bytes: r.bytes, quality: contents.quality };
+    const done = [
+      t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path, size: size(r.bytes) }),
+      r.pins ? t("zip.pinsMade", { count: r.pins, n: r.pins }) : "",
+      r.unpinned ? t("zip.unpinned", { count: r.unpinned, n: r.unpinned }) : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    // Anything to look at is said, never left for the user to find.
+    const notes = [
+      r.oversize ? t("zip.oversize", { count: r.oversize, n: r.oversize }) : "",
+      r.review > r.oversize ? t("zip.review", { count: r.review, n: r.review }) : "",
+      r.dropped ? t("zip.dropped", { count: r.dropped, n: r.dropped }) : "",
+    ].filter(Boolean);
+    toast([done, ...notes].join(" "), notes.length ? "error" : "ok");
+  } catch (e) {
+    // Cancelling is the user's choice, not an error; nothing was written.
+    if (isAppError(e) && e.key === "error.kitCancelled") toast(t("zip.cancelled"), "ok");
+    else toast(errText(e), "error");
+  } finally {
+    unlisten();
+    app.classList.remove("is-working");
+    kitProgress.close();
+  }
 });
 
 // ---- settings ----------------------------------------------------------------------------
@@ -1819,6 +2155,7 @@ const COMMANDS: Record<string, { run: () => void; enabled?: () => boolean }> = {
   saveAs: { run: () => void saveProject(true), enabled: ready },
   export: { run: () => $("#export").click(), enabled: ready },
   printers: { run: () => openPrinterDialog() },
+  filaments: { run: () => void openFilaments() },
   undo: { run: () => void undo(), enabled: () => ready() && Boolean(summary?.canUndo) },
   undoSize: { run: () => $("#size-undo").click(), enabled: () => ready() && Boolean(summary?.size.canUndo) },
   waste: { run: () => $("#open-waste").click(), enabled: ready },
@@ -1863,6 +2200,8 @@ onLangChange(() => {
     renderPrinterList();
     $("#pf-nozzles legend").textContent = t("printers.nozzles");
   }
+  if (filamentsDialog.open) renderFilaments();
+  slotPicker.relabel(slotPickerTexts());
   if (wasteDialog.open) {
     const keep = readWasteForm();
     fillMaterials();
@@ -1873,7 +2212,6 @@ onLangChange(() => {
   setExpanded(toolbar.dataset.expanded === "true");
   syncLock();
   syncOutputs();
-  bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
   renderRecents();
   if (summary) render(summary);
   syncBrush();
@@ -1918,7 +2256,6 @@ const printability = setupPrintability({
 // ---- start -------------------------------------------------------------------------------
 
 applyStatic();
-bind("shellHelp", t("zip.thicknessHelp", { min: mm(0.2), max: mm(20) }));
 syncLock();
 setState("empty");
 setTool("orbit");
@@ -1927,6 +2264,7 @@ void api.printers().then((p) => {
   renderPrinterPick(p.selected, p.nozzleMm);
 });
 void api.prefs().then((p) => (prefs = p));
+void api.filaments().then((f) => (filaments = f));
 void currentVersion().then((v) => bind("version", `v${v}`));
 // Check quietly once the window has settled; only a newer version is announced.
 window.setTimeout(() => void checkForUpdates(true), 4000);

@@ -36,6 +36,97 @@ pub struct Settings {
     pub flush: Vec<(String, String, f32)>,
     /// Where the model's centre sits from the plate's centre.
     pub offset_mm: [f32; 2],
+    /// The filament on each slot that has one, by the slot's colour (`#RRGGBB`).
+    #[serde(default)]
+    pub filaments: Vec<(String, crate::filament::Filament)>,
+    /// How the colour kit was last cut, if it was.
+    #[serde(default)]
+    pub kit: Option<KitSettings>,
+}
+
+/// How the colour kit is cut (see `bp_core::SplitParams`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitSettings {
+    pub voxel_mm: f32,
+    pub depth_mm: f32,
+    pub core_slot: Option<u8>,
+    pub min_piece_mm3: f32,
+    /// Let colours share a plate (see `bp_core::kit::Bed::mix`).
+    #[serde(default)]
+    pub mix: bool,
+    /// What the ZIP holds.
+    #[serde(default)]
+    pub contents: KitContents,
+    /// Pins keying the pieces together; `None` leaves them to glue.
+    #[serde(default)]
+    pub pins: Option<KitPins>,
+}
+
+/// Size of the pins that key the kit's pieces together (see `bp_core::PinParams`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitPins {
+    pub diameter_mm: f32,
+    /// How far a pin stands out of its piece.
+    pub depth_mm: f32,
+    /// Gap round a pin in its socket.
+    pub clearance_mm: f32,
+}
+
+/// What goes in the kit's ZIP besides its summary, and how sharp its pictures are.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KitContents {
+    pub three_mf: bool,
+    pub stl: StlFiles,
+    /// The assembly guide with pictures.
+    pub guide: bool,
+    /// The same steps as plain text.
+    pub text: bool,
+    pub quality: Quality,
+}
+
+impl Default for KitContents {
+    fn default() -> Self {
+        Self { three_mf: true, stl: StlFiles::Piece, guide: true, text: true, quality: Quality::Medium }
+    }
+}
+
+impl KitContents {
+    /// Anything besides the summary.
+    pub fn any(&self) -> bool {
+        self.three_mf || self.stl != StlFiles::None || self.guide || self.text
+    }
+}
+
+/// STL files: none, one per piece, or one per colour with its pieces assembled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StlFiles {
+    None,
+    Piece,
+    Colour,
+}
+
+/// How large and smooth the guide's pictures are, and so the ZIP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Quality {
+    Low,
+    Medium,
+    High,
+}
+
+impl Quality {
+    /// Picture size against medium, and supersampling.
+    pub fn scale(self) -> (f32, usize) {
+        match self {
+            Self::Low => (0.7, 1),
+            Self::Medium => (1.0, 2),
+            Self::High => (1.5, 2),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
