@@ -154,7 +154,7 @@ export interface BucketPick { targetHex: string; added: boolean; slot: number | 
 
 /** The connectors of a cut: sizes in mm, centres on the plane in preview coordinates. */
 export interface Connectors {
-  kind: "pin" | "dowel"; pinsOnA: boolean; shape: "round" | "square";
+  kind: "pin" | "dowel"; pinsOnA: boolean; shape: "round" | "square" | "hexagon";
   sizeMm: number; depthMm: number; clearanceMm: number; angleDeg: number; at: Vec3[];
 }
 /** Per connector what is wrong with it (null when fine) and, when all are fine, the objects the cut leaves. */
@@ -165,7 +165,7 @@ export interface SplitProposal { cuts: [number[], number[], number[]]; roomMm: [
 export interface SplitPlan {
   cuts: [number[], number[], number[]]; // preview coordinates
   layOnCut: boolean; gapMm: number;
-  dowels: { shape: "round" | "square"; sizeMm: number; depthMm: number; clearanceMm: number } | null;
+  dowels: { shape: "round" | "square" | "hexagon"; sizeMm: number; depthMm: number; clearanceMm: number } | null;
 }
 export interface SplitPiece { name: string; sizeMm: Vec3; plate: number | null; laid: boolean; small: boolean; dowel: boolean }
 export interface SplitReport { pieces: SplitPiece[]; plates: number; cuts: number; joints: number; jointsMissing: number; fits: boolean }

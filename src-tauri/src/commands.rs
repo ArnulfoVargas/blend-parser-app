@@ -467,6 +467,7 @@ impl ConnectorsDto {
         let shape = match self.shape.as_str() {
             "round" => Shape::Round,
             "square" => Shape::Square,
+            "hexagon" => Shape::Hexagon,
             _ => return Err(AppError::new("error.connectParams")),
         };
         let c = Connectors {

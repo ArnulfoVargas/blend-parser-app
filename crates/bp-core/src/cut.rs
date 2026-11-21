@@ -805,6 +805,29 @@ mod tests {
     }
 
     #[test]
+    fn a_plate_cut_caps_seam_split_geometry_and_preserves_existing_openings() {
+        let mut part = cube([0.0; 3], [10.0; 3]);
+        // An open bottom leaves the low piece open. The high piece still has
+        // a complete section, despite every input triangle owning its vertices.
+        part.tris.drain(..2);
+        part.tri_loops.drain(..2);
+        part.tri_source.drain(..2);
+        let positions = std::mem::take(&mut part.positions);
+        for t in &mut part.tris {
+            *t = t.map(|v| {
+                let i = part.positions.len() as u32;
+                part.positions.push(positions[v as usize]);
+                i
+            });
+        }
+        let [low, high] = split(&part, 2, 5.0, 1e-5);
+        assert!(!closed(&low));
+        assert!(closed(&high));
+        assert!((volume(&high) - 500.0).abs() < 1e-2);
+        assert!(!low.tris.is_empty());
+    }
+
+    #[test]
     fn a_hollow_box_keeps_its_cavity_in_the_cap() {
         // A box with a box-shaped cavity: the inner shell faces inwards.
         let outer = cube([0.0; 3], [10.0; 3]);

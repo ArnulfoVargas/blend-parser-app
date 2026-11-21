@@ -22,6 +22,7 @@ pub enum Kind {
 pub enum Shape {
     Round,
     Square,
+    Hexagon,
 }
 
 /// The connectors of one cut, in final millimetres.
@@ -29,13 +30,13 @@ pub enum Shape {
 pub struct Connectors {
     pub kind: Kind,
     pub shape: Shape,
-    /// Diameter of a round connector, side of a square one.
+    /// Diameter of a round connector, or width across flats of a polygon.
     pub size_mm: f32,
     /// How far a connector goes into each half.
     pub depth_mm: f32,
     /// Gap between a connector and its socket, on each side and at the bottom.
     pub clearance_mm: f32,
-    /// Turn of a square connector about the plane's normal, in degrees.
+    /// Turn of a polygonal connector about the plane's normal, in degrees.
     pub angle_deg: f32,
     /// Centres on the cut plane, in preview coordinates.
     pub at: Vec<Vec3>,
@@ -75,6 +76,7 @@ impl Connectors {
         match self.shape {
             Shape::Round => self.half(grow),
             Shape::Square => self.half(grow) * std::f32::consts::SQRT_2,
+            Shape::Hexagon => self.half(grow) / (std::f32::consts::PI / 6.0).cos(),
         }
     }
 
@@ -83,6 +85,7 @@ impl Connectors {
     pub fn outline(&self, centre: Vec3, u: Vec3, v: Vec3, grow: f32, unit: f32) -> Vec<Vec3> {
         let (n, r, turn) = match self.shape {
             Shape::Round => (ROUND_SIDES, self.half(grow), 0.0),
+            Shape::Hexagon => (6, self.reach(grow), self.angle_deg.to_radians() + std::f32::consts::PI / 6.0),
             Shape::Square => (
                 4,
                 self.half(grow) * std::f32::consts::SQRT_2,

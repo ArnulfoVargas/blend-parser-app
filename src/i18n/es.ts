@@ -889,6 +889,8 @@ export const es = {
   "con.round": "Redondo",
   "con.square": "Cuadrado",
   "con.pinsOn": "Pasadores en",
+  "con.hexagon": "Hexagonal",
+  "con.flatWidth": "Ancho entre caras",
   "con.diameter": "Diámetro",
   "con.side": "Lado",
   "con.depth": "Profundidad",

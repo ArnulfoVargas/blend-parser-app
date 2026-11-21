@@ -7,7 +7,7 @@ export const ROUND_SIDES = 32;
 export interface ConnectorSpec {
   kind: "pin" | "dowel";
   pinsOnA: boolean;
-  shape: "round" | "square";
+  shape: "round" | "square" | "hexagon";
   sizeMm: number;
   depthMm: number;
   clearanceMm: number;
@@ -26,15 +26,15 @@ export function planeBasis(normal: Vec3): [Vec3, Vec3] {
 /** Radius of the circle round a connector's outline grown by `grow` mm. */
 export function reach(spec: ConnectorSpec, grow: number): number {
   const half = spec.sizeMm / 2 + grow;
+  if (spec.shape === "hexagon") return half / Math.cos(Math.PI / 6);
   return spec.shape === "square" ? half * Math.SQRT2 : half;
 }
 
 /** The outline's corners (mm, in plane axes) grown by `grow`, as the backend draws it. */
 export function outline(spec: ConnectorSpec, grow: number): [number, number][] {
-  const square = spec.shape === "square";
-  const n = square ? 4 : ROUND_SIDES;
+  const n = spec.shape === "square" ? 4 : spec.shape === "hexagon" ? 6 : ROUND_SIDES;
   const r = reach(spec, grow);
-  const turn = square ? THREE.MathUtils.degToRad(spec.angleDeg) + Math.PI / 4 : 0;
+  const turn = spec.shape === "round" ? 0 : THREE.MathUtils.degToRad(spec.angleDeg) + Math.PI / n;
   return Array.from({ length: n }, (_, k) => {
     const a = turn + (k / n) * Math.PI * 2;
     return [r * Math.cos(a), r * Math.sin(a)];

@@ -885,6 +885,8 @@ export const en: Catalog = {
   "con.round": "Round",
   "con.square": "Square",
   "con.pinsOn": "Pins on",
+  "con.hexagon": "Hexagonal",
+  "con.flatWidth": "Width across flats",
   "con.diameter": "Diameter",
   "con.side": "Side",
   "con.depth": "Depth",

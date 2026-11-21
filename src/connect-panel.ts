@@ -209,14 +209,14 @@ export class ConnectPanel {
     pressed("data-con-shape", sp.shape);
     pressed("data-con-pins", sp.pinsOnA ? "a" : "b");
     $("#con-pins").hidden = sp.kind !== "pin";
-    $("#con-angle-field").hidden = sp.shape !== "square";
+    $("#con-angle-field").hidden = sp.shape === "round";
     $("#con-lay-field").hidden = sp.kind !== "dowel";
-    $("#con-size-label").textContent = t(sp.shape === "square" ? "con.side" : "con.diameter");
+    $("#con-size-label").textContent = t(sp.shape === "square" ? "con.side" : sp.shape === "hexagon" ? "con.flatWidth" : "con.diameter");
     for (const f of this.fields) if (document.activeElement !== f.input) f.input.value = inputValue(sp[f.key], 2);
     // What the clearance makes of the socket, so the gap is never implicit.
     const socket = sp.sizeMm + 2 * sp.clearanceMm;
     $("#con-socket").textContent = t(sp.kind === "dowel" ? "con.specDowel" : "con.specPin", {
-      mark: sp.shape === "square" ? "□" : "Ø", size: num(sp.sizeMm, 2, false), socket: num(socket, 2, false), deep: num(sp.depthMm + sp.clearanceMm, 2, false),
+      mark: sp.shape === "square" ? "□" : sp.shape === "hexagon" ? "⬡" : "Ø", size: num(sp.sizeMm, 2, false), socket: num(socket, 2, false), deep: num(sp.depthMm + sp.clearanceMm, 2, false),
       length: num(sp.kind === "dowel" ? 2 * sp.depthMm : sp.depthMm, 2, false), half: sp.pinsOnA ? "A" : "B",
     });
     $("#con-socket").dataset.kind = sp.kind;
