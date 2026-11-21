@@ -19,6 +19,7 @@ import {
   type Filament,
   type Filaments,
   type KitContents,
+  type KitPins,
   type KitProgress,
   type PlatePrefs,
   type PrinterProfile,
@@ -1439,6 +1440,32 @@ const syncCore = () => {
   $<HTMLElement>("#core-field").hidden = !(Number($<HTMLInputElement>("#depth").value) > 0);
 };
 $("#depth").addEventListener("input", syncCore);
+const syncPins = () => {
+  $<HTMLElement>("#pin-sizes").hidden = !$<HTMLInputElement>("#zip-pins").checked;
+};
+$("#zip-pins").addEventListener("change", syncPins);
+/** The pins asked for, `null` for none, or `undefined` when a size is out of range (that field marked). */
+const pinOptions = (): KitPins | null | undefined => {
+  if (!$<HTMLInputElement>("#zip-pins").checked) return null;
+  const fields = [
+    ["#pin-diameter", 2, 20],
+    ["#pin-depth", 1, 20],
+    ["#pin-clearance", 0, 1],
+  ] as const;
+  const values: number[] = [];
+  for (const [id, min, max] of fields) {
+    const input = $<HTMLInputElement>(id);
+    const v = Number(input.value);
+    const ok = input.value !== "" && v >= min && v <= max;
+    input.setAttribute("aria-invalid", String(!ok));
+    if (!ok) {
+      input.focus();
+      return undefined;
+    }
+    values.push(v);
+  }
+  return { diameterMm: values[0], depthMm: values[1], clearanceMm: values[2] };
+};
 
 /** The last kit this session wrote: what a new one is estimated from. */
 let lastKit: { pieces: number; bytes: number; quality: KitContents["quality"] } | null = null;
@@ -1482,6 +1509,12 @@ $("#open-zip").addEventListener("click", () => {
     $<HTMLInputElement>("#depth").value = String(last.depthMm);
     $<HTMLInputElement>("#min-piece").value = String(last.minPieceMm3);
     $<HTMLInputElement>("#zip-mix").checked = last.mix ?? false;
+    $<HTMLInputElement>("#zip-pins").checked = !!last.pins;
+    if (last.pins) {
+      $<HTMLInputElement>("#pin-diameter").value = String(last.pins.diameterMm);
+      $<HTMLInputElement>("#pin-depth").value = String(last.pins.depthMm);
+      $<HTMLInputElement>("#pin-clearance").value = String(last.pins.clearanceMm);
+    }
     if (last.contents) {
       $<HTMLInputElement>("#zip-3mf").checked = last.contents.threeMf;
       $<HTMLSelectElement>("#zip-stl").value = last.contents.stl;
@@ -1493,6 +1526,7 @@ $("#open-zip").addEventListener("click", () => {
   const wanted = last ? (last.coreSlot === null ? "" : String(last.coreSlot)) : keep;
   core.value = [...core.options].some((o) => o.value === wanted) ? wanted : "";
   syncCore();
+  syncPins();
   syncZipContents();
   zipDialog.showModal();
 });
@@ -1536,6 +1570,8 @@ $("#export-zip").addEventListener("click", async () => {
     (depthOk ? minPiece : depth).focus();
     return;
   }
+  const pins = pinOptions();
+  if (pins === undefined) return;
   const contents = zipContents();
   if (!(contents.threeMf || contents.guide || contents.text || contents.stl !== "none")) {
     syncZipContents();
@@ -1550,6 +1586,7 @@ $("#export-zip").addEventListener("click", async () => {
     minPieceMm3,
     mix: $<HTMLInputElement>("#zip-mix").checked,
     contents,
+    pins,
   };
   zipDialog.close();
   if (!(await confirmOversize())) return;
@@ -1564,7 +1601,13 @@ $("#export-zip").addEventListener("click", async () => {
   try {
     const r = await api.exportColorZip(path, options, currentLang());
     lastKit = { pieces: r.pieces, bytes: r.bytes, quality: contents.quality };
-    const done = t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path, size: size(r.bytes) });
+    const done = [
+      t("zip.saved", { count: r.pieces, n: r.pieces, plates: r.plates, path, size: size(r.bytes) }),
+      r.pins ? t("zip.pinsMade", { count: r.pins, n: r.pins }) : "",
+      r.unpinned ? t("zip.unpinned", { count: r.unpinned, n: r.unpinned }) : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
     // Anything to look at is said, never left for the user to find.
     const notes = [
       r.oversize ? t("zip.oversize", { count: r.oversize, n: r.oversize }) : "",

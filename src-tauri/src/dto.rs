@@ -21,6 +21,9 @@ pub struct KitDto {
     /// Pieces to look at before printing them, and regions too thin to make a piece.
     pub review: usize,
     pub dropped: usize,
+    /// Pins keying pieces together, and joins with no room for one.
+    pub pins: usize,
+    pub unpinned: usize,
     /// Size of the ZIP written.
     pub bytes: u64,
 }

@@ -58,6 +58,20 @@ pub struct KitSettings {
     /// What the ZIP holds.
     #[serde(default)]
     pub contents: KitContents,
+    /// Pins keying the pieces together; `None` leaves them to glue.
+    #[serde(default)]
+    pub pins: Option<KitPins>,
+}
+
+/// Size of the pins that key the kit's pieces together (see `bp_core::PinParams`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitPins {
+    pub diameter_mm: f32,
+    /// How far a pin stands out of its piece.
+    pub depth_mm: f32,
+    /// Gap round a pin in its socket.
+    pub clearance_mm: f32,
 }
 
 /// What goes in the kit's ZIP besides its summary, and how sharp its pictures are.

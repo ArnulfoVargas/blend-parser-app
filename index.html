@@ -464,6 +464,24 @@
         <p class="help" id="min-piece-help" data-i18n="zip.minPieceHelp"></p>
       </div>
       <div class="zip-mix">
+        <label class="check"><input type="checkbox" id="zip-pins" aria-describedby="zip-pins-help"> <span data-i18n="zip.pins">Espigas para encajar las piezas</span></label>
+        <p class="help" id="zip-pins-help" data-i18n="zip.pinsHelp"></p>
+        <div class="zip-pins" id="pin-sizes" hidden>
+          <div class="field">
+            <label for="pin-diameter" data-i18n="zip.pinDiameter">Diámetro</label>
+            <div class="field__unit"><input class="input" id="pin-diameter" type="number" inputmode="decimal" min="2" max="20" step="0.5" value="5"><span>mm</span></div>
+          </div>
+          <div class="field">
+            <label for="pin-depth" data-i18n="zip.pinDepth">Alto</label>
+            <div class="field__unit"><input class="input" id="pin-depth" type="number" inputmode="decimal" min="1" max="20" step="0.5" value="4"><span>mm</span></div>
+          </div>
+          <div class="field">
+            <label for="pin-clearance" data-i18n="zip.pinClearance">Holgura</label>
+            <div class="field__unit"><input class="input" id="pin-clearance" type="number" inputmode="decimal" min="0" max="1" step="0.05" value="0.15"><span>mm</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="zip-mix">
         <label class="check"><input type="checkbox" id="zip-mix" aria-describedby="zip-mix-help"> <span data-i18n="zip.mix">Mezclar colores en una placa</span></label>
         <p class="help" id="zip-mix-help" data-i18n="zip.mixHelp"></p>
       </div>

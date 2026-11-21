@@ -109,6 +109,8 @@ h2 { font-size: var(--text-lg); }
 .zip-contents { display: flex; flex-direction: column; gap: var(--space-xs); margin: 0; padding: 0; border: 0; }
 .zip-contents legend { margin-bottom: var(--space-xs); font-weight: 500; }
 .zip-mix { display: flex; flex-direction: column; gap: var(--space-2xs); }
+.zip-pins { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-xs); }
+.zip-pins[hidden] { display: none; }
 
 /* Ajustes */
 .settings { display: flex; flex-direction: column; gap: var(--space-lg); transition: opacity var(--dur-short) var(--ease-out); }
