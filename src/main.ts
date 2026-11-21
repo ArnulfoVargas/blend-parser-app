@@ -37,6 +37,7 @@ import { CutPanel } from "./cut-panel";
 import { CutReview } from "./cut-review";
 import { SeparatePanel } from "./separate-panel";
 import { ConnectPanel } from "./connect-panel";
+import { SplitPanel } from "./split-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -432,6 +433,42 @@ const connectPanel = new ConnectPanel({
 });
 viewer.addOverlay(connectPanel.preview.group);
 
+// ---- splitting to fit the printer -------------------------------------------------------
+
+const splitPanel = new SplitPanel({
+  summary: () => summary,
+  box: () => viewer.modelBox(),
+  split: async (plan) => {
+    measured = [];
+    let done = false;
+    await apply(() => api.splitForPrinter(plan, t("con.dowelName")), () => {
+      done = true;
+      setTool("orbit");
+      setBed(true);
+      viewer.frameAll();
+      const plates = Math.max(1, summary?.plate.plates.length ?? 1);
+      toast(t("spl.done", { count: summary?.plate.objects ?? 0, n: summary?.plate.objects ?? 0, plates }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  // Shrinking is the user's call, never the split's.
+  shrink: () => void apply(() => api.fitToPlate(), () => toast(t("spl.shrunk"))),
+  close: () => setTool("orbit"),
+  redraw: () => viewer.requestRender(),
+  error: errText,
+  colours: (() => {
+    const css = (name: string) => {
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "gray";
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+      return new THREE.Color(r / 255, g / 255, b / 255);
+    };
+    return [css("--axis-x"), css("--axis-y"), css("--axis-z")];
+  })(),
+});
+viewer.addOverlay(splitPanel.planes.group);
+
 // ---- separating pieces -----------------------------------------------------------------
 
 const separatePanel = new SeparatePanel({
@@ -477,12 +514,20 @@ async function reloadMesh(frame = false) {
   syncBrush();
   syncMeasure();
   separatePanel.meshChanged();
+  splitPanel.meshChanged();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
 
 /** Why the model does not fit, the first problem first; null when it fits. */
 function fitProblem(s: Summary): string | null {
+  // Split across plates, the first plate that does not fit speaks, with its number.
+  const bad = s.plate.plates.findIndex((g) => !g.fits || !g.fitsHeight);
+  if (bad >= 0) {
+    const g = s.plate.plates[bad];
+    const one = fitProblem({ ...s, sizeMm: g.sizeMm, fitsHeight: g.fitsHeight, plate: { ...s.plate, ...g, plates: [] } });
+    return one && t("fit.onPlate", { n: bad + 1, problem: one });
+  }
   const [x, y, z] = s.sizeMm;
   const p = s.plate;
   const plate = dims([p.area.x1 - p.area.x0, p.area.y1 - p.area.y0], 0);
@@ -619,6 +664,7 @@ function render(s: Summary) {
   undoBtn.disabled = !s.canUndo;
   undoBtn.title = s.undoLabel ? t("undo.title", { what: t(`undo.${s.undoLabel}`) }) : t("undo.nothing");
   bind("exportLabel", t("export.label"));
+  for (const id of ["#export", "#open-zip"]) $(id).setAttribute("aria-disabled", String(s.parts.length === 0));
   viewer.setPalette(s.slots.map((x) => x.hex));
   syncBrush();
   if (wasteDialog.open) fillFlushTable(s);
@@ -683,7 +729,9 @@ function renderSize(s: Summary) {
   $<HTMLButtonElement>("#size-reset").disabled = reset;
 
   const problem = fitProblem(s);
-  bind("bedFit", problem ?? t("fit.ok", { plate: dims([s.bedMm[0], s.bedMm[1]], 0), max: nf(s.maxHeightMm) }));
+  bind("bedFit", problem ?? (s.plate.plates.length > 1
+    ? t("fit.okPlates", { count: s.plate.plates.length, n: s.plate.plates.length })
+    : t("fit.ok", { plate: dims([s.bedMm[0], s.bedMm[1]], 0), max: nf(s.maxHeightMm) })));
   bind("fitBanner", problem ?? "");
   $<HTMLDivElement>("#fit-banner").hidden = problem === null;
   app.classList.toggle("is-oversize", problem !== null);
@@ -740,9 +788,92 @@ $("#size-undo").addEventListener("click", () => void apply(() => api.undoSize())
 // ---- plate and tower --------------------------------------------------------------------
 
 const plateSvg = $<SVGSVGElement & HTMLElement>("#plate-view");
+const projectPlate = $<HTMLSelectElement>("#project-plate");
+const plateObject = $<HTMLSelectElement>("#plate-object");
+const plateDestination = $<HTMLSelectElement>("#plate-destination");
+let activePlate = 0;
+
+const plateName = (index: number) => t("plates.name", { n: nf(index + 1) });
+
+function setOptions(select: HTMLSelectElement, values: [number, string][], preferred = select.value) {
+  select.replaceChildren(...values.map(([id, label]) => new Option(label, String(id))));
+  if (values.some(([id]) => String(id) === preferred)) select.value = preferred;
+  select.disabled = values.length === 0;
+}
+
+function renderPlateControls(s: Summary) {
+  const count = Math.max(1, s.plate.plates.length);
+  activePlate = Math.min(activePlate, count - 1);
+  const plates: [number, string][] = Array.from({ length: count }, (_, i) => [i, plateName(i)]);
+  setOptions(projectPlate, plates, String(activePlate));
+
+  const objects = new Map<number, string>();
+  for (const part of s.parts) {
+    if (part.plate === activePlate && !objects.has(part.object)) objects.set(part.object, part.name);
+  }
+  const options: [number, string][] = [...objects].map(([id, name], index) => [
+    id, name ? t("plates.namedObject", { n: nf(index + 1), name }) : t("plates.unnamedObject", { n: nf(index + 1) }),
+  ]);
+  setOptions(plateObject, options);
+  setOptions(plateDestination, plates.filter(([i]) => i !== activePlate));
+  $<HTMLButtonElement>("#plate-move").disabled = plateObject.disabled || plateDestination.disabled;
+  $<HTMLButtonElement>("#plate-clear").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-clone").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-arrange").disabled = s.parts.length === 0;
+}
+
+projectPlate.addEventListener("change", () => {
+  activePlate = Number(projectPlate.value);
+  if (summary) renderPlate(summary);
+});
+$("#plate-add").addEventListener("click", () => {
+  void apply(async () => {
+    const s = await api.addPlate();
+    activePlate = Math.max(0, s.plate.plates.length - 1);
+    return s;
+  });
+});
+$("#plate-move").addEventListener("click", () => {
+  const object = Number(plateObject.value);
+  const destination = Number(plateDestination.value);
+  void apply(async () => {
+    const s = await api.moveToPlate(object, destination);
+    activePlate = destination;
+    return s;
+  });
+});
+function readPlateGap(): number | null {
+  const input = $<HTMLInputElement>("#plate-arrange-gap");
+  const n = input.valueAsNumber;
+  const valid = n >= 0 && n <= 50;
+  input.setAttribute("aria-invalid", String(!valid));
+  if (valid) return n;
+  input.focus();
+  toast(t("error.splitGap", { min: nf(0), max: nf(50) }), "error");
+  return null;
+}
+
+$("#plate-clone").addEventListener("click", () => {
+  const object = Number(plateObject.value);
+  const gap = $<HTMLInputElement>("#plate-arrange-clones").checked ? readPlateGap() : undefined;
+  if (gap === null) return;
+  void apply(() => api.cloneObject(object, t("plates.copy"), gap), () => viewer.frameAll());
+});
+$("#plate-arrange").addEventListener("click", () => {
+  const gap = readPlateGap();
+  if (gap === null) return;
+  void apply(() => api.arrangePlates(gap), () => viewer.frameAll());
+});
+$("#plate-clear").addEventListener("click", async () => {
+  const plate = activePlate;
+  if (await ask(t("plates.confirmClear", { plate: plateName(plate) }), { title: t("plates.clear"), kind: "warning" })) {
+    await apply(() => api.clearPlate(plate));
+  }
+});
 
 function renderPlate(s: Summary) {
-  const p = s.plate;
+  renderPlateControls(s);
+  const p = { ...s.plate, ...s.plate.plates[activePlate] };
   const a = p.area;
   const pad = Math.max(a.x1 - a.x0, a.y1 - a.y0) * 0.03;
   const [w, h] = [a.x1 - a.x0, a.y1 - a.y0];
@@ -1147,7 +1278,7 @@ async function confirmOversize(): Promise<boolean> {
 
 $("#export").addEventListener("click", async () => {
   const btn = $<HTMLButtonElement>("#export");
-  if (app.dataset.state !== "ready" || !summary || btn.getAttribute("aria-busy") === "true") return;
+  if (app.dataset.state !== "ready" || !summary?.parts.length || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
   const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
   if (!path) return;
@@ -1168,7 +1299,7 @@ $("#export").addEventListener("click", async () => {
 
 const zipDialog = $<HTMLDialogElement>("#zip-dialog");
 $("#open-zip").addEventListener("click", () => {
-  if (app.dataset.state === "ready") zipDialog.showModal();
+  if (app.dataset.state === "ready" && summary?.parts.length) zipDialog.showModal();
 });
 $("#export-zip").addEventListener("click", async () => {
   if (!summary) return;
@@ -1546,10 +1677,13 @@ function setView(v: View) {
 function setTool(tool: Tool) {
   app.dataset.tool = tool;
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
+  // A short view scrolls the shelf: the tool in use stays in sight.
+  document.querySelector<HTMLButtonElement>(`#toolbar button[data-tool="${tool}"]`)?.scrollIntoView({ block: "nearest" });
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
   if (tool === "separate") separatePanel.open(); else separatePanel.close();
   if (tool === "connect") connectPanel.open(); else connectPanel.close();
+  if (tool === "split") splitPanel.open(); else splitPanel.close();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
@@ -1629,6 +1763,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "c") setTool("section");
   else if (e.key === "d") setTool("separate");
   else if (e.key === "j") setTool("connect");
+  else if (e.key === "k") setTool("split");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
@@ -1636,7 +1771,7 @@ window.addEventListener("keydown", (e) => {
     setSection(null);
     setTool("orbit");
   }
-  else if (e.key === "Escape" && app.dataset.tool === "separate") setTool("orbit");
+  else if (e.key === "Escape" && (app.dataset.tool === "separate" || app.dataset.tool === "split")) setTool("orbit");
   else if (e.key === "Escape" && measured.length) {
     measured = [];
     syncMeasure();
@@ -1767,6 +1902,7 @@ onLangChange(() => {
   if (summary) render(summary);
   separatePanel.update();
   connectPanel.update();
+  splitPanel.update();
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });

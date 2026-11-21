@@ -328,6 +328,7 @@ fn read_dump(dir: &Path) -> Result<ImportResult, BlendError> {
             uv_layers,
             color_layers,
             object: 0,
+            plate: 0,
         });
     }
     if parts.is_empty() {
@@ -423,6 +424,7 @@ mod tests {
         let parts = project.export_parts();
         let filaments: Vec<String> = project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let model = bp_3mf::Model {
+            plate_count: 1,
             name: "spider",
             parts: parts
                 .iter()
@@ -432,6 +434,7 @@ mod tests {
                     tris: &p.tris,
                     paint: &p.paint,
                     object: p.object,
+                    plate: p.plate,
                 })
                 .collect(),
             filaments,

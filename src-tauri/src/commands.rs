@@ -447,6 +447,190 @@ pub async fn cut_connected(
     .await
 }
 
+/// What a split for the printer asks for, as the UI sends it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitPlanDto {
+    /// Cut positions along X, Y and Z in preview coordinates.
+    cuts: [Vec<f32>; 3],
+    lay_on_cut: bool,
+    gap_mm: f32,
+    /// Dowels across the joints: "round" or "square", and their sizes.
+    dowels: Option<SplitDowelsDto>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitDowelsDto {
+    shape: String,
+    size_mm: f32,
+    depth_mm: f32,
+    clearance_mm: f32,
+}
+
+impl SplitPlanDto {
+    fn core(self) -> CmdResult<(bp_core::SplitPlan, f32)> {
+        let dowels = match self.dowels {
+            None => None,
+            Some(d) => Some(
+                ConnectorsDto {
+                    kind: "dowel".into(),
+                    pins_on_a: true,
+                    shape: d.shape,
+                    size_mm: d.size_mm,
+                    depth_mm: d.depth_mm,
+                    clearance_mm: d.clearance_mm,
+                    angle_deg: 0.0,
+                    at: vec![],
+                }
+                .core()?,
+            ),
+        };
+        in_range(self.gap_mm, 0.0..=50.0, "error.splitGap")?;
+        Ok((bp_core::SplitPlan { cuts: self.cuts, lay_on_cut: self.lay_on_cut, dowels }, self.gap_mm))
+    }
+}
+
+/// The room every plate has for pieces: centred, clear of the margin, the
+/// excluded zones and the tower, and as tall as the printer prints.
+fn plate_room(d: &Document, prefs: &Prefs, gap_mm: f32, offset_mm: [f32; 2]) -> bp_core::fit::Room {
+    let stats = d.project.stats();
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
+    let reserve = bp_3mf::Reserve {
+        tower: prefs.plate.tower && plate.needs_tower,
+        tower_mm: plate.tower_mm,
+        tower_gap_mm: prefs.plate.tower_gap_mm,
+        margin_mm: prefs.plate.margin_mm,
+    };
+    bp_core::fit::Room {
+        area_mm: bp_3mf::plate::centred_room_at(&d.printer, &reserve, offset_mm),
+        height_mm: d.printer.max_height_mm(),
+        gap_mm,
+    }
+}
+
+fn split_error(e: bp_core::SplitError) -> AppError {
+    match e {
+        bp_core::SplitError::NoCuts => AppError::new("error.splitNoCuts"),
+        bp_core::SplitError::Params => AppError::new("error.splitParams"),
+        bp_core::SplitError::Cut(e) => cut_error(e),
+        bp_core::SplitError::DoesNotFit(_) => AppError::new("error.splitDoesNotFit"),
+    }
+}
+
+/// Where to cut so every piece fits the printer, and the room it was worked out for.
+#[tauri::command]
+pub async fn propose_split(app: AppHandle, gap_mm: f32) -> CmdResult<dto::SplitProposalDto> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, [0.0; 2]);
+        let stats = d.project.stats();
+        Ok(dto::SplitProposalDto {
+            cuts: d.project.propose_split(&room),
+            room_mm: room.area_mm,
+            height_mm: room.height_mm,
+            size_mm: stats.size_mm,
+        })
+    })
+    .await
+}
+
+/// What a split would make, without changing the document.
+#[tauri::command]
+pub async fn preview_split(app: AppHandle, plan: SplitPlanDto) -> CmdResult<dto::SplitReportDto> {
+    let (plan, gap) = plan.core()?;
+    let (project, room) =
+        with_doc(app, move |d, prefs| Ok((d.project.clone(), plate_room(d, prefs, gap, [0.0; 2])))).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        project.preview_split(&plan, &room).map(dto::split_report).map_err(split_error)
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Splits the model into pieces that fit and shares them out across plates; one undoable step.
+#[tauri::command]
+pub async fn split_for_printer(app: AppHandle, plan: SplitPlanDto, dowel_label: String) -> CmdResult<Summary> {
+    let (plan, gap) = plan.core()?;
+    let label: String = dowel_label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap, [0.0; 2]);
+        d.project.split_for_printer(&plan, &room, &label).map_err(split_error)?;
+        // Each plate's pieces go on its centre.
+        d.offset_mm = [0.0; 2];
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+fn plate_edit_error(error: bp_core::PlateEditError) -> AppError {
+    AppError::new(match error {
+        bp_core::PlateEditError::Plate => "error.plateMissing",
+        bp_core::PlateEditError::Object => "error.plateObjectMissing",
+        bp_core::PlateEditError::ObjectLimit => "error.plateObjectLimit",
+        bp_core::PlateEditError::NoRoom => "error.noRoom",
+        bp_core::PlateEditError::DoesNotFit => "error.plateArrangeOversize",
+    })
+}
+
+#[tauri::command]
+pub async fn add_plate(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, |d, prefs| {
+        d.project.add_plate();
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn move_to_plate(app: AppHandle, object: u32, plate: u32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.move_to_plate(object, plate, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clone_object(app: AppHandle, object: u32, label: String, gap_mm: Option<f32>) -> CmdResult<Summary> {
+    if let Some(gap) = gap_mm {
+        in_range(gap, 0.0..=50.0, "error.splitGap")?;
+    }
+    let label: String = label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let width = d.printer.bed_mm().0;
+        if let Some(gap) = gap_mm {
+            let room = plate_room(d, prefs, gap, d.offset_mm);
+            d.project.clone_and_arrange(object, &label, &room, width)
+        } else {
+            d.project.clone_object(object, &label, width)
+        }
+        .map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn arrange_plates(app: AppHandle, gap_mm: f32) -> CmdResult<Summary> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, d.offset_mm);
+        d.project.arrange_plates(&room, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clear_plate(app: AppHandle, plate: u32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.clear_plate(plate).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {
@@ -726,6 +910,9 @@ pub async fn export_color_zip(
     in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
     with_doc(app, move |d, _| {
         let pieces = d.project.color_pieces(thickness_mm, main_solid);
+        if pieces.is_empty() {
+            return Err(AppError::new("error.platesEmpty"));
+        }
         let hexes: Vec<String> =
             pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
         let files: Vec<bp_3mf::ColorFile> = pieces
@@ -746,10 +933,14 @@ pub async fn export_color_zip(
 pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
     with_doc(app, move |d, prefs| {
         let parts = d.project.export_parts();
+        if parts.is_empty() {
+            return Err(AppError::new("error.platesEmpty"));
+        }
         let filaments = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let (volumes_mm3, _) = dto::flush_matrix(d);
         let model = bp_3mf::Model {
+            plate_count: d.project.plate_count(),
             name: &name,
             parts: parts
                 .iter()
@@ -759,6 +950,7 @@ pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
                     tris: &p.tris,
                     paint: &p.paint,
                     object: p.object,
+                    plate: p.plate,
                 })
                 .collect(),
             filaments,
@@ -788,8 +980,9 @@ fn printability_for_doc(
     let mut report = project.printability(params);
     report.printer = Some(d.printer.profile.id.clone());
     let stats = project.stats();
-    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
-    let fits = plate.fits && stats.size_mm[2] <= d.printer.max_height_mm();
+    let size = dto::printed_size(project, &stats);
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, size);
+    let fits = plate.fits && size[2] <= d.printer.max_height_mm();
     report.checks.push(bp_core::printability::Check::new(
         "buildVolume",
         "checked",
