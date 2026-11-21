@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::geom::{self, Vec3};
-use crate::split::{Piece, Split};
+use crate::split::{Piece, PinJoin, Split};
 
 pub type Mat3 = [[f32; 3]; 3];
 
@@ -74,8 +74,20 @@ impl Bed {
 
 pub struct Step {
     pub piece: usize,
-    /// Pieces already in place that this one is glued to, most contact first.
+    /// Pieces of its sub-assembly already in place that this one is glued to,
+    /// most contact first.
     pub joins: Vec<usize>,
+    pub group: usize,
+}
+
+/// A sub-assembly: pieces that touch, built on their own and then glued to
+/// the groups before it. Small kits are a single group.
+pub struct Group {
+    /// Its steps, in `Kit::steps`.
+    pub steps: std::ops::Range<usize>,
+    /// Where it is glued to the groups before it: (its piece, a piece already
+    /// in place), most contact first. Empty for the first group.
+    pub joins: Vec<(usize, usize)>,
 }
 
 pub struct Kit {
@@ -83,11 +95,18 @@ pub struct Kit {
     pub placed: Vec<Placed>,
     pub plates: Vec<Plate>,
     pub steps: Vec<Step>,
+    /// Sub-assemblies, in the order they are built and joined.
+    pub groups: Vec<Group>,
     pub bed: Bed,
     pub voxel_mm: f32,
     /// Crumbs that went to a neighbour, and regions too thin to make a piece.
     pub merged: usize,
     pub dropped: usize,
+    /// Pins keying pieces together, and joins with no room for one.
+    pub pins: Vec<PinJoin>,
+    pub unpinned: usize,
+    /// When asked for, how many pieces have the model's own surface outside.
+    pub exact_skin: Option<usize>,
 }
 
 /// Why a piece needs a look before printing it.
@@ -149,16 +168,46 @@ const MIN_JOINT_MM2: f32 = 2.0;
 pub fn kit(split: Split, bed: Bed) -> Kit {
     let mut placed: Vec<Placed> = split.pieces.iter().map(orient).collect();
     let plates = pack(&split.pieces, &mut placed, &bed);
-    let steps = assembly(&split.pieces);
+    let (steps, groups) = assembly(&split.pieces);
     Kit {
         pieces: split.pieces,
         placed,
         plates,
         steps,
+        groups,
         bed,
         voxel_mm: split.voxel_mm,
         merged: split.merged,
         dropped: split.dropped,
+        pins: split.pins,
+        unpinned: split.unpinned,
+        exact_skin: split.exact_skin,
+    }
+}
+
+impl Kit {
+    /// The pins between pieces `a` and `b`, either way round.
+    pub fn pins_between(&self, a: usize, b: usize) -> impl Iterator<Item = &PinJoin> {
+        self.pins.iter().filter(move |p| (p.pin, p.socket) == (a, b) || (p.pin, p.socket) == (b, a))
+    }
+
+    /// For a step adding `piece` onto `joins`: the joined pieces whose pins
+    /// point another way than the first one's, so it cannot go onto them all at once.
+    pub fn crossed_pins(&self, piece: usize, joins: &[usize]) -> Vec<usize> {
+        let mut first: Option<Vec3> = None;
+        let mut crossed = vec![];
+        for &j in joins {
+            for p in self.pins_between(piece, j) {
+                // The way the new piece moves to go on.
+                let along = if p.socket == piece { p.axis } else { geom::scale(p.axis, -1.0) };
+                match first {
+                    None => first = Some(along),
+                    Some(f) if geom::dot(f, along) < 0.9 && !crossed.contains(&j) => crossed.push(j),
+                    _ => {}
+                }
+            }
+        }
+        crossed
     }
 }
 
@@ -556,33 +605,225 @@ fn plate(ids: Vec<usize>, pieces: &[Piece], placed: &[Placed], bed: &Bed, tower:
     Plate { slots: count.into_iter().map(|c| c.0).collect(), pieces: ids, occupancy: (used / free).min(1.0) }
 }
 
-/// Starts from the largest piece and keeps adding the piece with the most
-/// contact with what is already built; a piece touching nothing built comes
-/// last, starting its own group.
-fn assembly(pieces: &[Piece]) -> Vec<Step> {
+/// Kits up to this many pieces are built as one; larger ones in sub-assemblies.
+const ONE_GROUP_MAX: usize = 18;
+/// Joints between sub-assemblies a step names, at most.
+const GROUP_JOINS: usize = 4;
+
+/// Builds the kit in sub-assemblies of pieces that touch (one for small
+/// kits), each grown from its largest piece; then joins them, each group to
+/// the ones it touches most.
+fn assembly(pieces: &[Piece]) -> (Vec<Step>, Vec<Group>) {
     let n = pieces.len();
-    let mut done = vec![false; n];
-    let mut touch = vec![0.0f32; n];
-    let mut steps = Vec::with_capacity(n);
-    while steps.len() < n {
-        let next = (0..n)
-            .filter(|&i| !done[i])
-            .max_by(|&a, &b| touch[a].total_cmp(&touch[b]).then(pieces[a].volume_mm3.total_cmp(&pieces[b].volume_mm3)))
-            .unwrap_or_default();
-        let joins =
-            pieces[next].contacts.iter().filter(|&&(j, a)| done[j] && a >= MIN_JOINT_MM2).map(|&(j, _)| j).collect();
-        done[next] = true;
-        for &(j, a) in &pieces[next].contacts {
-            touch[j] += a;
+    let contact = |a: usize, b: usize| pieces[a].contacts.iter().find(|c| c.0 == b).map_or(0.0, |c| c.1);
+    let groups = clusters(pieces);
+    // Join order: the largest group first, then the one touching the built groups most.
+    let mut order: Vec<usize> = vec![];
+    let mut in_place = vec![false; groups.len()];
+    let group_of: Vec<usize> = {
+        let mut g = vec![0; n];
+        for (k, ids) in groups.iter().enumerate() {
+            for &i in ids {
+                g[i] = k;
+            }
         }
-        steps.push(Step { piece: next, joins });
+        g
+    };
+    while order.len() < groups.len() {
+        let touch = |k: usize| -> f32 {
+            groups[k]
+                .iter()
+                .flat_map(|&i| pieces[i].contacts.iter())
+                .filter(|c| in_place[group_of[c.0]] && c.1 >= MIN_JOINT_MM2)
+                .map(|c| c.1)
+                .sum()
+        };
+        let size = |k: usize| groups[k].iter().map(|&i| pieces[i].volume_mm3).sum::<f32>();
+        let next = (0..groups.len())
+            .filter(|&k| !in_place[k])
+            .max_by(|&a, &b| touch(a).total_cmp(&touch(b)).then(size(a).total_cmp(&size(b))).then(b.cmp(&a)))
+            .unwrap_or_default();
+        in_place[next] = true;
+        order.push(next);
     }
-    steps
+
+    let mut steps = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(groups.len());
+    let mut placed = vec![false; n];
+    for (g, &k) in order.iter().enumerate() {
+        let ids = &groups[k];
+        let mut joins: Vec<(usize, usize, f32)> = ids
+            .iter()
+            .flat_map(|&i| pieces[i].contacts.iter().map(move |c| (i, c.0, c.1)))
+            .filter(|&(_, j, a)| placed[j] && a >= MIN_JOINT_MM2)
+            .collect();
+        joins.sort_by(|a, b| b.2.total_cmp(&a.2));
+        joins.truncate(GROUP_JOINS);
+        let start = steps.len();
+        let mut done = vec![false; n];
+        let mut touch = vec![0.0f32; n];
+        for _ in 0..ids.len() {
+            let next = ids
+                .iter()
+                .copied()
+                .filter(|&i| !done[i])
+                .max_by(|&a, &b| {
+                    // Ties go to the lower label, so equal pieces build in order.
+                    touch[a]
+                        .total_cmp(&touch[b])
+                        .then(pieces[a].volume_mm3.total_cmp(&pieces[b].volume_mm3))
+                        .then(b.cmp(&a))
+                })
+                .unwrap_or_default();
+            let mut with: Vec<usize> = pieces[next]
+                .contacts
+                .iter()
+                .filter(|&&(j, a)| done[j] && a >= MIN_JOINT_MM2)
+                .map(|&(j, _)| j)
+                .collect();
+            with.sort_by(|&a, &b| contact(next, b).total_cmp(&contact(next, a)));
+            done[next] = true;
+            for &(j, a) in &pieces[next].contacts {
+                touch[j] += a;
+            }
+            steps.push(Step { piece: next, joins: with, group: g });
+        }
+        for &i in ids {
+            placed[i] = true;
+        }
+        out.push(Group { steps: start..steps.len(), joins: joins.into_iter().map(|(a, b, _)| (a, b)).collect() });
+    }
+    (steps, out)
+}
+
+/// Pieces in sub-assemblies of about `√n · 1.6` (8 to 16) that touch: each
+/// grows from the largest piece left through the strongest contacts; a group
+/// too small goes to the neighbour it touches most.
+fn clusters(pieces: &[Piece]) -> Vec<Vec<usize>> {
+    let n = pieces.len();
+    if n <= ONE_GROUP_MAX {
+        return vec![(0..n).collect()];
+    }
+    let target = ((n as f32).sqrt() * 1.6).round().clamp(8.0, 16.0) as usize;
+    let mut by_size: Vec<usize> = (0..n).collect();
+    by_size.sort_by(|&a, &b| pieces[b].volume_mm3.total_cmp(&pieces[a].volume_mm3));
+    let mut group = vec![usize::MAX; n];
+    let mut groups: Vec<Vec<usize>> = vec![];
+    for &seed in &by_size {
+        if group[seed] != usize::MAX {
+            continue;
+        }
+        let k = groups.len();
+        let mut ids = vec![seed];
+        group[seed] = k;
+        let mut touch: HashMap<usize, f32> = HashMap::new();
+        loop {
+            for &(j, a) in &pieces[*ids.last().unwrap_or(&seed)].contacts {
+                if group[j] == usize::MAX && a >= MIN_JOINT_MM2 {
+                    *touch.entry(j).or_default() += a;
+                }
+            }
+            if ids.len() >= target {
+                break;
+            }
+            let Some((&next, _)) = touch.iter().max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0))) else { break };
+            touch.remove(&next);
+            group[next] = k;
+            ids.push(next);
+        }
+        groups.push(ids);
+    }
+    // Fold small groups into the neighbour they touch most.
+    loop {
+        let small =
+            (0..groups.len()).filter(|&k| !groups[k].is_empty() && groups[k].len() < target / 3).find_map(|k| {
+                let mut best: Option<(usize, f32)> = None;
+                for &i in &groups[k] {
+                    for &(j, a) in &pieces[i].contacts {
+                        let o = group[j];
+                        if o != k && a >= MIN_JOINT_MM2 {
+                            let total = a + best.filter(|b| b.0 == o).map_or(0.0, |b| b.1);
+                            if best.is_none_or(|b| total > b.1) {
+                                best = Some((o, total));
+                            }
+                        }
+                    }
+                }
+                best.map(|b| (k, b.0))
+            });
+        let Some((from, to)) = small else { break };
+        let moved = std::mem::take(&mut groups[from]);
+        for &i in &moved {
+            group[i] = to;
+        }
+        groups[to].extend(moved);
+    }
+    groups.retain(|g| !g.is_empty());
+    groups
+}
+
+/// The triangles of `a` lying on `b`'s surface, within `tol` mm: where glue goes.
+pub fn contact_faces(a: &Piece, b: &Piece, tol: f32) -> Vec<usize> {
+    let cell = tol.max(1e-3) * 4.0;
+    let key = |p: Vec3| p.map(|x| (x / cell).floor() as i32);
+    let mut grid: HashMap<[i32; 3], Vec<usize>> = HashMap::new();
+    for (t, tri) in b.tris.iter().enumerate() {
+        let c = tri.map(|v| b.positions[v as usize]);
+        let lo = key(std::array::from_fn(|k| c[0][k].min(c[1][k]).min(c[2][k]) - tol));
+        let hi = key(std::array::from_fn(|k| c[0][k].max(c[1][k]).max(c[2][k]) + tol));
+        for x in lo[0]..=hi[0] {
+            for y in lo[1]..=hi[1] {
+                for z in lo[2]..=hi[2] {
+                    grid.entry([x, y, z]).or_default().push(t);
+                }
+            }
+        }
+    }
+    let normal = |c: [Vec3; 3]| geom::normalize(geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0])));
+    a.tris
+        .iter()
+        .enumerate()
+        .filter(|(_, tri)| {
+            let c = tri.map(|v| a.positions[v as usize]);
+            let mid = geom::scale(geom::add(geom::add(c[0], c[1]), c[2]), 1.0 / 3.0);
+            let na = normal(c);
+            grid.get(&key(mid)).is_some_and(|ts| {
+                ts.iter().any(|&t| {
+                    let d = b.tris[t].map(|v| b.positions[v as usize]);
+                    let nb = normal(d);
+                    // Facing each other, in the same plane, inside the triangle.
+                    geom::dot(na, nb) < -0.7 && geom::dot(geom::sub(mid, d[0]), nb).abs() <= tol && {
+                        let inside = |p: Vec3, q: Vec3| {
+                            geom::dot(geom::cross(geom::sub(q, p), geom::sub(mid, p)), nb)
+                                >= -tol * geom::len(geom::sub(q, p))
+                        };
+                        inside(d[0], d[1]) && inside(d[1], d[2]) && inside(d[2], d[0])
+                    }
+                })
+            })
+        })
+        .map(|(t, _)| t)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crossed_pins_are_the_ones_that_point_another_way() {
+        let mut k = kit(Split::default(), Bed::plain(100.0, 100.0));
+        k.pins = vec![
+            // Piece 0 slides down onto 1 and onto 2: the same way.
+            PinJoin { pin: 1, socket: 0, axis: [0.0, 0.0, 1.0] },
+            PinJoin { pin: 2, socket: 0, axis: [0.0, 0.0, 1.0] },
+            // ...but onto 3 sideways.
+            PinJoin { pin: 0, socket: 3, axis: [1.0, 0.0, 0.0] },
+        ];
+        assert!(k.crossed_pins(0, &[1, 2]).is_empty());
+        assert_eq!(k.crossed_pins(0, &[1, 3]), vec![3]);
+        assert_eq!(k.pins_between(3, 0).count(), 1);
+    }
 
     #[test]
     fn check_names_what_to_look_at() {
@@ -603,7 +844,8 @@ mod tests {
             flat,
             piece([0.0; 3], [300.0, 300.0, 5.0]),
         ];
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(256.0, 256.0));
+        let k =
+            kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, Bed::plain(256.0, 256.0));
         let issues = check(&k, 0.4);
         assert!(issues[0].is_empty(), "{:?}", issues[0]);
         assert!(matches!(issues[1].as_slice(), [Issue::Thin(t)] if (*t - 0.6).abs() < 1e-3), "{:?}", issues[1]);
@@ -633,7 +875,8 @@ mod tests {
     #[test]
     fn plates_hold_one_colour_and_stay_on_the_bed() {
         let pieces: Vec<Piece> = (0..12).map(|i| piece((i % 2) as u8, [0.0; 3], [40.0, 30.0, 5.0], vec![])).collect();
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(120.0, 120.0));
+        let k =
+            kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, Bed::plain(120.0, 120.0));
         assert!(k.plates.len() >= 2);
         for plate in &k.plates {
             assert!(plate.pieces.iter().all(|&i| k.pieces[i].slot == plate.slot()));
@@ -692,14 +935,14 @@ mod tests {
         let mut pieces: Vec<Piece> = (0..5).map(|_| piece(0, [0.0; 3], [150.0, 20.0, 4.0], vec![])).collect();
         pieces.extend((0..2).map(|_| piece(0, [0.0; 3], [60.0, 30.0, 4.0], vec![])));
         let bed = Bed { margin_mm: 5.0, gap_mm: 2.0, ..Bed::plain(160.0, 160.0) };
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, bed);
+        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, bed);
         assert_eq!(k.plates.len(), 1, "one plate holds them all");
         assert_clear(&k, &[]);
         assert!(k.plates[0].occupancy > 0.6 && k.plates[0].occupancy <= 1.0, "{}", k.plates[0].occupancy);
         // A piece too deep one way turns the other way round to fit.
         let tall = vec![piece(0, [0.0; 3], [100.0, 40.0, 4.0], vec![])];
         let bed = Bed { margin_mm: 0.0, gap_mm: 0.0, ..Bed::plain(50.0, 120.0) };
-        let k = kit(Split { pieces: tall, voxel_mm: 0.5, merged: 0, dropped: 0 }, bed);
+        let k = kit(Split { pieces: tall, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, bed);
         assert!(k.placed[0].fits);
         assert!((k.placed[0].size[1] - 100.0).abs() < 1e-3, "{:?}", k.placed[0].size);
         // The STL stays in step with the turn: its extent is the size.
@@ -718,8 +961,7 @@ mod tests {
             Split {
                 pieces: (0..16).map(|i| piece((i % 3) as u8, [0.0; 3], [30.0, 25.0, 5.0], vec![])).collect(),
                 voxel_mm: 0.5,
-                merged: 0,
-                dropped: 0,
+                ..Default::default()
             },
             bed.clone(),
         );
@@ -727,7 +969,8 @@ mod tests {
         assert!(apart.plates.iter().all(|p| !p.mixed()));
         assert_clear(&apart, &[excluded]);
         // Mixed: fewer plates, clear of the tower as well.
-        let mixed = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed { mix: true, ..bed });
+        let mixed =
+            kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, Bed { mix: true, ..bed });
         assert_eq!(mixed.plates.len(), 1);
         assert!(mixed.plates[0].mixed() && mixed.plates[0].slots.len() == 3);
         assert_clear(&mixed, &[excluded, tower]);
@@ -748,7 +991,8 @@ mod tests {
     fn a_piece_larger_than_the_bed_gets_its_own_plate() {
         let pieces =
             vec![piece(0, [0.0; 3], [300.0, 40.0, 5.0], vec![]), piece(0, [0.0; 3], [20.0, 20.0, 5.0], vec![])];
-        let k = kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0 }, Bed::plain(200.0, 200.0));
+        let k =
+            kit(Split { pieces, voxel_mm: 0.5, merged: 0, dropped: 0, ..Default::default() }, Bed::plain(200.0, 200.0));
         assert_eq!(k.plates.len(), 2);
         assert!(!k.placed[0].fits && k.placed[1].fits);
         assert_ne!(k.placed[0].plate, k.placed[1].plate);
@@ -762,9 +1006,66 @@ mod tests {
             piece(1, [0.0; 3], [2.0, 2.0, 2.0], vec![(0, 50.0)]),
             piece(2, [0.0; 3], [3.0, 3.0, 3.0], vec![(0, 20.0)]),
         ];
-        let steps = assembly(&pieces);
+        let (steps, groups) = assembly(&pieces);
+        assert_eq!(groups.len(), 1);
         assert_eq!(steps.iter().map(|s| s.piece).collect::<Vec<_>>(), vec![0, 1, 2]);
         assert!(steps[0].joins.is_empty());
         assert_eq!(steps[2].joins, vec![0]);
+    }
+
+    #[test]
+    fn large_kits_build_in_sub_assemblies_of_pieces_that_touch() {
+        // A row of 40 cubes, each glued to the next: groups are runs of the row.
+        let pieces: Vec<Piece> = (0..40)
+            .map(|i| {
+                let x = i as f32 * 10.0;
+                let mut c = vec![];
+                if i > 0 {
+                    c.push((i - 1, 100.0));
+                }
+                if i < 39 {
+                    c.push((i + 1, 100.0));
+                }
+                piece(0, [x, 0.0, 0.0], [x + 10.0, 10.0, 10.0], c)
+            })
+            .collect();
+        let (steps, groups) = assembly(&pieces);
+        assert!(groups.len() >= 3, "{}", groups.len());
+        assert_eq!(steps.len(), 40);
+        let mut seen: Vec<usize> = steps.iter().map(|s| s.piece).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..40).collect::<Vec<_>>(), "every piece once");
+        for (g, group) in groups.iter().enumerate() {
+            let ids: Vec<usize> = steps[group.steps.clone()].iter().map(|s| s.piece).collect();
+            assert!(steps[group.steps.clone()].iter().all(|s| s.group == g));
+            // A run of the row: neighbours only.
+            let (lo, hi) = (*ids.iter().min().unwrap(), *ids.iter().max().unwrap());
+            assert_eq!(hi - lo + 1, ids.len(), "group {g}: {ids:?}");
+            // Every step after the first is glued to something in its group.
+            assert!(steps[group.steps.clone()]
+                .iter()
+                .skip(1)
+                .all(|s| !s.joins.is_empty() && s.joins.iter().all(|j| ids.contains(j))));
+            // Every group after the first is glued to one before it.
+            assert_eq!(group.joins.is_empty(), g == 0);
+            for &(mine, theirs) in &group.joins {
+                assert!(ids.contains(&mine) && !ids.contains(&theirs));
+                assert!(groups[..g].iter().any(|o| steps[o.steps.clone()].iter().any(|s| s.piece == theirs)));
+            }
+        }
+    }
+
+    #[test]
+    fn glue_goes_where_two_pieces_meet() {
+        let a = piece(0, [0.0; 3], [10.0, 10.0, 10.0], vec![]);
+        let b = piece(1, [0.0, 0.0, 10.0], [10.0, 10.0, 14.0], vec![]);
+        let faces = contact_faces(&a, &b, 0.25);
+        // The cube's top: two triangles, facing +Z.
+        assert_eq!(faces.len(), 2, "{faces:?}");
+        for t in faces {
+            assert!(a.tris[t].iter().all(|&v| (a.positions[v as usize][2] - 10.0).abs() < 1e-4));
+        }
+        let apart = piece(1, [0.0, 0.0, 11.0], [10.0, 10.0, 14.0], vec![]);
+        assert!(contact_faces(&a, &apart, 0.25).is_empty());
     }
 }

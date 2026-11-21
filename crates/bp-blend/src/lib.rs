@@ -493,9 +493,12 @@ mod tests {
                     core_slot: None,
                     min_piece_mm3: 20.0,
                     mix: false,
+                    contents: Default::default(),
+                    pins: None,
                 },
                 density_g_cm3: 1.24,
                 flush: Default::default(),
+                lang: Default::default(),
             };
             let zip = std::env::temp_dir().join(format!("blendparser-piezas-{depth_mm}.zip"));
             let summary = bp_3mf::write_kit_zip(std::fs::File::create(&zip).unwrap(), &kit, &info).unwrap();

@@ -26,5 +26,5 @@ pub use mesh::{MeshOps, RepairReport};
 pub use project::{ColorOps, ExportPart, Mat3, Preview, PrintOps, Project, Stats, IDENTITY};
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use snapshot::SnapshotError;
-pub use split::{Piece, Split, SplitParams};
+pub use split::{Piece, PinJoin, PinParams, Split, SplitParams};
 pub use waste::{Waste, WasteParams};

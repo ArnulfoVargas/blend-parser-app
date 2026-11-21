@@ -132,9 +132,15 @@ export interface Summary {
 }
 
 /** How the kit is cut: joint detail, colour depth over a one-colour core, and the least piece kept apart. */
-export interface KitOptions { voxelMm: number; depthMm: number; coreSlot: number | null; minPieceMm3: number; mix: boolean }
+export interface KitOptions { voxelMm: number; depthMm: number; coreSlot: number | null; minPieceMm3: number; mix: boolean; contents: KitContents; pins?: KitPins | null }
+/** Pins keying the kit's pieces together: their size and the gap round them. */
+export interface KitPins { diameterMm: number; depthMm: number; clearanceMm: number }
+/** What the kit ZIP holds besides its summary, and how sharp its pictures are. */
+export interface KitContents { threeMf: boolean; stl: "none" | "piece" | "colour"; guide: boolean; text: boolean; quality: "low" | "medium" | "high" }
+/** How far the kit export has got; 0 of 0 while it cannot tell. */
+export interface KitProgress { stage: "split" | "plates" | "pictures" | "files"; done: number; total: number }
 /** What the kit came out with: pieces, plates, and what to look at (too big, to review, left out). */
-export interface KitResult { pieces: number; plates: number; oversize: number; review: number; dropped: number }
+export interface KitResult { pieces: number; plates: number; oversize: number; review: number; dropped: number; pins: number; unpinned: number; bytes: number }
 export interface Hit { point: Vec3; normal: Vec3 }
 /** What the bucket would fill: the colour found (or added), its slot now, and the triangles it reaches. */
 export interface BucketPick { targetHex: string; added: boolean; slot: number | null; sampleHex: string; deltaE: number; tris: number[] }
@@ -225,7 +231,8 @@ export const api = {
   export3mf: (path: string, lang: string, objects: number[] | null = null, thumbnails: [Uint8Array, Uint8Array] | null = null) =>
     invoke<void>("export_3mf", { path, lang, objects, thumbnails: thumbnails && thumbnails.map((b) => Array.from(b)) }),
   /** The colour kit: solid pieces on single-colour plates, STLs and an assembly guide, in one ZIP. */
-  exportColorZip: (path: string, o: KitOptions) => invoke<KitResult>("export_color_zip", { path, ...o }),
+  exportColorZip: (path: string, o: KitOptions, lang: string) => invoke<KitResult>("export_color_zip", { path, options: o, lang }),
+  cancelColorZip: () => invoke<void>("cancel_color_zip"),
 };
 
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */
