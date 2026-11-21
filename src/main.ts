@@ -818,6 +818,8 @@ function renderPlateControls(s: Summary) {
   setOptions(plateDestination, plates.filter(([i]) => i !== activePlate));
   $<HTMLButtonElement>("#plate-move").disabled = plateObject.disabled || plateDestination.disabled;
   $<HTMLButtonElement>("#plate-clear").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-clone").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-arrange").disabled = s.parts.length === 0;
 }
 
 projectPlate.addEventListener("change", () => {
@@ -839,6 +841,28 @@ $("#plate-move").addEventListener("click", () => {
     activePlate = destination;
     return s;
   });
+});
+function readPlateGap(): number | null {
+  const input = $<HTMLInputElement>("#plate-arrange-gap");
+  const n = input.valueAsNumber;
+  const valid = n >= 0 && n <= 50;
+  input.setAttribute("aria-invalid", String(!valid));
+  if (valid) return n;
+  input.focus();
+  toast(t("error.splitGap", { min: nf(0), max: nf(50) }), "error");
+  return null;
+}
+
+$("#plate-clone").addEventListener("click", () => {
+  const object = Number(plateObject.value);
+  const gap = $<HTMLInputElement>("#plate-arrange-clones").checked ? readPlateGap() : undefined;
+  if (gap === null) return;
+  void apply(() => api.cloneObject(object, t("plates.copy"), gap), () => viewer.frameAll());
+});
+$("#plate-arrange").addEventListener("click", () => {
+  const gap = readPlateGap();
+  if (gap === null) return;
+  void apply(() => api.arrangePlates(gap), () => viewer.frameAll());
 });
 $("#plate-clear").addEventListener("click", async () => {
   const plate = activePlate;

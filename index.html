@@ -156,7 +156,17 @@
             </div>
             <div class="row-actions">
               <button type="button" id="plate-move" class="btn btn--sm" data-i18n="plates.move">Mover objeto</button>
+              <button type="button" id="plate-clone" class="btn btn--sm" data-i18n="plates.clone">Clonar objeto</button>
             </div>
+            <label class="check">
+              <input type="checkbox" id="plate-arrange-clones" checked>
+              <span data-i18n="plates.arrangeClones">Acomodar las placas al clonar</span>
+            </label>
+            <div class="field">
+              <label for="plate-arrange-gap" data-i18n="plates.gap">Separación entre objetos</label>
+              <div class="field__unit"><input class="input" id="plate-arrange-gap" type="number" min="0" max="50" step="0.5" value="5"><span>mm</span></div>
+            </div>
+            <button type="button" id="plate-arrange" class="btn btn--sm" data-i18n="plates.arrange">Acomodar todas las placas</button>
             <svg class="plate" id="plate-view" role="img" aria-labelledby="plate-desc" preserveAspectRatio="xMidYMid meet"></svg>
             <p class="visually-hidden" id="plate-desc" data-bind="plateDesc"></p>
             <ul class="plate__legend" aria-hidden="true">

@@ -47,6 +47,8 @@ pub fn run() {
             commands::split_for_printer,
             commands::add_plate,
             commands::move_to_plate,
+            commands::clone_object,
+            commands::arrange_plates,
             commands::clear_plate,
             commands::suggest_connectors,
             commands::preview_connected_cut,

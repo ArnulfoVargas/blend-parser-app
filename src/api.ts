@@ -223,6 +223,8 @@ export const api = {
   splitForPrinter: (plan: SplitPlan, dowelLabel: string) => invoke<Summary>("split_for_printer", { plan, dowelLabel }),
   addPlate: () => invoke<Summary>("add_plate"),
   moveToPlate: (object: number, plate: number) => invoke<Summary>("move_to_plate", { object, plate }),
+  cloneObject: (object: number, label: string, gapMm?: number) => invoke<Summary>("clone_object", { object, label, gapMm }),
+  arrangePlates: (gapMm: number) => invoke<Summary>("arrange_plates", { gapMm }),
   clearPlate: (plate: number) => invoke<Summary>("clear_plate", { plate }),
   suggestConnectors: (point: Vec3, normal: Vec3, selected: number[], connectors: Connectors) =>
     invoke<Vec3[]>("suggest_connectors", { point, normal, selected, connectors }),
