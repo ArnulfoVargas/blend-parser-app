@@ -396,6 +396,7 @@ mod tests {
         Mesh {
             parts: vec![MeshPart { name: "c".into(), positions, tris, origin: None }],
             repair: RepairReport::default(),
+            ..Default::default()
         }
     }
 
@@ -465,6 +466,7 @@ mod tests {
                 origin: None,
             }],
             repair: RepairReport::default(),
+            ..Default::default()
         };
         let trees = vec![vec![leaf(0), leaf(255)]];
         for main in [None, Some(0)] {
@@ -534,6 +536,7 @@ mod tests {
         Mesh {
             parts: vec![MeshPart { name: "s".into(), positions, tris, origin: None }],
             repair: RepairReport::default(),
+            ..Default::default()
         }
     }
 

@@ -10,6 +10,7 @@ pub mod estimate;
 pub mod field;
 pub mod fit;
 pub mod geom;
+pub mod hollow;
 pub mod kit;
 pub mod mesh;
 pub mod optimize;
@@ -22,16 +23,17 @@ pub mod region;
 pub mod render;
 pub mod scene;
 pub mod separate;
+pub mod smooth;
 pub mod snapshot;
 pub mod split;
 pub mod waste;
 
 pub use kit::Kit;
-pub use mesh::{MeshOps, RepairReport};
+pub use mesh::{MeshIssues, MeshOps, RepairReport};
 pub use project::{
-    ColorOps, ColourMatch, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, PlateEditError, PlateGroup,
-    Preview, PrintOps, Project, RefineFailure, RegionAction, RegionFailure, RegionPreview, SeparateError, SplitError,
-    SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
+    ColorOps, ColourMatch, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, OrientationPlan, PlateEditError,
+    PlateGroup, Preview, PrintOps, Project, RefineFailure, RegionAction, RegionFailure, RegionPreview, SeparateError,
+    SplitError, SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
 };
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use snapshot::SnapshotError;

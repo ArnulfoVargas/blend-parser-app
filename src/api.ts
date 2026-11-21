@@ -8,10 +8,15 @@ export interface Filament { id: string; brand: string; kind: string; nameEs: str
 export interface Filaments { filaments: Filament[]; owned: string[]; inventoryOnly: boolean }
 /** `hex` is what the slot prints (its filament's colour, when it has one); `detectedHex`, the colour found in the model. */
 export interface Slot { hex: string; detectedHex: string; filament: Filament | null; filamentDeltaE: number | null; triangles: number; nearest: [number, number] | null }
-export interface Repair { weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number }
+export interface Repair {
+  weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number;
+  filledHoles: number; flippedTriangles: number; splitVertices: number; droppedPieces: number; finTriangles: number;
+}
+/** What each advanced repair finds on a mesh (see `bp_core::MeshIssues`). */
+export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; hollowMm: number; drains: number; drainMm: number; thickenMm: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -95,6 +100,9 @@ export interface PlateCheck {
   offPlate: boolean; inMargin: boolean; onExcluded: boolean; onTower: boolean; towerOffPlate: boolean; fitFactor: number;
 }
 
+/** The turn with the least overhang: areas in mm² as now and after it; `down` faces the plate after it. */
+export interface OrientationPlan { changes: boolean; rotation: number[][]; down: Vec3; overhangMm2: [number, number]; contactMm2: [number, number] }
+
 /** A turn; `rigid` says how the preview moved when it could follow as it is: p' = matrix · p + shift. */
 export interface TurnResult { summary: Summary; rigid: { matrix: number[][]; shift: Vec3 } | null }
 
@@ -126,6 +134,12 @@ export interface Summary {
   smallIslands: number;
   minDetailMm2: number;
   contactMm2: number;
+  /** How far simplifying moved the surface at most, in mm; 0 unsimplified. */
+  deviationMm: number;
+  /** The model's volume, and what hollowing did (volumes in mm³; why not, if it did nothing). */
+  volumeMm3: number;
+  thicken: { movedVertices: number; maxOffsetMm: number; areaMm2: number } | null;
+  hollow: { solidMm3: number; volumeMm3: number; cellMm: number; drains: number; drainsWanted: number; refused: "open" | "noRoom" | null } | null;
   repair: Repair;
   estimate: Estimate;
   settings: Settings;
@@ -149,6 +163,9 @@ export interface KitProgress { stage: "split" | "plates" | "pictures" | "files";
 /** What the kit came out with: pieces, plates, and what to look at (too big, to review, left out). */
 export interface KitResult { pieces: number; plates: number; oversize: number; review: number; dropped: number; pins: number; unpinned: number; bytes: number }
 export interface Hit { point: Vec3; normal: Vec3 }
+/** A wall: where it was measured, the point across, and its thickness in mm (null with nothing across). */
+export interface Wall { point: Vec3; across: Vec3; mm: number | null }
+
 /** What the bucket would fill: the colour found (or added), its slot now, and the triangles it reaches. */
 export interface BucketPick { targetHex: string; added: boolean; slot: number | null; sampleHex: string; deltaE: number; tris: number[] }
 
@@ -219,7 +236,16 @@ export function decodePreview(buf: ArrayBuffer): PreviewMesh {
 export const api = {
   analyzePrintability: (params: PrintabilityParams) => invoke<PrintabilityReport>("analyze_printability", { params }),
   fixMesh: (fix: MeshFix) => invoke<Summary>("fix_mesh", { fix }),
+  /** Hollows to a wall of `wallMm` (0 fills it again) with drains through the base; one undo step. */
+  hollowMesh: (wallMm: number, drains: number, drainMm: number) => invoke<Summary>("hollow_mesh", { wallMm, drains, drainMm }),
+  /** Subdivides and smooths as one undo step; refused past `maxTriangles`. */
+  smoothMesh: (subdivide: number, smooth: number, creaseDeg: number, maxTriangles: number) =>
+    invoke<Summary>("smooth_mesh", { subdivide, smooth, creaseDeg, maxTriangles }),
+  /** Built without the advanced repairs, and as the mesh is now. */
+  meshIssues: () => invoke<{ before: Issues; after: Issues }>("mesh_issues"),
   orientForPrint: (overhangDeg: number) => invoke<Summary>("orient_for_print", { overhangDeg }),
+  /** The best turn and what it gains, without turning; `setRotation` applies it. */
+  planOrientation: (overhangDeg: number) => invoke<OrientationPlan>("plan_orientation", { overhangDeg }),
   setRotation: (rotation: number[][]) => invoke<Summary>("set_rotation", { rotation }),
   blenderStatus: () => invoke<string | null>("blender_status"),
   initialFile: () => invoke<string | null>("initial_file"),
@@ -286,8 +312,8 @@ export const api = {
   refineToPaint: () => invoke<Summary>("refine_to_paint"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),
-  setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number) =>
-    invoke<Summary>("set_mesh_ops", { keepRatio, flattenMm, repair, minPieceMm }),
+  setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number, protectColors?: boolean, protectDetail?: boolean) =>
+    invoke<Summary>("set_mesh_ops", { keepRatio, flattenMm, repair, minPieceMm, protectColors, protectDetail }),
   setColorOps: (borderDetail: number, minIslandMm2: number) => invoke<Summary>("set_color_ops", { borderDetail, minIslandMm2 }),
   printers: () => invoke<Printers>("printers"),
   /** Null while no file is open; the pick is remembered either way. */
@@ -302,6 +328,15 @@ export const api = {
   setFlush: (from: number | null, to: number | null, mm3: number | null) => invoke<Summary>("set_flush", { from, to, mm3 }),
   previewMesh: async () => decodePreview(await invoke<ArrayBuffer>("preview_mesh")),
   pick: (origin: Vec3, dir: Vec3) => invoke<Hit | null>("pick", { origin, dir }),
+  /** The wall where the ray lands, as the thickness check reads it; null off the model. */
+  measureThickness: (origin: Vec3, dir: Vec3, toleranceMm: number) => invoke<Wall | null>("measure_thickness", { origin, dir, toleranceMm }),
+  /** The mesh's edges, each once: positions (3 per vertex) and vertex pairs. */
+  wireMesh: async () => {
+    const buf = await invoke<ArrayBuffer>("wire_mesh");
+    const head = new DataView(buf, 0, 8);
+    const [vertices, edges] = [head.getUint32(0, true), head.getUint32(4, true)];
+    return { positions: new Float32Array(buf, 8, vertices * 3), ends: new Uint32Array(buf, 8 + vertices * 12, edges * 2) };
+  },
   paint: (origin: Vec3, dir: Vec3, radiusMm: number, slot: number) => invoke<PaintResult | null>("paint", { origin, dir, radiusMm, slot }),
   bucketPick: (origin: Vec3, dir: Vec3, region: boolean, add: boolean) => invoke<BucketPick | null>("bucket_pick", { origin, dir, region, add }),
   bucket: (origin: Vec3, dir: Vec3, slot: number, region: boolean, add: boolean) => invoke<Summary>("bucket", { origin, dir, slot, region, add }),
@@ -322,7 +357,7 @@ export const api = {
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */
 export interface MeshFix {
   repair?: boolean; orient?: boolean; fillHoles?: boolean; splitVertices?: boolean; dropFloating?: boolean; deepClean?: boolean;
-  minPieceMm?: number; flattenMm?: number;
+  minPieceMm?: number; flattenMm?: number; thickenMm?: number;
 }
 export interface PrintabilityParams {
   extrusionMm: number; perimeters: number; wallMm: number; detailMm: number;
@@ -337,4 +372,6 @@ export interface PrintabilityReport {
   params: PrintabilityParams; checks: PrintabilityCheck[]; triangles: number; sizeMm: Vec3;
   printer: string | null; nozzleMm: number | null; layerMm: number | null;
   thickness: { point: Vec3; mm: number | null }[];
+  /** Flagged edges as their two ends, in mm. */
+  edges: { open: [Vec3, Vec3][]; nonManifold: [Vec3, Vec3][]; winding: [Vec3, Vec3][] };
 }

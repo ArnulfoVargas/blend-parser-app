@@ -443,4 +443,48 @@ mod tests {
         let p = geom::at(&s.corners[t as usize], b);
         assert!((p[0] - 3.5).abs() < 1e-4 && (p[1] - 2.2).abs() < 1e-4 && p[2].abs() < 1e-6);
     }
+
+    /// A bumpy sheet big enough to take the parallel build; every query must
+    /// agree with checking each triangle.
+    #[test]
+    fn large_tree_matches_brute_force() {
+        let n = 120; // 28 800 triangles, past the parallel threshold
+        let mut s = TriSoup::default();
+        let h = |x: usize, y: usize| ((x * 7 + y * 13) % 11) as f32 * 0.1;
+        for y in 0..n {
+            for x in 0..n {
+                let p = |dx: usize, dy: usize| [(x + dx) as f32, (y + dy) as f32, h(x + dx, y + dy)];
+                s.push([p(0, 0), p(1, 0), p(1, 1)], 0, (2 * (y * n + x)) as u32);
+                s.push([p(0, 0), p(1, 1), p(0, 1)], 0, (2 * (y * n + x) + 1) as u32);
+            }
+        }
+        assert!(s.len() > PARALLEL_MIN);
+        let bvh = Bvh::build(&s);
+        let mut sorted = bvh.order.clone();
+        sorted.sort_unstable();
+        assert!(sorted.iter().enumerate().all(|(i, &t)| i as u32 == t), "every triangle once");
+        for k in 0..300 {
+            let (x, y) = ((k * 37 % 1190) as f32 * 0.1 + 0.05, (k * 53 % 1190) as f32 * 0.1 + 0.05);
+            let hit = bvh.raycast(&s, [x, y, 5.0], [0.0, 0.0, -1.0]).expect("the sheet is under every ray");
+            let best = (0..s.len())
+                .filter_map(|t| geom::ray_triangle([x, y, 5.0], [0.0, 0.0, -1.0], &s.corners[t]).map(|(d, _)| d))
+                .fold(f32::MAX, f32::min);
+            assert!((hit.t - best).abs() < 1e-4, "ray {k}: {} vs {best}", hit.t);
+            let mut got = vec![];
+            bvh.sphere(&s, [x, y, 0.5], 1.5, &mut got);
+            got.sort_unstable();
+            let mut want = vec![];
+            Bvh {
+                nodes: vec![Node {
+                    bounds: Aabb { lo: [f32::MIN; 3], hi: [f32::MAX; 3] },
+                    start: 0,
+                    count: s.len() as u32,
+                }],
+                order: (0..s.len() as u32).collect(),
+            }
+            .sphere(&s, [x, y, 0.5], 1.5, &mut want);
+            want.sort_unstable();
+            assert_eq!(got, want, "sphere {k}");
+        }
+    }
 }

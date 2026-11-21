@@ -32,7 +32,7 @@ async fn with_doc<R: Send + 'static>(
 }
 
 /// What the core prepares for: the nozzle and the layer height it prints at.
-fn print_ops(p: &bp_3mf::Printer, prefs: &Prefs) -> PrintOps {
+pub(crate) fn print_ops(p: &bp_3mf::Printer, prefs: &Prefs) -> PrintOps {
     PrintOps { nozzle_mm: p.nozzle_mm, layer_mm: dto::layer_mm(p, &prefs.waste) }
 }
 
@@ -931,21 +931,27 @@ pub async fn merge_slots(app: AppHandle, from: usize, into: usize) -> CmdResult<
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn set_mesh_ops(
     app: AppHandle,
     keep_ratio: f32,
     flatten_mm: f32,
     repair: bool,
     min_piece_mm: f32,
+    protect_colors: Option<bool>,
+    protect_detail: Option<bool>,
 ) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {
         // The settings panel has no say over the printability fixes; keep them.
+        let now = d.project.mesh_ops();
         let ops = MeshOps {
             keep_ratio: keep_ratio.clamp(0.05, 1.0),
             flatten_mm: flatten_mm.max(0.0),
             repair,
             min_piece_mm: min_piece_mm.max(0.0),
-            ..d.project.mesh_ops()
+            protect_colors: protect_colors.unwrap_or(now.protect_colors),
+            protect_detail: protect_detail.unwrap_or(now.protect_detail),
+            ..now
         };
         d.project.set_mesh_ops(ops);
         Ok(dto::summary(d, prefs))
@@ -1078,6 +1084,49 @@ pub async fn preview_mesh(app: AppHandle) -> CmdResult<Response> {
 pub async fn pick(app: AppHandle, origin: [f32; 3], dir: [f32; 3]) -> CmdResult<Option<HitDto>> {
     with_doc(app, move |d, _| Ok(d.project.pick(origin, dir).map(|h| HitDto { point: h.point, normal: h.normal })))
         .await
+}
+
+/// The wall where the ray lands, as the thickness check reads it. `mm` is None
+/// with nothing across (an open surface).
+#[tauri::command]
+pub async fn measure_thickness(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    tolerance_mm: f32,
+) -> CmdResult<Option<dto::WallDto>> {
+    if !tolerance_mm.is_finite() || !(0.00001..=0.1).contains(&tolerance_mm) {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, _| {
+        Ok(d.project.wall_at(origin, dir, tolerance_mm).map(|(point, across, mm)| dto::WallDto { point, across, mm }))
+    })
+    .await
+}
+
+/// The working mesh's edges, each once, as one binary blob:
+/// `u32 vertices, u32 edges | f32 positions[3 * vertices] | u32 ends[2 * edges]`.
+#[tauri::command]
+pub async fn wire_mesh(app: AppHandle) -> CmdResult<Response> {
+    let bytes = with_doc(app, |d, _| {
+        let (positions, edges) = d.project.wire();
+        let mut out = Vec::with_capacity(8 + positions.len() * 12 + edges.len() * 8);
+        out.extend((positions.len() as u32).to_le_bytes());
+        out.extend((edges.len() as u32).to_le_bytes());
+        for p in &positions {
+            for v in p {
+                out.extend(v.to_le_bytes());
+            }
+        }
+        for e in &edges {
+            for v in e {
+                out.extend(v.to_le_bytes());
+            }
+        }
+        Ok(out)
+    })
+    .await?;
+    Ok(Response::new(bytes))
 }
 
 #[tauri::command]
@@ -1334,52 +1383,64 @@ pub async fn export_3mf(
     objects: Option<Vec<u32>>,
     thumbnails: Option<(Vec<u8>, Vec<u8>)>,
 ) -> CmdResult<()> {
-    with_doc(app, move |d, prefs| {
-        let mut parts = d.project.export_parts();
-        if let Some(keep) = &objects {
-            parts.retain(|p| keep.contains(&p.object));
-        }
-        if parts.is_empty() {
-            return Err(AppError::new("error.noObjects"));
-        }
-        let filaments = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
-        let slots =
-            d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
-        let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let (volumes_mm3, _) = dto::flush_matrix(d);
-        let model = bp_3mf::Model {
-            plate_count: d.project.plate_count(),
-            name: &name,
-            piece: bp_3mf::ZipText::for_lang(&lang).piece,
-            parts: parts
-                .iter()
-                .map(|p| bp_3mf::Part {
-                    name: &p.name,
-                    positions: &p.positions,
-                    tris: &p.tris,
-                    paint: &p.paint,
-                    object: p.object,
-                    plate: p.plate,
-                })
-                .collect(),
-            filaments,
-            slots,
-            printer: d.printer.clone(),
-            flush: bp_3mf::Flush {
-                volumes_mm3,
-                multiplier: prefs.waste.flush_multiplier,
-                into_infill: prefs.waste.flush_reuse > 0.0,
-                prime_mm3: prefs.waste.prime_mm3,
-            },
-            layer_mm: prefs.waste.layer_mm,
-            offset_mm: d.offset_mm,
-            thumbnail: thumbnails.as_ref().map(|(large, small)| bp_3mf::Thumbnail { large, small }),
-        };
-        let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
-        bp_3mf::write(std::io::BufWriter::new(file), &model)
-            .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
-    })
-    .await
+    with_doc(app, move |d, prefs| write_selected_3mf(d, prefs, &path, &lang, objects, thumbnails.as_ref())).await
+}
+
+#[cfg(feature = "bench")]
+pub(crate) fn write_3mf(d: &Document, prefs: &Prefs, path: &str) -> CmdResult<()> {
+    write_selected_3mf(d, prefs, path, "es", None, None)
+}
+
+fn write_selected_3mf(
+    d: &Document,
+    prefs: &Prefs,
+    path: &str,
+    lang: &str,
+    objects: Option<Vec<u32>>,
+    thumbnails: Option<&(Vec<u8>, Vec<u8>)>,
+) -> CmdResult<()> {
+    let mut parts = d.project.export_parts();
+    if let Some(keep) = &objects {
+        parts.retain(|p| keep.contains(&p.object));
+    }
+    if parts.is_empty() {
+        return Err(AppError::new("error.noObjects"));
+    }
+    let filaments = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+    let slots = d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
+    let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let (volumes_mm3, _) = dto::flush_matrix(d);
+    let model = bp_3mf::Model {
+        plate_count: d.project.plate_count(),
+        name: &name,
+        piece: bp_3mf::ZipText::for_lang(lang).piece,
+        parts: parts
+            .iter()
+            .map(|p| bp_3mf::Part {
+                name: &p.name,
+                positions: &p.positions,
+                tris: &p.tris,
+                paint: &p.paint,
+                object: p.object,
+                plate: p.plate,
+            })
+            .collect(),
+        filaments,
+        slots,
+        printer: d.printer.clone(),
+        flush: bp_3mf::Flush {
+            volumes_mm3,
+            multiplier: prefs.waste.flush_multiplier,
+            into_infill: prefs.waste.flush_reuse > 0.0,
+            prime_mm3: prefs.waste.prime_mm3,
+        },
+        layer_mm: prefs.waste.layer_mm,
+        offset_mm: d.offset_mm,
+        thumbnail: thumbnails.map(|(large, small)| bp_3mf::Thumbnail { large, small }),
+    };
+    let file = std::fs::File::create(path).map_err(|e| AppError::file(path, e))?;
+    bp_3mf::write(std::io::BufWriter::new(file), &model)
+        .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
 }
 
 /// One STL per colour in a ZIP, its colour list in `lang`. Returns how many colour files were written.
@@ -1479,7 +1540,7 @@ fn write_color_assembly(
     result.map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
 }
 
-fn printability_for_doc(
+pub(crate) fn printability_for_doc(
     d: &Document,
     prefs: &Prefs,
     params: bp_core::printability::Params,
@@ -1528,6 +1589,7 @@ pub struct MeshFix {
     drop_floating: Option<bool>,
     min_piece_mm: Option<f32>,
     flatten_mm: Option<f32>,
+    thicken_mm: Option<f32>,
 }
 
 /// One undoable step, so Ctrl+Z restores geometry, colours and hand painting.
@@ -1544,9 +1606,93 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
             drop_floating: fix.drop_floating.unwrap_or(now.drop_floating),
             min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
             flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),
+            // NaN goes to 0: nothing thickened.
+            thicken_mm: fix.thicken_mm.map_or(now.thicken_mm, |v| if v.is_finite() { v.clamp(0.0, 10.0) } else { 0.0 }),
             ..now
         });
         Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Hollows the model to a wall of `wall_mm` with `drains` holes of `drain_mm`
+/// through the base, as one undoable step; a wall of 0 fills it again. The wall
+/// is at least two lines of the nozzle.
+#[tauri::command]
+pub async fn hollow_mesh(app: AppHandle, wall_mm: f32, drains: u8, drain_mm: f32) -> CmdResult<Summary> {
+    if !wall_mm.is_finite()
+        || !(0.0..=50.0).contains(&wall_mm)
+        || drains > bp_core::mesh::MAX_DRAINS
+        || !(1.0..=20.0).contains(&drain_mm)
+    {
+        return Err(AppError::new("error.hollowParams"));
+    }
+    with_doc(app, move |d, prefs| {
+        let min = 2.0 * d.printer.nozzle_mm;
+        if wall_mm > 0.0 && wall_mm < min - 1e-4 {
+            return Err(AppError::with("error.hollowWall", json!({ "min": min })));
+        }
+        let now = d.project.mesh_ops();
+        d.project.fix_mesh(MeshOps { hollow_mm: wall_mm, drains, drain_mm, ..now });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Subdivides and smooths the model as one undoable step. Refused when the
+/// result would pass `max_triangles` (the panel's cap).
+#[tauri::command]
+pub async fn smooth_mesh(
+    app: AppHandle,
+    subdivide: u8,
+    smooth: u8,
+    crease_deg: f32,
+    max_triangles: usize,
+) -> CmdResult<Summary> {
+    if subdivide > bp_core::mesh::MAX_SUBDIVIDE || smooth > 20 || !(0.0..=180.0).contains(&crease_deg) {
+        return Err(AppError::new("error.smoothParams"));
+    }
+    let cap = max_triangles.clamp(1, bp_core::mesh::SUBDIVIDE_LIMIT);
+    with_doc(app, move |d, prefs| {
+        let now = d.project.mesh_ops();
+        let base = d.project.stats().triangles / 4usize.pow(now.subdivide as u32);
+        let result = base * 4usize.pow(subdivide as u32);
+        if result > cap {
+            return Err(AppError::with("error.subdivideCap", json!({ "n": result, "cap": cap })));
+        }
+        d.project.fix_mesh(MeshOps { subdivide, smooth, crease_deg, ..now });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// What each advanced repair finds before and after; on request, since it
+/// builds the mesh again without them.
+#[tauri::command]
+pub async fn mesh_issues(app: AppHandle) -> CmdResult<dto::MeshIssuesDto> {
+    with_doc(app, |d, _| {
+        let (before, after) = d.project.mesh_issues();
+        Ok(dto::MeshIssuesDto { before: before.into(), after: after.into() })
+    })
+    .await
+}
+
+/// The turn with the least overhang and what it gains, without turning; the
+/// panel shows it and `set_rotation` applies it.
+#[tauri::command]
+pub async fn plan_orientation(app: AppHandle, overhang_deg: f32) -> CmdResult<dto::OrientationDto> {
+    if !overhang_deg.is_finite() {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, _| {
+        let p = d.project.orientation_plan(overhang_deg.clamp(0.0, 90.0));
+        Ok(dto::OrientationDto {
+            changes: p.rotation != d.project.rotation(),
+            rotation: p.rotation,
+            down: p.down,
+            overhang_mm2: [p.now.0, p.after.0],
+            contact_mm2: [p.now.1, p.after.1],
+        })
     })
     .await
 }
@@ -1565,7 +1711,11 @@ pub async fn orient_for_print(app: AppHandle, overhang_deg: f32) -> CmdResult<Su
 /// Sets the model's rotation from load (rows of a 3×3 matrix); reverts a turn.
 #[tauri::command]
 pub async fn set_rotation(app: AppHandle, rotation: bp_core::Mat3) -> CmdResult<Summary> {
-    if rotation.iter().flatten().any(|v| !v.is_finite()) {
+    // Only a turn: rows of unit length at right angles, not a mirror. Anything else would warp the model.
+    let dot = |a: usize, b: usize| (0..3).map(|k| rotation[a][k] * rotation[b][k]).sum::<f32>();
+    let det = bp_core::geom::dot(rotation[0], bp_core::geom::cross(rotation[1], rotation[2]));
+    let turn = (0..3).all(|a| (0..3).all(|b| (dot(a, b) - if a == b { 1.0 } else { 0.0 }).abs() < 1e-3));
+    if rotation.iter().flatten().any(|v| !v.is_finite()) || !turn || (det - 1.0).abs() > 1e-3 {
         return Err(AppError::new("error.printabilityParams"));
     }
     with_doc(app, move |d, prefs| {

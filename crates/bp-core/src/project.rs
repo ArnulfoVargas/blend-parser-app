@@ -12,7 +12,7 @@ use crate::estimate::{self, SwapEstimate};
 use crate::field::ColorField;
 use crate::fit;
 use crate::geom::{self, Vec3, ROOT};
-use crate::mesh::{Mesh, MeshOps, MeshPart, RepairReport};
+use crate::mesh::{Mesh, MeshIssues, MeshOps, MeshPart, RepairReport, CLEAN_MM};
 use crate::optimize;
 use crate::paint::{self, Node, PaintParams};
 use crate::palette;
@@ -92,6 +92,14 @@ pub struct Stats {
     /// For each slot, the closest other slot and their Î”E.
     pub nearest: Vec<Option<(usize, f32)>>,
     pub repair: RepairReport,
+    /// How far the simplified surface strays from the one before, in final mm.
+    pub deviation_mm: f32,
+    /// Volume of the model, in final mm³.
+    pub volume_mm3: f32,
+    /// What hollowing did, with volumes in final mm³ and the voxel in mm.
+    pub hollow: Option<crate::mesh::HollowReport>,
+    /// What thickening moved, in final mm and mm².
+    pub thicken: Option<crate::mesh::ThickenReport>,
 }
 
 /// The objects on one plate (see [`Project::plate_groups`]).
@@ -312,6 +320,18 @@ fn mat_mul(a: Mat3, b: Mat3) -> Mat3 {
 /// The inverse of a rotation.
 fn transpose(m: &Mat3) -> Mat3 {
     std::array::from_fn(|r| std::array::from_fn(|c| m[c][r]))
+}
+
+/// The turn [`Project::orientation_plan`] proposes and what it gains.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrientationPlan {
+    /// Absolute, like [`Project::set_rotation`]; the current one when nothing is clearly better.
+    pub rotation: Mat3,
+    /// The direction, in the model as it stands now, that will face the plate.
+    pub down: Vec3,
+    /// Overhang and plate contact in final mm², as it stands and after the turn.
+    pub now: (f32, f32),
+    pub after: (f32, f32),
 }
 
 /// Shortest rotation taking one unit normal to another, including opposite normals.
@@ -655,6 +675,26 @@ impl Project {
         previous.undo = history;
         self.set_mesh_ops(ops);
         self.undo.push(UndoEntry::Geometry(Box::new(previous)));
+    }
+
+    /// What the advanced repairs (holes, winding, shared vertices, floating
+    /// pieces, deep clean) find: on the mesh built without any of them, and on
+    /// the current one. The panel shows each as before and after.
+    pub fn mesh_issues(&self) -> (MeshIssues, MeshIssues) {
+        let off = MeshOps {
+            orient: false,
+            fill_holes: false,
+            split_vertices: false,
+            drop_floating: false,
+            deep_clean: false,
+            ..self.mesh_ops
+        };
+        // The tolerances `Mesh::build` gives these repairs.
+        let (clean, float) = (CLEAN_MM / self.scale, 1e-4 / self.scale);
+        let after = self.work.issues(clean, float);
+        let before =
+            if off == self.mesh_ops { after } else { Mesh::build(&self.scene, off, self.scale).1.issues(clean, float) };
+        (before, after)
     }
 
     pub fn rotation(&self) -> Mat3 {
@@ -1908,9 +1948,20 @@ impl Project {
     /// ties go to more plate contact. Returns the current rotation when nothing
     /// stable is clearly better.
     pub fn best_rotation(&self, overhang_deg: f32) -> Mat3 {
+        self.orientation_plan(overhang_deg).rotation
+    }
+
+    /// [`Self::best_rotation`] with what it gains: overhang and plate contact
+    /// now and after the turn, and which way (in the model as it stands now)
+    /// will face the plate. Areas are in final mm².
+    pub fn orientation_plan(&self, overhang_deg: f32) -> OrientationPlan {
         let tris: Vec<[Vec3; 3]> =
             self.scene.parts.iter().flat_map(|p| (0..p.tris.len()).map(move |t| p.corners(t))).collect();
-        let Some((lo, hi)) = self.scene.bounds() else { return self.rotation };
+        let down = [0.0, 0.0, -1.0];
+        let k = self.scale * self.scale;
+        let Some((lo, hi)) = self.scene.bounds() else {
+            return OrientationPlan { rotation: self.rotation, down, now: (0.0, 0.0), after: (0.0, 0.0) };
+        };
         let diagonal = geom::len(geom::sub(hi, lo));
         let tol = diagonal * 1e-3;
         let faces: Vec<(Vec3, f32)> = tris
@@ -1923,8 +1974,8 @@ impl Project {
         let total: f32 = faces.iter().map(|f| f.1).sum();
         let centre = mass_centre(&tris, &faces, lo);
         let limit = overhang_deg.to_radians().sin();
-        // (overhang, contact) with `down` pointing at the plate; None when it would tip over.
-        let score = |down: Vec3| -> Option<(f32, f32)> {
+        // (overhang, contact) with `down` pointing at the plate, and whether it stands.
+        let measure = |down: Vec3| -> ((f32, f32), bool) {
             let up = geom::scale(down, -1.0);
             let base = tris.iter().flatten().map(|&p| geom::dot(p, up)).fold(f32::MAX, f32::min);
             let (mut overhang, mut contact) = (0.0, 0.0);
@@ -1940,7 +1991,11 @@ impl Project {
                 }
                 feet.extend(c.iter().copied().filter(|&p| geom::dot(p, up) <= base + tol));
             }
-            stands(&feet, centre, up, diagonal * 0.01).then_some((overhang, contact))
+            ((overhang, contact), stands(&feet, centre, up, diagonal * 0.01))
+        };
+        let score = |down: Vec3| -> Option<(f32, f32)> {
+            let (s, ok) = measure(down);
+            ok.then_some(s)
         };
         let mut candidates: Vec<Vec3> = vec![];
         for x in -1..=1 {
@@ -1956,12 +2011,9 @@ impl Project {
         largest.sort_by(|a, b| b.1.total_cmp(&a.1));
         candidates.extend(largest.iter().take(24).map(|f| f.0));
         // The model as it is stays a valid answer even if it would not stand.
-        let current = score([0.0, 0.0, -1.0]).unwrap_or_else(|| {
-            let up = [0.0, 0.0, 1.0];
-            let overhang = faces.iter().filter(|f| -geom::dot(f.0, up) > limit).map(|f| f.1).sum();
-            (overhang, 0.0)
-        });
-        let mut best = ([0.0, 0.0, -1.0], current);
+        let (now, now_stands) = measure(down);
+        let current = if now_stands { now } else { (now.0, 0.0) };
+        let mut best = (down, current);
         for d in candidates {
             let Some(s) = score(d) else { continue };
             let near = (s.0 - best.1 .0).abs() <= total * 0.01;
@@ -1969,11 +2021,17 @@ impl Project {
                 best = (d, s);
             }
         }
+        let area = |(o, c): (f32, f32)| (o * k, c * k);
         // Not worth turning for less than 1% of the surface.
         if best.1 .0 >= current.0 - total * 0.01 && best.1 .1 <= current.1 * 1.05 {
-            return self.rotation;
+            return OrientationPlan { rotation: self.rotation, down, now: area(now), after: area(now) };
         }
-        mat_mul(onto_down(best.0), self.rotation)
+        OrientationPlan {
+            rotation: mat_mul(onto_down(best.0), self.rotation),
+            down: best.0,
+            now: area(now),
+            after: area(best.1),
+        }
     }
 
     pub fn scene(&self) -> &Scene {
@@ -2061,7 +2119,11 @@ impl Project {
     /// each slot keeps the colours merged into it; otherwise merges are reset.
     /// Hand painting on slots that no longer exist is dropped.
     pub fn set_palette(&mut self, colors: Vec<Rgb>) {
-        let n = colors.len().clamp(1, 16);
+        // With no colour there is nothing to paint with: keep the slots there are.
+        if colors.is_empty() {
+            return;
+        }
+        let n = colors.len().min(16);
         let colors: Vec<Rgb> = colors.into_iter().take(n).collect();
         if n == self.palette.len() {
             for t in &mut self.targets {
@@ -2195,18 +2257,22 @@ impl Project {
             || ops.orient != self.mesh_ops.orient
             || ops.fill_holes != self.mesh_ops.fill_holes
             || ops.split_vertices != self.mesh_ops.split_vertices
-            || ops.deep_clean != self.mesh_ops.deep_clean;
+            || ops.deep_clean != self.mesh_ops.deep_clean
+            || ops.protect_colors != self.mesh_ops.protect_colors
+            || ops.protect_detail != self.mesh_ops.protect_detail
+            || ops.subdivide != self.mesh_ops.subdivide
+            || ops.hollow_mm != self.mesh_ops.hollow_mm
+            || ops.drains != self.mesh_ops.drains
+            || ops.drain_mm != self.mesh_ops.drain_mm;
         self.mesh_ops = ops;
         if topology_changes {
             self.rebuild_geometry();
         } else {
+            let before: Vec<usize> = self.work.parts.iter().map(|p| p.tris.len()).collect();
             self.rebuild_geometry_keep_paint();
-            // Flattening can add or remove triangles even without another mesh
-            // operation changing. Brush storage must match the rebuilt mesh.
-            for (labels, part) in self.painted.iter_mut().zip(&self.work.parts) {
-                if labels.len() != part.tris.len() {
-                    *labels = vec![NO_LABEL; part.tris.len()];
-                }
+            // Hand painting is per triangle: it only survives when the triangles do.
+            if self.work.parts.iter().map(|p| p.tris.len()).ne(before) {
+                self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
             }
         }
         self.rebuild_paint();
@@ -2239,7 +2305,7 @@ impl Project {
     }
 
     fn rebuild_geometry_keep_paint(&mut self) {
-        let (shape, work) = Mesh::build(&self.scene, self.mesh_ops, self.scale);
+        let (shape, work) = Mesh::build_with(&self.scene, self.mesh_ops, self.scale, &|m| self.triangle_labels(m));
         self.shape = shape;
         self.work = work;
         self.adjacency = self.work.parts.iter().map(optimize::adjacency).collect();
@@ -2261,6 +2327,23 @@ impl Project {
         if self.selection.iter().map(Vec::len).ne(self.work.parts.iter().map(|p| p.tris.len())) {
             self.selection = self.work.parts.iter().map(|p| vec![false; p.tris.len()]).collect();
         }
+    }
+
+    /// The slot each triangle of `mesh` takes from the model's colour at its
+    /// centre; empty before there is a palette.
+    fn triangle_labels(&self, mesh: &Mesh) -> Vec<Vec<u8>> {
+        if self.targets.is_empty() {
+            return vec![];
+        }
+        let field = ColorField::new(&self.scene, mesh);
+        let cls = Classifier::with_slots(&self.targets);
+        mesh.parts
+            .iter()
+            .enumerate()
+            .map(|(pi, p)| {
+                (0..p.tris.len()).map(|ti| cls.nearest(field.sample(mesh, pi, ti, [1.0 / 3.0; 3]).lab())).collect()
+            })
+            .collect()
     }
 
     // ---- painting from the model -----------------------------------------
@@ -2444,6 +2527,39 @@ impl Project {
     fn pick_built(&self, origin: Vec3, dir: Vec3) -> Option<RayHit> {
         let (o, d) = self.picker_frame.ray_back(origin, geom::normalize(dir));
         self.picker.0.raycast(&self.picker.1, o, d)
+    }
+
+    /// The wall where the ray lands, measured as the thickness check measures
+    /// it: inward along the face's normal, with `tolerance_mm` (final mm).
+    /// Returns the point, the point across (preview units) and the thickness in
+    /// final mm, None when nothing is across (an open surface).
+    pub fn wall_at(&self, origin: Vec3, dir: Vec3, tolerance_mm: f32) -> Option<(Vec3, Vec3, Option<f32>)> {
+        let hit = self.pick(origin, dir)?;
+        let c = self.picker.1.corners[hit.tri as usize];
+        let inward = crate::printability::inward(&c);
+        let wall =
+            crate::printability::wall_at(&self.picker.0, &self.picker.1, hit.point, inward, tolerance_mm / self.scale);
+        let across = geom::add(hit.point, geom::scale(inward, wall.unwrap_or(0.0)));
+        Some((hit.point, across, wall.map(|w| w * self.scale)))
+    }
+
+    /// Edges of the working mesh, each once, over its vertices (preview units).
+    pub fn wire(&self) -> (Vec<Vec3>, Vec<[u32; 2]>) {
+        let mut positions = vec![];
+        let mut edges = vec![];
+        for part in &self.work.parts {
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&part.positions);
+            let mut own: Vec<[u32; 2]> = part
+                .tris
+                .iter()
+                .flat_map(|t| (0..3).map(move |k| [t[k].min(t[(k + 1) % 3]), t[k].max(t[(k + 1) % 3])]))
+                .collect();
+            own.sort_unstable();
+            own.dedup();
+            edges.extend(own.into_iter().map(|e| e.map(|v| v + base)));
+        }
+        (positions, edges)
     }
 
     /// Paints every triangle within `radius_mm` (final size) of where the ray
@@ -2643,7 +2759,71 @@ impl Project {
             ),
             nearest: palette::nearest_others(&self.palette),
             repair: self.work.repair,
+            deviation_mm: self.work.deviation * self.scale,
+            volume_mm3: self.work.volume() * self.scale.powi(3),
+            hollow: self.work.hollow.map(|h| crate::mesh::HollowReport {
+                solid_volume: h.solid_volume * self.scale.powi(3),
+                volume: h.volume * self.scale.powi(3),
+                cell: h.cell * self.scale,
+                ..h
+            }),
+            thicken: self.work.thicken.map(|t| crate::mesh::ThickenReport {
+                max_offset: t.max_offset * self.scale,
+                area: t.area * self.scale * self.scale,
+                ..t
+            }),
         }
+    }
+
+    /// Times each stage the commands repeat, on the current state, for the
+    /// benchmark. Rebuilds nothing it keeps.
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn profile_phases(&self) -> Vec<(&'static str, f64)> {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut out = vec![];
+        let mut time = |name, f: &mut dyn FnMut()| {
+            let t = Instant::now();
+            f();
+            out.push((name, t.elapsed().as_secs_f64() * 1000.0));
+        };
+        let mut built = None;
+        time("Mesh::build (shape + work)", &mut || built = Some(Mesh::build(&self.scene, self.mesh_ops, self.scale)));
+        time("adjacency", &mut || drop(black_box(self.work.parts.iter().map(optimize::adjacency).collect::<Vec<_>>())));
+        let mut soup = TriSoup::default();
+        time("soup", &mut || soup = self.work.soup());
+        time("Bvh::build", &mut || drop(black_box(Bvh::build(&soup))));
+        let mut field = None;
+        time("ColorField::new", &mut || field = Some(ColorField::new(&self.scene, &self.shape)));
+        let field = field.unwrap();
+        let cls = Classifier::with_slots(&self.targets);
+        let params = PaintParams {
+            max_depth: self.color_ops.border_detail,
+            min_edge: self.print_ops.nozzle_mm / 2.0 / self.scale,
+        };
+        time("paint::build", &mut || drop(black_box(paint::build(&field, &self.shape, &cls, params))));
+        time("stats: estimate (swaps)", &mut || {
+            black_box(estimate::estimate(
+                &self.work,
+                &self.trees,
+                self.scale,
+                self.print_ops.layer_mm,
+                2.0 * self.print_ops.nozzle_mm * self.print_ops.layer_mm,
+            ));
+        });
+        time("stats: contact_area", &mut || {
+            black_box(self.work.contact_area(0.05 / self.scale));
+        });
+        time("stats: bounds", &mut || {
+            black_box(self.work.bounds());
+        });
+        time("small_islands", &mut || {
+            black_box(self.small_islands(1.0));
+        });
+        time("export_parts", &mut || drop(black_box(self.export_parts())));
+        drop(built);
+        out
     }
 
     /// Colour islands smaller than `min_mm2`, the ones the nozzle cannot draw cleanly.
@@ -3110,6 +3290,100 @@ mod tests {
                 assert!(apart, "{a:?} overlaps {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn each_repair_counts_before_and_after_and_undoes_alone() {
+        let mut p = Project::new(scene(), 2);
+        let (before, after) = p.mesh_issues();
+        assert_eq!(before, after);
+        assert_eq!((before.holes, before.open_edges), (1, 6));
+        p.fix_mesh(MeshOps { fill_holes: true, ..p.mesh_ops() });
+        let (before, after) = p.mesh_issues();
+        assert_eq!((before.holes, after.holes, after.open_edges), (1, 0, 0));
+        assert_eq!(p.stats().repair.filled_holes, 1);
+        assert_eq!(p.undo_label(), Some("fix"));
+        assert!(p.undo());
+        assert!(!p.mesh_ops().fill_holes);
+        assert_eq!(p.mesh_issues().1.holes, 1);
+    }
+
+    #[test]
+    fn subdividing_is_one_undo_step_and_keeps_the_colours() {
+        let mut p = Project::new(scene(), 2);
+        let tris = p.stats().triangles;
+        let per_slot = p.stats().per_slot;
+        p.fix_mesh(MeshOps { subdivide: 2, smooth: 3, ..p.mesh_ops() });
+        assert_eq!(p.stats().triangles, tris * 16);
+        // Each child keeps its parent's spot in the source: the same colours, sixteen times over.
+        assert_eq!(p.stats().per_slot, per_slot.iter().map(|n| n * 16).collect::<Vec<_>>());
+        assert!(p.undo());
+        assert_eq!(p.stats().triangles, tris);
+        assert_eq!(p.mesh_ops().subdivide, 0);
+    }
+
+    #[test]
+    fn the_measured_wall_is_the_one_the_thickness_check_reads() {
+        // A closed 20 × 10 × 6 box, scaled to twice its size.
+        let positions = vec![
+            [0., 0., 0.],
+            [20., 0., 0.],
+            [20., 10., 0.],
+            [0., 10., 0.],
+            [0., 0., 6.],
+            [20., 0., 6.],
+            [20., 10., 6.],
+            [0., 10., 6.],
+        ];
+        let tris = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let part = Part {
+            name: "box".into(),
+            tri_loops: tris.clone(),
+            tri_source: vec![0; tris.len()],
+            sources: vec![ColorSource::Flat([0.8; 3])],
+            positions,
+            tris,
+            ..Default::default()
+        };
+        let mut p = Project::new(Scene { parts: vec![part], ..Default::default() }, 1);
+        p.set_size_mm([40.0, 20.0, 12.0]);
+        let params = crate::printability::Params { samples: 16, ..crate::printability::Params::for_nozzle(0.4) };
+        let report = p.printability(params);
+        assert!(!report.thickness.is_empty());
+        for s in &report.thickness {
+            // Aim at the sample from outside, along its face's normal (preview units are source units here).
+            let at = geom::scale(s.point, 1.0 / p.scale());
+            let face = (0..p.work.parts[0].tris.len())
+                .map(|t| p.work.parts[0].corners(t))
+                .find(|c| geom::len(geom::sub(geom::at(c, [1.0 / 3.0; 3]), at)) < 1e-4)
+                .unwrap();
+            let out = geom::scale(crate::printability::inward(&face), -1.0);
+            let (_, _, mm) =
+                p.wall_at(geom::add(at, geom::scale(out, 5.0)), geom::scale(out, -1.0), params.tolerance_mm).unwrap();
+            assert!((mm.unwrap() - s.mm.unwrap()).abs() < 1e-3, "{:?} vs {:?}", mm, s.mm);
+        }
+    }
+
+    #[test]
+    fn empty_palette_keeps_the_slots() {
+        let mut p = Project::new(scene(), 2);
+        let before = p.palette().to_vec();
+        p.set_palette(vec![]);
+        assert_eq!(p.palette(), &before[..]);
+        assert_eq!(p.stats().per_slot.iter().sum::<usize>(), 4);
     }
 
     #[test]
@@ -4175,12 +4449,21 @@ mod tests {
         let flipped = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
         p.set_rotation(flipped);
         let labels = p.preview().labels;
+        let plan = p.orientation_plan(45.0);
         let r = p.best_rotation(45.0);
+        assert_eq!(plan.rotation, r);
         assert_ne!(r, flipped);
+        // Upside down the 200 mm² base hangs flat over the plate; after the turn it rests on it.
+        assert!(plan.now.0 > 150.0 && plan.after.0 < plan.now.0, "{plan:?}");
+        assert!(plan.after.1 > plan.now.1, "{plan:?}");
+        // It lands on a face that does not face the plate now.
+        assert!((geom::len(plan.down) - 1.0).abs() < 1e-4 && plan.down[2] > -0.99, "{plan:?}");
         p.set_rotation(r);
         assert_eq!(p.preview().labels, labels, "turning keeps the triangles and their paint");
         // Resting on a flat side nothing overhangs, so another search changes nothing.
         assert_eq!(p.best_rotation(45.0), p.rotation());
+        let again = p.orientation_plan(45.0);
+        assert_eq!((again.down, again.now), ([0.0, 0.0, -1.0], again.after));
         let overhang = p.printability(crate::printability::Params::for_nozzle(0.4));
         assert_eq!(overhang.checks.iter().find(|c| c.code == "overhang").unwrap().count, 0);
         assert_eq!(p.undo_label(), Some("fix"));

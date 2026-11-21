@@ -12,7 +12,7 @@ use crate::project::{ColorOps, PrintOps};
 use crate::scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 
 const MAGIC: &[u8; 4] = b"BPPJ";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -251,10 +251,19 @@ pub(crate) fn write_mesh_ops(w: &mut Writer, o: &MeshOps) {
     w.bool(o.split_vertices);
     w.bool(o.drop_floating);
     w.bool(o.deep_clean);
+    w.bool(o.protect_colors);
+    w.bool(o.protect_detail);
+    w.u8(o.subdivide);
+    w.u8(o.smooth);
+    w.f32(o.crease_deg);
+    w.f32(o.hollow_mm);
+    w.u8(o.drains);
+    w.f32(o.drain_mm);
+    w.f32(o.thicken_mm);
 }
 
 pub(crate) fn read_mesh_ops(r: &mut Reader) -> R<MeshOps> {
-    Ok(MeshOps {
+    let mut ops = MeshOps {
         keep_ratio: r.f32()?,
         flatten_mm: r.f32()?,
         repair: r.bool()?,
@@ -264,7 +273,20 @@ pub(crate) fn read_mesh_ops(r: &mut Reader) -> R<MeshOps> {
         split_vertices: r.bool()?,
         drop_floating: r.bool()?,
         deep_clean: r.bool()?,
-    })
+        ..MeshOps::default()
+    };
+    if r.version >= 4 {
+        ops.protect_colors = r.bool()?;
+        ops.protect_detail = r.bool()?;
+        ops.subdivide = r.u8()?;
+        ops.smooth = r.u8()?;
+        ops.crease_deg = r.f32()?;
+        ops.hollow_mm = r.f32()?;
+        ops.drains = r.u8()?;
+        ops.drain_mm = r.f32()?;
+        ops.thicken_mm = r.f32()?;
+    }
+    Ok(ops)
 }
 
 pub(crate) fn write_ops(w: &mut Writer, c: &ColorOps, p: &PrintOps) {

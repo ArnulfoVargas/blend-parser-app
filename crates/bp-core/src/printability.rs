@@ -111,11 +111,81 @@ pub struct Report {
     pub params: Params,
     pub checks: Vec<Check>,
     pub thickness: Vec<ThicknessSample>,
+    /// Every flagged edge as its two ends, for the view to draw: open edges,
+    /// and edges shared by more than two faces or by two that disagree.
+    pub edges: EdgeMap,
     pub triangles: usize,
     pub printer: Option<String>,
     pub nozzle_mm: Option<f32>,
     pub layer_mm: Option<f32>,
     pub size_mm: Vec3,
+}
+
+/// Into the solid from a face: against its outward normal.
+pub fn inward(c: &[Vec3; 3]) -> Vec3 {
+    geom::normalize(geom::cross(geom::sub(c[2], c[0]), geom::sub(c[1], c[0])))
+}
+
+/// The wall at `at`: how far, going `inward`, to the surface across. The ray
+/// starts twice `tolerance` in, so it does not hit the face it leaves. The
+/// thickness check and the measuring tool both read walls with this.
+pub fn wall_at(bvh: &Bvh, soup: &crate::bvh::TriSoup, at: Vec3, inward: Vec3, tolerance: f32) -> Option<f32> {
+    let offset = tolerance * 2.0;
+    let hit = bvh.raycast(soup, geom::add(at, geom::scale(inward, offset)), inward);
+    hit.map(|h| h.t + offset).filter(|v| v.is_finite() && *v > offset)
+}
+
+/// Flagged edges in final millimetres, up to [`MAX_EDGES`] of each kind.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeMap {
+    pub open: Vec<[Vec3; 2]>,
+    pub non_manifold: Vec<[Vec3; 2]>,
+    pub winding: Vec<[Vec3; 2]>,
+}
+
+/// Enough to see where the problems are, without sending a broken scan's every edge.
+pub const MAX_EDGES: usize = 20_000;
+
+/// Whether component `id` of part `pi` lies inside a shell that faces out:
+/// a ray from one of its corners crosses those shells an odd number of times.
+fn nested(mesh: &Mesh, part_ids: &[Vec<u32>], shells: &[(usize, u32, f64, Vec3)], pi: usize, id: u32) -> bool {
+    let Some(t0) = part_ids[pi].iter().position(|&c| c == id) else { return false };
+    let from = mesh.parts[pi].corners(t0)[0];
+    // Off the axes, so it does not run along an edge.
+    let dir = geom::normalize([1.0, 0.000_731, 0.001_37]);
+    let solid = |p: usize, c: u32| shells.iter().any(|s| s.0 == p && s.1 == c && s.2 > 0.0);
+    let mut crossings = 0;
+    for (p, part) in mesh.parts.iter().enumerate() {
+        for (t, &c) in part_ids[p].iter().enumerate() {
+            if solid(p, c) && ray_hits(from, dir, &part.corners(t)) {
+                crossings += 1;
+            }
+        }
+    }
+    crossings % 2 == 1
+}
+
+/// Möller–Trumbore, strictly ahead of the origin.
+fn ray_hits(o: Vec3, d: Vec3, c: &[Vec3; 3]) -> bool {
+    let e1 = geom::sub(c[1], c[0]);
+    let e2 = geom::sub(c[2], c[0]);
+    let p = geom::cross(d, e2);
+    let det = geom::dot(e1, p);
+    if det.abs() < 1e-12 {
+        return false;
+    }
+    let s = geom::sub(o, c[0]);
+    let u = geom::dot(s, p) / det;
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let q = geom::cross(s, e1);
+    let v = geom::dot(d, q) / det;
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    geom::dot(e2, q) / det > 1e-6
 }
 
 fn center(c: &[Vec3; 3]) -> Vec3 {
@@ -135,6 +205,7 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
     let (lo, hi) = bounds.unwrap_or(([0.0; 3], [0.0; 3]));
     let size_mm = geom::sub(hi, lo);
     let mut open = vec![];
+    let mut edge_map = EdgeMap::default();
     let mut nonmanifold = vec![];
     let mut winding = vec![];
     let mut nonmanifold_vertices = vec![];
@@ -149,7 +220,10 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
     let mut all_closed = !soup.is_empty();
     let mut positive_shells = 0;
     let mut negative_shells = 0;
-    for part in &mesh.parts {
+    // Closed shells as (part, component, volume, centre), and each part's components.
+    let mut shells: Vec<(usize, u32, f64, Vec3)> = vec![];
+    let mut part_ids: Vec<Vec<u32>> = vec![];
+    for (pi, part) in mesh.parts.iter().enumerate() {
         let mut vertices = HashMap::<[i64; 3], u32>::default();
         let remap: Vec<u32> = part
             .positions
@@ -217,18 +291,27 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
             }
         }
         let mut closed = true;
-        for entries in edges.values() {
+        for (&(a, b), entries) in &edges {
             let at = center(&part.corners(entries[0].0));
+            let ends = [welded.positions[a as usize], welded.positions[b as usize]];
+            let flag = |list: &mut Vec<[Vec3; 2]>| {
+                if list.len() < MAX_EDGES {
+                    list.push(ends);
+                }
+            };
             if entries.len() == 1 {
                 open.push(at);
+                flag(&mut edge_map.open);
                 closed = false;
             }
             if entries.len() > 2 {
                 nonmanifold.push(at);
+                flag(&mut edge_map.non_manifold);
                 closed = false;
             }
             if entries.len() == 2 && entries[0].1 == entries[1].1 {
                 winding.push(at);
+                flag(&mut edge_map.winding);
                 closed = false;
             }
         }
@@ -262,16 +345,11 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
                 detail.push(at);
             }
             boxes.push((a, b));
-            if closed && volume[i] > 0.0 {
-                positive_shells += 1;
-            }
-            if closed && volume[i] < 0.0 {
-                negative_shells += 1;
-            }
-            if closed && volume[i] <= (params.tolerance_mm as f64).powi(3) {
-                invalid_volume.push(at);
+            if closed {
+                shells.push((pi, i as u32, volume[i], at));
             }
         }
+        part_ids.push(ids);
         all_closed &= closed;
     }
     // Same rule as the fix that lowers them, so fixing clears the warning.
@@ -306,8 +384,22 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         Some(0.0),
         collect(nonmanifold_vertices.into_iter()),
     ));
-    // Oppositely oriented shells can be valid cavity boundaries. Without robust
-    // nesting/intersection classification, their orientation expectation is unknown.
+    // An inside-out shell inside a solid one is a cavity (a hollowed model):
+    // valid, and not counted against either. Any other mix of orientations is
+    // left unjudged, since which way such shells should face is unknown.
+    for &(pi, id, volume, at) in &shells {
+        if volume < 0.0 && nested(mesh, &part_ids, &shells, pi, id) {
+            continue;
+        }
+        if volume > 0.0 {
+            positive_shells += 1;
+        } else {
+            negative_shells += 1;
+        }
+        if volume <= (params.tolerance_mm as f64).powi(3) {
+            invalid_volume.push(at);
+        }
+    }
     let mixed_shells = positive_shells > 0 && negative_shells > 0;
     if all_closed && !mixed_shells {
         checks.push(Check::new(
@@ -407,10 +499,7 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         let threshold = params.wall_mm.max(params.extrusion_mm * params.perimeters as f32);
         for c in soup.corners.iter().step_by(stride) {
             let at = center(c);
-            let inward = geom::normalize(geom::cross(geom::sub(c[2], c[0]), geom::sub(c[1], c[0])));
-            let offset = params.tolerance_mm * 2.0;
-            let hit = bvh.raycast(&soup, geom::add(at, geom::scale(inward, offset)), inward);
-            let mm = hit.map(|h| h.t + offset).filter(|v| v.is_finite() && *v > offset);
+            let mm = wall_at(&bvh, &soup, at, inward(c), params.tolerance_mm);
             if let Some(mm) = mm {
                 minimum = minimum.min(mm);
                 if mm < threshold {
@@ -443,6 +532,7 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
         params,
         checks,
         thickness,
+        edges: edge_map,
         triangles: mesh.triangle_count(),
         printer: None,
         nozzle_mm: None,
@@ -516,6 +606,10 @@ mod tests {
         b.tris.drain(2..4);
         let r = analyze(&mesh(b), params());
         assert_eq!(check(&r, "openEdges").count, 4);
+        // The view gets the open edges themselves: the rim of the missing face, 10 mm each.
+        assert_eq!(r.edges.open.len(), 4);
+        assert!(r.edges.open.iter().all(|[a, b]| (geom::len(geom::sub(*a, *b)) - 10.0).abs() < 1e-4 && a[2] == b[2]));
+        assert!(r.edges.non_manifold.is_empty() && r.edges.winding.is_empty());
         assert_eq!(check(&r, "volume").evidence, "notEvaluated");
         assert_eq!(check(&r, "thinWalls").evidence, "notEvaluated");
     }
@@ -619,7 +713,7 @@ mod tests {
         assert_eq!(check(&r, "thinWalls").evidence, "notEvaluated");
     }
     #[test]
-    fn hollow_solid_with_reversed_cavity_is_incomplete_rather_than_invalid() {
+    fn a_reversed_cavity_inside_a_solid_is_a_valid_hollow_with_measured_walls() {
         let mut outer = cuboid([10.; 3], [0.; 3]);
         let mut inner = cuboid([8.; 3], [1.; 3]);
         for t in &mut inner.tris {
@@ -629,9 +723,27 @@ mod tests {
         outer.positions.extend(inner.positions);
         outer.tris.extend(inner.tris.iter().map(|t| t.map(|v| v + offset)));
         let r = analyze(&mesh(outer), params());
-        assert_eq!(check(&r, "volume").evidence, "notEvaluated");
-        assert_eq!(check(&r, "volume").severity, "incomplete");
-        assert_eq!(check(&r, "thinWalls").evidence, "notEvaluated");
+        assert_eq!(check(&r, "volume").evidence, "checked");
+        assert_eq!(check(&r, "volume").severity, "pass");
         assert_eq!(check(&r, "winding").severity, "pass");
+        // The walls are measured: 1 mm everywhere.
+        let walls = check(&r, "thinWalls");
+        assert_eq!(walls.evidence, "estimated");
+        assert!((walls.measurement.unwrap() - 1.0).abs() < 0.01, "{:?}", walls.measurement);
+    }
+
+    #[test]
+    fn a_reversed_shell_outside_any_solid_stays_unjudged() {
+        let mut a = cuboid([10.; 3], [0.; 3]);
+        let mut b = cuboid([4.; 3], [20., 0., 0.]);
+        for t in &mut b.tris {
+            t.swap(1, 2);
+        }
+        let offset = a.positions.len() as u32;
+        a.positions.extend(b.positions);
+        a.tris.extend(b.tris.iter().map(|t| t.map(|v| v + offset)));
+        let r = analyze(&mesh(a), params());
+        assert_eq!(check(&r, "volume").evidence, "notEvaluated");
+        assert_eq!(check(&r, "thinWalls").evidence, "notEvaluated");
     }
 }

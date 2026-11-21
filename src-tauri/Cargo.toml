@@ -9,6 +9,14 @@ license.workspace = true
 name = "blend_parser_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Exposes `bench` for `examples/bench.rs`; off in the app.
+bench = ["bp-core/bench"]
+
+[[example]]
+name = "bench"
+required-features = ["bench"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

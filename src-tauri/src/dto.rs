@@ -80,6 +80,78 @@ pub struct RepairDto {
     pub duplicate_triangles: usize,
     pub loose_pieces: usize,
     pub loose_triangles: usize,
+    pub filled_holes: usize,
+    pub flipped_triangles: usize,
+    pub split_vertices: usize,
+    pub dropped_pieces: usize,
+    pub fin_triangles: usize,
+}
+
+/// What each advanced repair finds, as [`bp_core::MeshIssues`] counts it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuesDto {
+    pub holes: usize,
+    pub open_edges: usize,
+    pub flipped_triangles: usize,
+    pub shared_vertices: usize,
+    pub floating_pieces: usize,
+    pub stray_triangles: usize,
+}
+
+impl From<bp_core::MeshIssues> for IssuesDto {
+    fn from(i: bp_core::MeshIssues) -> Self {
+        Self {
+            holes: i.holes,
+            open_edges: i.open_edges,
+            flipped_triangles: i.flipped_triangles,
+            shared_vertices: i.shared_vertices,
+            floating_pieces: i.floating_pieces,
+            stray_triangles: i.stray_triangles,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThickenDto {
+    pub moved_vertices: usize,
+    pub max_offset_mm: f32,
+    pub area_mm2: f32,
+}
+
+/// What hollowing did: volumes in mm³, the voxel (its accuracy) in mm, and
+/// why it did nothing ("open", "noRoom") when it did not.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HollowDto {
+    pub solid_mm3: f32,
+    pub volume_mm3: f32,
+    pub cell_mm: f32,
+    pub drains: u8,
+    pub drains_wanted: u8,
+    pub refused: Option<&'static str>,
+}
+
+/// The best turn for printing and what it gains, as now and after.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientationDto {
+    /// Whether it differs from the current turn.
+    pub changes: bool,
+    pub rotation: bp_core::Mat3,
+    /// Which way, in the preview as it is, will face the plate.
+    pub down: [f32; 3],
+    pub overhang_mm2: [f32; 2],
+    pub contact_mm2: [f32; 2],
+}
+
+/// The mesh built without the advanced repairs, and as it is now.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshIssuesDto {
+    pub before: IssuesDto,
+    pub after: IssuesDto,
 }
 
 #[derive(Serialize)]
@@ -184,6 +256,15 @@ pub struct SettingsDto {
     pub split_vertices: bool,
     pub deep_clean: bool,
     pub drop_floating: bool,
+    pub protect_colors: bool,
+    pub protect_detail: bool,
+    pub subdivide: u8,
+    pub smooth: u8,
+    pub crease_deg: f32,
+    pub hollow_mm: f32,
+    pub drains: u8,
+    pub drain_mm: f32,
+    pub thicken_mm: f32,
     /// Rows of the rotation applied to the model as loaded.
     pub rotation: bp_core::Mat3,
     pub border_detail: u8,
@@ -214,6 +295,13 @@ pub struct Summary {
     pub small_islands: usize,
     pub min_detail_mm2: f32,
     pub contact_mm2: f32,
+    /// How far simplifying moved the surface at most, in mm; 0 unsimplified.
+    pub deviation_mm: f32,
+    /// The model's volume in mm³, and what hollowing did when it was asked for.
+    pub volume_mm3: f32,
+    pub hollow: Option<HollowDto>,
+    /// What thickening moved: vertices, the furthest one in mm and the area in mm².
+    pub thicken: Option<ThickenDto>,
     pub repair: RepairDto,
     pub estimate: EstimateDto,
     pub settings: SettingsDto,
@@ -254,6 +342,16 @@ pub fn turn(doc: &Document, prefs: &Prefs, rigid: Option<bp_core::project::Rigid
 pub struct HitDto {
     pub point: [f32; 3],
     pub normal: [f32; 3],
+}
+
+/// A wall measured where a ray landed: the point, the point across (preview
+/// units) and the thickness in mm.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallDto {
+    pub point: [f32; 3],
+    pub across: [f32; 3],
+    pub mm: Option<f32>,
 }
 
 /// What the bucket would fill, to show before it does.
@@ -483,6 +581,15 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         split_vertices,
         drop_floating,
         deep_clean,
+        protect_colors,
+        protect_detail,
+        subdivide,
+        smooth,
+        crease_deg,
+        hollow_mm,
+        drains,
+        drain_mm,
+        thicken_mm,
     } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
@@ -545,12 +652,35 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         small_islands: p.small_islands(min_detail),
         min_detail_mm2: min_detail,
         contact_mm2: stats.contact_mm2,
+        deviation_mm: stats.deviation_mm,
+        volume_mm3: stats.volume_mm3,
+        thicken: stats.thicken.map(|t| ThickenDto {
+            moved_vertices: t.moved_vertices,
+            max_offset_mm: t.max_offset,
+            area_mm2: t.area,
+        }),
+        hollow: stats.hollow.map(|h| HollowDto {
+            solid_mm3: h.solid_volume,
+            volume_mm3: h.volume,
+            cell_mm: h.cell,
+            drains: h.drains,
+            drains_wanted: h.drains_wanted,
+            refused: h.refused.map(|r| match r {
+                bp_core::hollow::Refusal::Open => "open",
+                bp_core::hollow::Refusal::NoRoom => "noRoom",
+            }),
+        }),
         repair: RepairDto {
             welded_vertices: stats.repair.welded_vertices,
             degenerate_triangles: stats.repair.degenerate_triangles,
             duplicate_triangles: stats.repair.duplicate_triangles,
             loose_pieces: stats.repair.loose_pieces,
             loose_triangles: stats.repair.loose_triangles,
+            filled_holes: stats.repair.filled_holes,
+            flipped_triangles: stats.repair.flipped_triangles,
+            split_vertices: stats.repair.split_vertices,
+            dropped_pieces: stats.repair.dropped_pieces,
+            fin_triangles: stats.repair.fin_triangles,
         },
         estimate: EstimateDto {
             layers: stats.swaps.layers,
@@ -568,6 +698,15 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             split_vertices,
             deep_clean,
             drop_floating,
+            protect_colors,
+            protect_detail,
+            subdivide,
+            smooth,
+            crease_deg,
+            hollow_mm,
+            drains,
+            drain_mm,
+            thicken_mm,
             rotation: p.rotation(),
             border_detail,
             min_island_mm2,

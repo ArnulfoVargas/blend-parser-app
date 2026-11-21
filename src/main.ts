@@ -28,6 +28,10 @@ import {
   type Printers,
   type Prefs,
   type Progress,
+  type Issues,
+  type MeshFix,
+  type OrientationPlan,
+  type PrintabilityReport,
   type Summary,
   type TurnResult,
   type Vec3,
@@ -38,8 +42,8 @@ import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
-import { setupPrintability } from "./printability";
-import { Viewer, sectionNormal, type ThumbAngle, type Section, type Tool, type View } from "./viewer";
+import { setupPrintability, wallTarget } from "./printability";
+import { Viewer, sectionNormal, type Analysis, type AnalysisData, type Axis, type ThumbAngle, type Section, type Tool, type View } from "./viewer";
 import { CutPanel } from "./cut-panel";
 import { CutReview } from "./cut-review";
 import { SeparatePanel } from "./separate-panel";
@@ -80,9 +84,19 @@ function bind(key: string, text: string) {
 }
 
 /** A backend error in the user's language. */
+/** The line of a Blender log that says what went wrong: the exception at the
+ *  end of a Python traceback, else the last line with "error", else the last line. */
+function blenderCause(log: string): string {
+  const lines = log.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const exc = [...lines].reverse().find((l) => /^[A-Z]\w*(Error|Exception)\b/.test(l));
+  return exc ?? [...lines].reverse().find((l) => /error/i.test(l)) ?? lines[lines.length - 1] ?? "";
+}
+
 function errText(e: unknown): string {
   if (isAppError(e)) {
     const params = { ...e.params };
+    // A whole Python traceback helps no one in the panel: its cause does. The full log stays in the tooltip.
+    if (e.key === "error.blenderFailed" && typeof params.detail === "string") params.detail = blenderCause(params.detail);
     for (const [k, v] of Object.entries(params)) if (typeof v === "number") params[k] = mm(v);
     return tKey(e.key, params, t("error.unknown", { detail: String(e.params?.detail ?? e.key) }));
   }
@@ -94,6 +108,8 @@ function setState(s: State, error?: unknown) {
   app.dataset.state = s;
   if (s === "error") shownError = error ?? shownError;
   bind("error", s === "error" ? errText(shownError) : "");
+  const full = isAppError(shownError) && typeof shownError.params?.detail === "string" ? shownError.params.detail : "";
+  $(".tray__error .label__msg").title = s === "error" ? full : "";
   bind("step", tKey(`progress.${step.key}`, { name: step.name }, step.name));
   $<HTMLButtonElement>("#choose").disabled = s === "converting";
   for (const id of ["#export", "#open-zip"]) $<HTMLButtonElement>(id).setAttribute("aria-disabled", String(s !== "ready"));
@@ -220,7 +236,9 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     return s !== undefined;
   },
   rotate: async (axis, degrees) => (summary ? turn(() => api.rotate(axis, degrees)) : false),
-  section: (s) => syncSection(s),
+  // Malla's section slides the same plane as the cut; the cut's panel only follows its own.
+  section: (s) => (clipOn ? syncClip() : syncSection(s)),
+  thickness: (o, d) => void measureWall(o, d),
   sectionLine: (active, error) => {
     cutDrawing = active;
     syncCutDrawing();
@@ -281,6 +299,9 @@ function renderPlace(s: Summary) {
   $<HTMLButtonElement>("#place-centre").disabled = x === 0 && y === 0;
   $<HTMLButtonElement>("#rotate-reset").disabled = !s.plate.rotated;
   $<HTMLButtonElement>("#cut-undo").disabled = !s.plate.canUndoCut;
+  const objects = s.plate.objects;
+  bind("cutCount", objects > 1 ? String(objects) : "");
+  bind("cutObjects", objects > 1 ? t("cut.objects", { n: objects }) : "");
 }
 $("#place-centre").addEventListener("click", () => void work(() => api.setOffset([0, 0])).then((s) => {
   if (!s) return;
@@ -303,6 +324,9 @@ async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
       viewer.moveMesh(r.rigid.matrix, r.rigid.shift);
       syncBrush();
       syncMeasure();
+      wall = null;
+      syncWall();
+      if (wireOn) void refreshWire();
     } else {
       await reloadMesh();
     }
@@ -402,6 +426,7 @@ const currentCut = (): Section => viewer.getSection() ?? viewer.defaultSection()
 $("#cut-off").addEventListener("click", () => {
   setSection(null);
   setTool("orbit");
+  selectTab("model");
 });
 // Cutting for real keeps the side the view shows.
 const keepOther = $<HTMLInputElement>("#cut-keep-other");
@@ -421,7 +446,6 @@ $("#cut-apply").addEventListener("click", () => {
   measured = [];
   void apply(() => api.cutModel(s.point, sectionNormal(s), !s.flip, both, $<HTMLInputElement>("#cut-lay").checked, s.selected), () => {
     setSection(null);
-    setTool("orbit");
     toast(t(both ? "cut.doneBoth" : "cut.doneKept"), "ok", { label: t("cut.undo"), run: undoCut });
   });
 });
@@ -645,9 +669,94 @@ async function reloadMesh(frame = false) {
   if (bucketRay) clearBucket();
   syncBrush();
   syncMeasure();
+  wall = null;
+  syncWall();
+  if (wireOn) void refreshWire();
   separatePanel.meshChanged();
   splitPanel.meshChanged();
   regionPanel.meshChanged();
+}
+
+// ---- Malla's view helpers: the section, the wireframe and the wall thickness ----------
+
+/** The section in Malla: the cut's plane, hiding what lies in front, without cutting anything. */
+let clipOn = false;
+/** Where each mode left the plane: Malla's section, and the cut's while Malla shows its own. */
+let meshClip: Section | null = null;
+let cutPlane: Section | null = null;
+function syncClip() {
+  const s = clipOn ? viewer.getSection() : null;
+  $<HTMLButtonElement>('button[data-tool="clip"]').dataset.on = String(clipOn);
+  const n = s ? sectionNormal(s) : null;
+  document.querySelectorAll<HTMLButtonElement>("button[data-clip-axis]").forEach((b) => b.setAttribute("aria-pressed", String(!!n && Math.abs(n[Number(b.dataset.clipAxis)]) > 1 - 1e-6)));
+  $<HTMLButtonElement>("#clip-flip").setAttribute("aria-pressed", String(s?.flip ?? false));
+}
+function clipStart() {
+  if (clipOn) return;
+  cutPlane = viewer.getSection();
+  clipOn = true;
+  viewer.setSection(meshClip ?? viewer.defaultSection());
+  syncClip();
+}
+/** Takes the section away and gives the cut its plane back. */
+function clipEnd() {
+  if (!clipOn) return;
+  meshClip = viewer.getSection();
+  clipOn = false;
+  viewer.setSection(cutPlane);
+  syncSection(cutPlane);
+  syncClip();
+}
+document.querySelectorAll<HTMLButtonElement>("button[data-clip-axis]").forEach((b) => b.addEventListener("click", () => {
+  const s = viewer.getSection();
+  if (clipOn && s) viewer.setSection({ ...viewer.defaultSection(Number(b.dataset.clipAxis) as Axis), point: s.point, flip: s.flip });
+  syncClip();
+}));
+$("#clip-flip").addEventListener("click", () => {
+  const s = viewer.getSection();
+  if (clipOn && s) viewer.setSection({ ...s, flip: !s.flip });
+  syncClip();
+});
+$("#clip-off").addEventListener("click", () => {
+  clipEnd();
+  setTool("orbit");
+});
+
+/** The wireframe: the mesh's edges over its faces, fetched again whenever the mesh changes. */
+let wireOn = false;
+let wireToken = 0;
+async function refreshWire() {
+  const mine = ++wireToken;
+  if (!wireOn || !summary) return viewer.setWire(null);
+  const wire = await api.wireMesh().catch(() => null);
+  if (mine === wireToken && wireOn) viewer.setWire(wire);
+}
+function setWire(on: boolean) {
+  if (on && app.dataset.tab !== "mesh") selectTab("mesh");
+  wireOn = on && !!summary;
+  $("#toggle-wire").setAttribute("aria-pressed", String(wireOn));
+  void refreshWire();
+}
+$("#toggle-wire").addEventListener("click", () => setWire(!wireOn));
+
+/** The wall measured with the thickness tool, kept on the model until the mesh changes. */
+let wall: { at: [Vec3, Vec3]; mm: number | null } | null = null;
+function syncWall() {
+  const text = !wall ? (app.dataset.tool === "thickness" ? t("thickness.first") : "")
+    : wall.mm === null ? t("thickness.open") : t("thickness.value", { mm: nf(wall.mm, 2) });
+  bind("thicknessOut", text);
+  viewer.setWall(wall && wall.mm !== null ? wall.at : null, wall?.mm != null ? `${nf(wall.mm, 2)} mm` : "");
+}
+async function measureWall(origin: Vec3, dir: Vec3) {
+  if (!summary) return;
+  const tolerance = Number(document.querySelector<HTMLInputElement>("#pa-toleranceMm")?.value) || 0.001;
+  try {
+    const w = await api.measureThickness(origin, dir, tolerance);
+    wall = w ? { at: [w.point, w.across], mm: w.mm } : null;
+  } catch (e) {
+    toast(errText(e), "error");
+  }
+  syncWall();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
@@ -757,7 +866,11 @@ function render(s: Summary) {
   // Mesh.
   bind("triangles", s.triangles === s.sourceTriangles
     ? t("mesh.triangles", { n: nf(s.triangles), split: nf(s.splitTriangles) })
-    : t("mesh.trianglesOf", { n: nf(s.triangles), of: nf(s.sourceTriangles) }));
+    : st.keepRatio < 0.999
+      ? t("mesh.trianglesDeviation", { n: nf(s.triangles), of: nf(s.sourceTriangles), mm: nf(s.deviationMm, 2) })
+      : t("mesh.trianglesOf", { n: nf(s.triangles), of: nf(s.sourceTriangles) }));
+  $<HTMLInputElement>("#protect-colors").checked = st.protectColors;
+  $<HTMLInputElement>("#protect-detail").checked = st.protectDetail;
   bind("contact", st.flattenMm > 0
     ? t("mesh.contactFlat", { mm: nf(st.flattenMm, 1), area: nf(s.contactMm2) })
     : t("mesh.contact", { area: nf(s.contactMm2) }));
@@ -770,6 +883,15 @@ function render(s: Summary) {
   ].filter((x): x is string => Boolean(x));
   bind("repairOut", !st.repair && !r.loosePieces ? t("mesh.notRepaired") : fixes.length ? t("mesh.fixed", { list: fixes.join(", ") }) : t("mesh.clean"));
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
+  bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
+  // The mesh tab says when something there changes the model.
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || st.thickenMm > 0 || REPAIRS.some((op) => st[op]));
+  renderRepairs(s);
+  syncSmoothForm(s);
+  syncHollowForm(s);
+  renderThicken(s);
+  void refreshIssues();
+  void refreshPlan();
   bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
 
   // Filament changes, with what the last change did.
@@ -2004,8 +2126,10 @@ const meshOps = () => void apply(() => api.setMeshOps(
   Math.max(0, Number($<HTMLInputElement>("#flatten").value) || 0),
   $<HTMLInputElement>("#repair").checked,
   Math.max(0, Number($<HTMLInputElement>("#piece").value) || 0),
+  $<HTMLInputElement>("#protect-colors").checked,
+  $<HTMLInputElement>("#protect-detail").checked,
 ));
-["#keep", "#repair", "#piece"].forEach((sel) => $(sel).addEventListener("change", meshOps));
+["#keep", "#repair", "#piece", "#protect-colors", "#protect-detail"].forEach((sel) => $(sel).addEventListener("change", meshOps));
 
 // Flattening applies with its button or Enter, so the effect is never a surprise.
 const flatten = () => {
@@ -2022,6 +2146,432 @@ $("#flatten").addEventListener("keydown", (e) => {
     e.preventDefault();
     flatten();
   }
+});
+
+// ---- advanced repairs ----------------------------------------------------------------
+
+/** The repairs with a switch of their own in Malla; each is a `MeshFix` field and a setting. */
+const REPAIRS = ["fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"] as const;
+type RepairOp = (typeof REPAIRS)[number];
+const repairGroup = $<HTMLDetailsElement>("#repair-group");
+const repairBox = (op: RepairOp) => $<HTMLInputElement>(`#repair-ops input[data-op="${op}"]`);
+/** What the repairs found, for the geometry `issuesFor` names; refetched when it changes. */
+let issues: { before: Issues; after: Issues } | null = null;
+let issuesFor = "";
+let issuesToken = 0;
+const geometryKey = (s: Summary) => JSON.stringify([s.fileName, s.sourceTriangles, s.triangles, s.sizeMm, s.settings.rotation,
+  s.settings.keepRatio, s.settings.flattenMm, s.settings.repair, s.settings.minPieceMm, ...REPAIRS.map((op) => s.settings[op])]);
+
+/** One repair's finding in words: none, or how many of what. */
+function issueText(op: RepairOp, i: Issues): string {
+  const n = (count: number) => ({ count, n: nf(count) });
+  switch (op) {
+    case "fillHoles": return i.holes ? t("repair.holes", { ...n(i.holes), edges: nf(i.openEdges) }) : t("repair.noHoles");
+    case "orient": return i.flippedTriangles ? t("repair.flipped", n(i.flippedTriangles)) : t("repair.noFlipped");
+    case "splitVertices": return i.sharedVertices ? t("repair.shared", n(i.sharedVertices)) : t("repair.noShared");
+    case "dropFloating": return i.floatingPieces ? t("repair.floating", n(i.floatingPieces)) : t("repair.noFloating");
+    case "deepClean": return i.strayTriangles ? t("repair.stray", n(i.strayTriangles)) : t("repair.noStray");
+  }
+}
+const issueCount = (op: RepairOp, i: Issues) =>
+  ({ fillHoles: i.openEdges, orient: i.flippedTriangles, splitVertices: i.sharedVertices, dropFloating: i.floatingPieces, deepClean: i.strayTriangles })[op];
+
+/** Each switch's line: what it finds, or with it on, what there was and what is left. */
+function renderRepairs(s: Summary | null) {
+  const pending = s !== null && issuesFor !== geometryKey(s);
+  for (const op of REPAIRS) {
+    const box = repairBox(op);
+    box.checked = s?.settings[op] ?? false;
+    box.disabled = !s;
+    const line = $(`#repair-ops [data-count="${op}"]`);
+    if (!s || !issues || pending) {
+      line.textContent = s ? t("repair.counting") : "";
+      line.dataset.tone = "";
+      continue;
+    }
+    const { before, after } = issues;
+    const on = s.settings[op];
+    line.textContent = on ? t("repair.beforeAfter", { before: issueText(op, before), after: issueText(op, after) }) : issueText(op, after);
+    line.dataset.tone = on && issueCount(op, before) > issueCount(op, after) ? "fixed" : issueCount(op, after) > 0 ? "found" : "";
+  }
+  const active = s ? REPAIRS.filter((op) => s.settings[op]).length : 0;
+  bind("repairSum", active ? t("repair.sum", { count: active, n: active }) : "");
+}
+
+/** Counts again when the mesh changed and the switches are in view; a newer request wins. */
+async function refreshIssues() {
+  const s = summary;
+  if (!s || app.dataset.tab !== "mesh" || !repairGroup.open) return;
+  const key = geometryKey(s);
+  if (key === issuesFor) return renderRepairs(s);
+  const mine = ++issuesToken;
+  renderRepairs(s);
+  try {
+    const found = await api.meshIssues();
+    if (mine !== issuesToken) return;
+    issues = found;
+    issuesFor = key;
+  } catch (e) {
+    if (mine === issuesToken) toast(errText(e), "error");
+  }
+  renderRepairs(summary);
+}
+repairGroup.addEventListener("toggle", () => void refreshIssues());
+
+for (const op of REPAIRS) {
+  repairBox(op).addEventListener("change", async () => {
+    const box = repairBox(op);
+    const on = box.checked;
+    // Rebuilding the mesh drops hand painting; Ctrl+Z brings it back.
+    if (summary?.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("repair.title"), kind: "warning" }))) {
+      box.checked = !on;
+      return;
+    }
+    const fix: MeshFix = { [op]: on };
+    await apply(() => api.fixMesh(fix));
+    if (summary) renderRepairs(summary);
+  });
+}
+
+// ---- best orientation for printing -----------------------------------------------------
+
+const orientGroup = $<HTMLDetailsElement>("#orient-group");
+const orientAngle = $<HTMLInputElement>("#orient-angle");
+const orientBest = $<HTMLButtonElement>("#orient-best");
+/** The proposed turn for the geometry and angle `planFor` names. */
+let plan: OrientationPlan | null = null;
+let planFor = "";
+let planToken = 0;
+/** Typed by the user; until then the angle follows the printability panel's. */
+let angleTyped = false;
+const cm2 = (mm2: number) => nf(mm2 / 100, mm2 < 1000 ? 1 : 0);
+
+/** The angle to search with: the typed one, or the printability panel's. */
+function overhangAngle(): number | null {
+  const pa = document.querySelector<HTMLInputElement>("#pa-overhangDeg");
+  if (!angleTyped && pa && pa.value !== "" && Number(pa.value) !== Number(orientAngle.value)) orientAngle.value = pa.value;
+  const v = Number(orientAngle.value);
+  const ok = orientAngle.value.trim() !== "" && Number.isFinite(v) && v >= 0 && v <= 90;
+  orientAngle.setAttribute("aria-invalid", String(!ok));
+  return ok ? v : null;
+}
+
+/** The gain in words, the button and the face tinted in the view while the section is in sight. */
+function renderPlan() {
+  const showing = app.dataset.tab === "mesh" && orientGroup.open && plan !== null && plan.changes && summary !== null;
+  viewer.setResting(showing ? plan!.down : null);
+  $("#orient-legend").hidden = !showing;
+  orientBest.disabled = !plan?.changes || !summary;
+  $<HTMLButtonElement>("#orient-reset").disabled = !summary?.plate.rotated;
+  if (!summary) return bind("orientGain", "");
+  if (!plan || planFor === "") return bind("orientGain", t("orient.searching"));
+  const [o0, o1] = plan.overhangMm2;
+  const [c0, c1] = plan.contactMm2;
+  bind("orientGain", plan.changes
+    ? t("orient.gain", { from: cm2(o0), to: cm2(o1), base0: nf(c0), base1: nf(c1) })
+    : t("orient.already", { overhang: cm2(o0), base: nf(c0) }));
+  bind("orientSum", summary.plate.rotated ? t("orient.turned") : "");
+}
+
+/** Searches again when the model or the angle changed and the section is in sight. */
+async function refreshPlan() {
+  const s = summary;
+  const deg = overhangAngle();
+  if (!s || deg === null || app.dataset.tab !== "mesh" || !orientGroup.open) return renderPlan();
+  const key = `${geometryKey(s)}|${deg}`;
+  if (key === planFor) return renderPlan();
+  const mine = ++planToken;
+  planFor = "";
+  renderPlan();
+  try {
+    const found = await api.planOrientation(deg);
+    if (mine !== planToken) return;
+    plan = found;
+    planFor = key;
+  } catch (e) {
+    if (mine === planToken) toast(errText(e), "error");
+  }
+  renderPlan();
+}
+orientGroup.addEventListener("toggle", () => void refreshPlan());
+orientAngle.addEventListener("change", () => {
+  angleTyped = true;
+  void refreshPlan();
+});
+orientBest.addEventListener("click", async () => {
+  const p = plan;
+  if (!p?.changes || !summary) return;
+  const gain = t("orient.gain", { from: cm2(p.overhangMm2[0]), to: cm2(p.overhangMm2[1]), base0: nf(p.contactMm2[0]), base1: nf(p.contactMm2[1]) });
+  measured = [];
+  // Turning keeps the triangles and their paint; Ctrl+Z turns it back.
+  await apply(() => api.setRotation(p.rotation), () => toast(t("orient.done", { gain }), "ok", { label: t("stage.undo"), run: () => void undo() }));
+});
+$("#orient-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
+
+// ---- analysis views: the printability problems painted on the model -------------------
+
+/** The report the printability panel shows; the thickness and edge views paint from it. */
+let paReport: PrintabilityReport | null = null;
+const analysisButtons = [...document.querySelectorAll<HTMLButtonElement>("button[data-analysis]")];
+const toPreview = (q: Vec3) => q.map((v) => v / (summary?.size.previewScale ?? 1)) as Vec3;
+/** The thickness a wall needs: the printability check's own threshold. */
+const wallMin = (r: PrintabilityReport) => Math.max(r.params.wallMm, r.params.extrusionMm * r.params.perimeters);
+const overhangDeg = () => paReport?.params.overhangDeg ?? (Number(document.querySelector<HTMLInputElement>("#pa-overhangDeg")?.value) || 45);
+
+function analysisData(): AnalysisData {
+  const r = paReport;
+  const k = summary?.size.previewScale ?? 1;
+  return {
+    overhangDeg: overhangDeg(),
+    // The analysis's own tolerance for resting on the plate.
+    plateTol: (r?.params.toleranceMm ?? 0.001) / k,
+    thickness: r ? { points: r.thickness.map((x) => toPreview(x.point)), mm: r.thickness.map((x) => x.mm), threshold: wallMin(r) } : undefined,
+    edges: r ? {
+      open: r.edges.open.map(([a, b]) => [toPreview(a), toPreview(b)] as [Vec3, Vec3]),
+      bad: [...r.edges.nonManifold, ...r.edges.winding].map(([a, b]) => [toPreview(a), toPreview(b)] as [Vec3, Vec3]),
+    } : undefined,
+  };
+}
+
+/** The legend: what each colour means, with the threshold that decides it. */
+function renderLegend(mode: Analysis) {
+  const legend = $("#analysis-legend");
+  legend.hidden = mode === "none";
+  if (mode === "none") return;
+  const r = paReport;
+  const keys: [string, string][] = mode === "overhang"
+    ? [["#d63020", t("analysis.overhangSteep")], ["#e8d04a", t("analysis.overhangJust", { deg: nf(overhangDeg()) })], ["#c4c6c0", t("analysis.overhangOk")]]
+    : mode === "thickness" && r
+      ? [["#d63020", t("analysis.thin", { mm: mm(wallMin(r)), lines: r.params.perimeters, nozzle: mm(summary?.settings.nozzleMm ?? 0.4) })],
+        ["#e8d04a", t("analysis.thicknessNear")], ["#60b26e", t("analysis.thick", { mm: mm(wallMin(r) * 2) })], ["#969896", t("analysis.unmeasured")]]
+      : r ? [["var(--color-error)", t("analysis.open", { count: r.edges.open.length, n: nf(r.edges.open.length) })],
+        ["var(--color-warn)", t("analysis.bad", { count: r.edges.nonManifold.length + r.edges.winding.length, n: nf(r.edges.nonManifold.length + r.edges.winding.length) })]] : [];
+  bind("analysisTitle", t(`analysis.${mode}Title` as Key, { deg: nf(overhangDeg()) }));
+  $("#analysis-keys").replaceChildren(...keys.map(([colour, label]) => {
+    const li = document.createElement("li");
+    const sw = document.createElement("i");
+    sw.style.background = colour;
+    li.append(sw, label);
+    return li;
+  }));
+}
+
+/** Paints the model with one analysis. Thickness and edges need a report: without one, it is made first. */
+async function showAnalysis(mode: Analysis) {
+  if (mode !== "none" && mode !== "overhang" && !paReport) {
+    const group = $<HTMLDetailsElement>("#printability");
+    group.open = true;
+    await printability.run();
+    if (!paReport) return;
+  }
+  if (mode === "thickness" && paReport && !paReport.thickness.length) {
+    toast(t("analysis.noThickness"), "error");
+    mode = "none";
+  }
+  analysisButtons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.analysis === mode)));
+  viewer.setAnalysis(mode, mode === "none" ? null : analysisData());
+  renderLegend(mode);
+}
+analysisButtons.forEach((b) => b.addEventListener("click", () => void showAnalysis(b.dataset.analysis as Analysis)));
+
+/** Which view shows each printability check. */
+const VIEW_OF: Record<string, Analysis> = {
+  overhang: "overhang", thinWalls: "thickness", openEdges: "edges", nonManifoldEdges: "edges", winding: "edges",
+};
+
+// ---- subdivide and smooth ---------------------------------------------------------------
+
+const smoothPasses = $<HTMLInputElement>("#smooth-passes");
+const creaseDeg = $<HTMLInputElement>("#crease-deg");
+const triCap = $<HTMLInputElement>("#tri-cap");
+const CAP_KEY = "blendparser.triangleCap";
+try {
+  const saved = Number(localStorage.getItem(CAP_KEY));
+  if (saved >= 1000 && saved <= 8_000_000) triCap.value = String(saved);
+} catch {
+  // The default cap.
+}
+const subdivideLevel = () => Number(document.querySelector<HTMLInputElement>('input[name="subdivide"]:checked')?.value ?? 0);
+/** What the form asks for, or null with the offending field marked. */
+function readSmooth(): { subdivide: number; smooth: number; crease: number; cap: number } | null {
+  const fields: [HTMLInputElement, number, number][] = [[smoothPasses, 0, 20], [creaseDeg, 0, 180], [triCap, 1000, 8_000_000]];
+  let ok = true;
+  for (const [el, lo, hi] of fields) {
+    const v = Number(el.value);
+    const good = el.value.trim() !== "" && Number.isFinite(v) && v >= lo && v <= hi && (el !== smoothPasses || Number.isInteger(v));
+    el.setAttribute("aria-invalid", String(!good));
+    ok &&= good;
+  }
+  return ok ? { subdivide: subdivideLevel(), smooth: Number(smoothPasses.value), crease: Number(creaseDeg.value), cap: Number(triCap.value) } : null;
+}
+/** The triangles the choice would give, said before applying it; over the cap, it cannot be applied. */
+function renderSmooth() {
+  const s = summary;
+  const apply = $<HTMLButtonElement>("#smooth-apply");
+  const line = document.querySelector<HTMLElement>('[data-bind="smoothEstimate"]')!;
+  const st = s?.settings;
+  bind("smoothSum", st && (st.subdivide || st.smooth) ? t("smooth.sum", { levels: st.subdivide, passes: st.smooth }) : "");
+  const want = readSmooth();
+  if (!s || !st || !want) {
+    apply.disabled = true;
+    line.textContent = s && !want ? t("smooth.invalid") : "";
+    line.dataset.tone = "";
+    return;
+  }
+  const base = Math.round(s.triangles / 4 ** st.subdivide);
+  const result = base * 4 ** want.subdivide;
+  const same = want.subdivide === st.subdivide && want.smooth === st.smooth && want.crease === st.creaseDeg;
+  const over = result > want.cap;
+  line.dataset.tone = over ? "over" : "";
+  line.textContent = over
+    ? t("smooth.over", { n: nf(result), cap: nf(want.cap) })
+    : t("smooth.estimate", { from: nf(s.triangles), to: nf(result) });
+  apply.disabled = same || over;
+}
+/** The form shows what the model has, unless the user is changing it. */
+function syncSmoothForm(s: Summary) {
+  const st = s.settings;
+  const radio = document.querySelector<HTMLInputElement>(`#subdiv-${st.subdivide}`);
+  if (radio && !$("#smooth-group").contains(document.activeElement)) radio.checked = true;
+  setIfIdle("#smooth-passes", String(st.smooth));
+  setIfIdle("#crease-deg", String(st.creaseDeg));
+  renderSmooth();
+}
+$("#smooth-group").addEventListener("input", renderSmooth);
+$("#smooth-group").addEventListener("change", renderSmooth);
+triCap.addEventListener("change", () => {
+  try {
+    if (readSmooth()) localStorage.setItem(CAP_KEY, triCap.value);
+  } catch {
+    // Not remembered.
+  }
+});
+$("#smooth-apply").addEventListener("click", async () => {
+  const want = readSmooth();
+  if (!want || !summary) return;
+  if (summary.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("smooth.title"), kind: "warning" }))) return;
+  await apply(() => api.smoothMesh(want.subdivide, want.smooth, want.crease, want.cap), () => toast(t("smooth.done"), "ok", { label: t("stage.undo"), run: () => void undo() }));
+});
+
+// ---- thickening thin details ----------------------------------------------------------
+
+const thickenMm = $<HTMLInputElement>("#thicken-mm");
+/** Typed by the user; until then the field follows what printability asks of a wall. */
+let thickenTyped = false;
+thickenMm.addEventListener("input", () => (thickenTyped = true));
+/** What printability asks of a wall, from its parameters as the panel has them. */
+function paramWallTarget(): number {
+  const v = (id: string, d: number) => Number(document.querySelector<HTMLInputElement>(`#pa-${id}`)?.value) || d;
+  const nozzle = summary?.settings.nozzleMm ?? 0.4;
+  return wallTarget({ wallMm: v("wallMm", nozzle * 2.2), extrusionMm: v("extrusionMm", nozzle * 1.1), perimeters: v("perimeters", 2) } as Parameters<typeof wallTarget>[0]);
+}
+function readThicken(): number | null {
+  const v = Number(thickenMm.value);
+  const ok = thickenMm.value.trim() !== "" && v >= 0.1 && v <= 10;
+  thickenMm.setAttribute("aria-invalid", String(!ok));
+  return ok ? v : null;
+}
+/** How far thickening went and over how much surface. */
+function renderThicken(s: Summary | null) {
+  const st = s?.settings;
+  if (document.activeElement !== thickenMm && (st?.thickenMm || !thickenTyped)) thickenMm.value = String(st?.thickenMm || paramWallTarget());
+  const r = s?.thicken;
+  bind("thickenResult", !st?.thickenMm || !r ? "" : r.movedVertices
+    ? t("thicken.result", { area: nf(r.areaMm2 / 100, 2), mm: nf(r.maxOffsetMm, 2), count: r.movedVertices, n: nf(r.movedVertices) })
+    : t("thicken.nothing", { mm: mm(st.thickenMm) }));
+  bind("thickenSum", st?.thickenMm ? t("thicken.sum", { mm: mm(st.thickenMm) }) : "");
+  const want = readThicken();
+  $<HTMLButtonElement>("#thicken-apply").disabled = !s || want === null || want === st?.thickenMm;
+  $<HTMLButtonElement>("#thicken-off").disabled = !st?.thickenMm;
+}
+$("#thicken-group").addEventListener("input", () => renderThicken(summary));
+async function thickenTo(v: number) {
+  if (!summary) return;
+  await apply(() => api.fixMesh({ thickenMm: v }), () => {
+    if (v > 0) toast(t("thicken.done"), "ok", { label: t("stage.undo"), run: () => void undo() });
+  });
+}
+$("#thicken-apply").addEventListener("click", () => {
+  const v = readThicken();
+  if (v !== null) void thickenTo(v);
+});
+$("#thicken-off").addEventListener("click", () => void thickenTo(0));
+// The thin zones as the thickness view paints them: what thickening would change.
+$("#thicken-show").addEventListener("click", () => void showAnalysis("thickness"));
+
+// ---- hollowing -------------------------------------------------------------------------
+
+const hollowWall = $<HTMLInputElement>("#hollow-wall");
+const drainMm = $<HTMLInputElement>("#drain-mm");
+/** Two lines of the nozzle: the thinnest wall that prints. */
+const minWall = () => 2 * (summary?.settings.nozzleMm ?? 0.4);
+const drainCount = () => Number(document.querySelector<HTMLInputElement>('input[name="drains"]:checked')?.value ?? 0);
+function readHollow(): { wall: number; drains: number; drain: number } | null {
+  const wall = Number(hollowWall.value);
+  const drain = Number(drainMm.value);
+  const wallOk = hollowWall.value.trim() !== "" && wall >= minWall() - 1e-6 && wall <= 50;
+  const drainOk = drainMm.value.trim() !== "" && drain >= 1 && drain <= 20;
+  hollowWall.setAttribute("aria-invalid", String(!wallOk));
+  drainMm.setAttribute("aria-invalid", String(!drainOk));
+  return wallOk && drainOk ? { wall, drains: drainCount(), drain } : null;
+}
+/** What hollowing saves, or why it did nothing. */
+function renderHollow(s: Summary | null) {
+  const st = s?.settings;
+  const line = document.querySelector<HTMLElement>('[data-bind="hollowResult"]')!;
+  bind("hollowWallHelp", t("hollow.wallHelp", { min: mm(minWall()), nozzle: mm(st?.nozzleMm ?? 0.4) }));
+  const h = s?.hollow;
+  line.dataset.tone = "";
+  if (!s || !st || !h) {
+    line.textContent = "";
+    bind("hollowSum", "");
+  } else if (h.refused) {
+    line.dataset.tone = "warn";
+    line.textContent = t(h.refused === "open" ? "hollow.open" : "hollow.noRoom");
+    bind("hollowSum", "");
+  } else {
+    const saved = h.solidMm3 - h.volumeMm3;
+    const grams = (saved / 1000) * (s.waste.prefs.densityGCm3 ?? 1.24);
+    const parts = [t("hollow.saved", { pct: nf((saved / h.solidMm3) * 100), g: nf(grams) })];
+    if (h.drainsWanted) parts.push(t("hollow.drainsMade", { count: h.drains, n: h.drains, of: h.drainsWanted }));
+    if (h.drains < h.drainsWanted) parts.push(t("hollow.drainsHint"));
+    parts.push(t("hollow.accuracy", { mm: mm(h.cellMm) }));
+    line.textContent = parts.join(" ");
+    if (h.drains < h.drainsWanted) line.dataset.tone = "warn";
+    bind("hollowSum", t("hollow.sum", { mm: mm(st.hollowMm) }));
+  }
+  const want = readHollow();
+  const same = !!st && !!want && st.hollowMm === want.wall && st.drains === want.drains && st.drainMm === want.drain;
+  $<HTMLButtonElement>("#hollow-apply").disabled = !s || !want || same;
+  $<HTMLButtonElement>("#hollow-off").disabled = !st || st.hollowMm === 0;
+}
+function syncHollowForm(s: Summary) {
+  const st = s.settings;
+  if (st.hollowMm > 0) {
+    setIfIdle("#hollow-wall", String(st.hollowMm));
+    setIfIdle("#drain-mm", String(st.drainMm));
+    const radio = document.querySelector<HTMLInputElement>(`#drains-${st.drains}`);
+    if (radio && !$("#hollow-group").contains(document.activeElement)) radio.checked = true;
+  }
+  renderHollow(s);
+}
+$("#hollow-group").addEventListener("input", () => renderHollow(summary));
+$("#hollow-group").addEventListener("change", () => renderHollow(summary));
+async function hollowTo(wall: number, drains: number, drain: number) {
+  if (!summary) return;
+  if (summary.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("hollow.title"), kind: "warning" }))) return;
+  await apply(() => api.hollowMesh(wall, drains, drain), () => {
+    const h = summary?.hollow;
+    if (wall > 0 && h && !h.refused) toast(t("hollow.done"), "ok", { label: t("stage.undo"), run: () => void undo() });
+  });
+}
+$("#hollow-apply").addEventListener("click", () => {
+  const want = readHollow();
+  if (want) void hollowTo(want.wall, want.drains, want.drain);
+});
+$("#hollow-off").addEventListener("click", () => {
+  const st = summary?.settings;
+  if (st) void hollowTo(0, st.drains, st.drainMm);
 });
 
 const colorOps = () => void apply(() => api.setColorOps(Number($<HTMLInputElement>("#detail").value), Number($<HTMLInputElement>("#island").value)));
@@ -2330,6 +2880,8 @@ $("#printer-close").addEventListener("click", () => printerDialog.close());
 // Shortcuts from the filament-change summary to the controls that lower it.
 function reveal(groupSel: string, focusSel: string) {
   const group = $<HTMLDetailsElement>(groupSel);
+  const panel = group.closest<HTMLElement>("[role=tabpanel]");
+  if (panel) selectTab(panel.id.replace("panel-", "") as Tab);
   group.open = true;
   const el = $<HTMLElement>(focusSel);
   el.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -2337,6 +2889,83 @@ function reveal(groupSel: string, focusSel: string) {
 }
 $("#go-reduce").addEventListener("click", () => reveal("#color-group", "#reduce-to"));
 $("#go-islands").addEventListener("click", () => reveal("#color-group", "#island"));
+
+// ---- tabs: model, mesh, cuts -----------------------------------------------------------
+
+type Tab = "model" | "mesh" | "cut";
+/** The modes whose view shows `tool`, from its button's data-modes; the first opens when the tool is picked elsewhere. */
+function toolModes(tool: Tool): Tab[] {
+  const b = document.querySelector<HTMLElement>(`.toolbar__btn[data-tool="${tool}"]`);
+  return (b?.dataset.modes?.split(" ") as Tab[] | undefined) ?? ["model", "mesh", "cut"];
+}
+const TAB_KEY = "blendparser.tab";
+const tabButtons = [...document.querySelectorAll<HTMLButtonElement>("[role=tab][data-tab]")];
+/** Shows one panel. The cut panel drives the cut tool: opening it turns the cut
+ *  on in the view, and leaving it hands the view back to orbiting (the plane stays). */
+function selectTab(tab: Tab, focus = false) {
+  if (app.dataset.tab === tab) return;
+  app.dataset.tab = tab;
+  for (const b of tabButtons) {
+    const on = b.dataset.tab === tab;
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
+    $(`#${b.getAttribute("aria-controls")}`).hidden = !on;
+    if (on && focus) b.focus();
+  }
+  $(".side").scrollTo({ top: 0 });
+  // Malla's view helpers belong to it: they go off on the way out.
+  if (tab !== "mesh") {
+    clipEnd();
+    if (wireOn) setWire(false);
+    wall = null;
+    syncWall();
+  }
+  placeToolOptions(tab);
+  if (tab === "mesh") void refreshIssues();
+  // The analysis views belong to Malla: elsewhere the model shows its colours, and the brush paints them.
+  else if (viewer.getAnalysis() !== "none") void showAnalysis("none");
+  void refreshPlan();
+  // Each mode shows its own tools in the view: the cut opens with its tool, and
+  // a tool the new mode does not have hands the view back to orbiting.
+  const tool = app.dataset.tool as Tool;
+  if (tab === "cut") {
+    if (!["section", "connect", "separate", "split"].includes(tool)) setTool("section");
+  } else if (!toolModes(tool).includes(tab)) setTool("orbit");
+  try {
+    // A cut left open would turn the cut on at the next start: only the others are remembered.
+    localStorage.setItem(TAB_KEY, tab === "cut" ? "model" : tab);
+  } catch {
+    // Not remembered.
+  }
+}
+/** Move and turn keep their options under the view in the model mode; in the
+ *  editing modes, with the AMS column gone, they sit at the top of the side panel. */
+function placeToolOptions(tab: Tab) {
+  const opts = $("#tool-options");
+  const foot = $(".stage__foot");
+  for (const el of document.querySelectorAll<HTMLElement>('.place[data-for="move"], .place[data-for="rotate"], .place[data-for="clip"]')) {
+    if (tab === "model") foot.insertBefore(el, $("#measure-out"));
+    else opts.append(el);
+  }
+}
+/** Blender's workspace keys: Ctrl+PageDown and Ctrl+PageUp go to the next and previous mode. */
+window.addEventListener("keydown", (e) => {
+  if (!e.ctrlKey || (e.key !== "PageDown" && e.key !== "PageUp") || document.querySelector("dialog[open]")) return;
+  e.preventDefault();
+  const i = tabButtons.findIndex((b) => b.dataset.tab === app.dataset.tab);
+  const next = (i + (e.key === "PageDown" ? 1 : -1) + tabButtons.length) % tabButtons.length;
+  selectTab(tabButtons[next].dataset.tab as Tab, true);
+});
+tabButtons.forEach((b, i) => {
+  b.addEventListener("click", () => selectTab(b.dataset.tab as Tab));
+  // Arrows move between tabs, as in any tab list.
+  b.addEventListener("keydown", (e) => {
+    const to = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : e.key === "Home" ? 0 : e.key === "End" ? tabButtons.length - 1 : null;
+    if (to === null) return;
+    e.preventDefault();
+    selectTab(tabButtons[(to + tabButtons.length) % tabButtons.length].dataset.tab as Tab, true);
+  });
+});
 
 // ---- view, tool, undo ------------------------------------------------------------------
 
@@ -2347,7 +2976,12 @@ function setView(v: View) {
 }
 
 function setTool(tool: Tool) {
+  // The section turns on with its tool and stays while other Malla tools are used.
+  if (tool === "clip") clipStart();
   app.dataset.tool = tool;
+  // A tool from another mode (its key, say) opens that mode first.
+  const modes = toolModes(tool);
+  if (!modes.includes(app.dataset.tab as Tab)) selectTab(modes[0]);
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   // A short view scrolls the shelf: the tool in use stays in sight.
   document.querySelector<HTMLButtonElement>(`#toolbar button[data-tool="${tool}"]`)?.scrollIntoView({ block: "nearest" });
@@ -2364,12 +2998,14 @@ function setTool(tool: Tool) {
   }
   syncBucket();
   // Picking the cut's tool turns the cut on.
-  syncSection(viewer.getSection());
+  if (clipOn) syncClip();
+  else syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
     : tool === "rotate" ? t("hint.rotate", { step: num(Number(turnStep.value)) })
     : tool === "region" ? t(regionPanel.hint())
     : t(`hint.${tool}`));
   syncMeasure();
+  syncWall();
 }
 
 // The plate in the view, remembered between sessions.
@@ -2421,7 +3057,15 @@ try {
 setExpanded(shelfOpen);
 
 document.querySelectorAll<HTMLButtonElement>("button[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view as View)));
-document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.addEventListener("click", () => setTool(b.dataset.tool as Tool)));
+// The section's button turns it off again when it is the tool in use.
+document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.addEventListener("click", () => toolKey(b.dataset.tool as Tool)));
+document.querySelectorAll<HTMLButtonElement>("button[data-pick-tool]").forEach((b) => b.addEventListener("click", () => setTool(b.dataset.pickTool as Tool)));
+function toolKey(tool: Tool) {
+  if (tool === "clip" && app.dataset.tool === "clip" && clipOn) {
+    clipEnd();
+    setTool("orbit");
+  } else setTool(tool);
+}
 
 async function undo() {
   if (!summary?.canUndo) return;
@@ -2444,6 +3088,9 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "g") setTool("move");
   else if (e.key === "r") setTool("rotate");
   else if (e.key === "c") setTool("section");
+  else if (e.key === "v") toolKey("clip");
+  else if (e.key === "t") setTool("thickness");
+  else if (e.key === "z") setWire(!wireOn);
   else if (e.key === "d") setTool("separate");
   else if (e.key === "j") setTool("connect");
   else if (e.key === "k") setTool("split");
@@ -2601,6 +3248,7 @@ onLangChange(() => {
   syncOutputs();
   renderRecents();
   if (summary) render(summary);
+  renderLegend(viewer.getAnalysis());
   separatePanel.update();
   connectPanel.update();
   splitPanel.update();
@@ -2642,6 +3290,18 @@ const printability = setupPrintability({
   resize: (mm) => apply(() => api.setSize(mm)),
   confirm: (message) => ask(message, { title: t("printability.title"), kind: "warning" }),
   error: e => toast(errText(e), "error"),
+  report: (r) => {
+    paReport = r;
+    // A view painted from a report that no longer describes the model goes; the slope one stays.
+    const mode = viewer.getAnalysis();
+    if (!r && (mode === "thickness" || mode === "edges")) void showAnalysis("none");
+    else if (r && mode !== "none") void showAnalysis(mode);
+  },
+  view: (code, points) => {
+    const mode = VIEW_OF[code];
+    if (mode) void showAnalysis(mode).then(() => viewer.frameOn(points.map(toPreview)));
+    else viewer.frameOn(points.map(toPreview));
+  },
 });
 
 // ---- start -------------------------------------------------------------------------------
@@ -2649,6 +3309,14 @@ const printability = setupPrintability({
 applyStatic();
 syncLock();
 setState("empty");
+let savedTab: Tab = "model";
+try {
+  const v = localStorage.getItem(TAB_KEY);
+  if (v === "mesh") savedTab = v;
+} catch {
+  // The first panel.
+}
+selectTab(savedTab);
 setTool("orbit");
 void api.printers().then((p) => {
   printers = p;

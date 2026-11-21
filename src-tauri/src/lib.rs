@@ -9,6 +9,10 @@ mod profiles;
 mod saved;
 mod state;
 
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_process::init());
@@ -76,7 +80,11 @@ pub fn run() {
             commands::set_mesh_ops,
             commands::analyze_printability,
             commands::fix_mesh,
+            commands::mesh_issues,
+            commands::smooth_mesh,
+            commands::hollow_mesh,
             commands::orient_for_print,
+            commands::plan_orientation,
             commands::set_rotation,
             commands::set_color_ops,
             commands::printers,
@@ -89,6 +97,8 @@ pub fn run() {
             commands::set_flush,
             commands::preview_mesh,
             commands::pick,
+            commands::measure_thickness,
+            commands::wire_mesh,
             commands::paint,
             commands::bucket_pick,
             commands::bucket,
