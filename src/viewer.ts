@@ -11,8 +11,10 @@ import type { Hit, PaintResult, Plate, PreviewMesh, Vec3 } from "./api";
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
-export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section";
+export type Tool = "orbit" | "brush" | "bucket" | "measure" | "size" | "move" | "rotate" | "section";
 export type Axis = 0 | 1 | 2;
+/** Where a thumbnail looks from: the default three-quarter view, the front, or the view as it is now. */
+export type ThumbAngle = "iso" | "front" | "current";
 
 /** A cut across the model: what lies past `t` (0 at the low end of the axis, 1 at the high) is hidden; flipped, what lies before. */
 export interface Section { axis: Axis; t: number; flip: boolean }
@@ -21,6 +23,8 @@ export interface BrushHandlers {
   pick(origin: Vec3, dir: Vec3): Promise<Hit | null>;
   paint(origin: Vec3, dir: Vec3): Promise<PaintResult | null>;
   endStroke(): void;
+  /** A click with the bucket, as a ray into the model. */
+  bucket(origin: Vec3, dir: Vec3): void;
   /** A click on the model with the measuring tool. */
   measure(point: Vec3): void;
   /** How the tape reads two preview points: along any line, the model's height, or one axis. */
@@ -63,6 +67,20 @@ const FINDING = [0.85, 0.12, 0.06];
 const ENOUGH = [0.05, 0.45, 0.3];
 const UNMEASURED = [0.45, 0.47, 0.46];
 
+/** RGBA rows read bottom-up from WebGL as a PNG file, the right way up. */
+async function toPng(pixels: Uint8Array, size: number): Promise<Uint8Array> {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const img = ctx.createImageData(size, size);
+  const row = size * 4;
+  for (let y = 0; y < size; y++) img.data.set(pixels.subarray((size - 1 - y) * row, (size - y) * row), y * row);
+  ctx.putImageData(img, 0, 0);
+  const blob = await new Promise<Blob | null>((done) => canvas.toBlob(done, "image/png"));
+  if (!blob) throw new Error("PNG");
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 export class Viewer {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
@@ -70,6 +88,8 @@ export class Viewer {
   private controls: OrbitControls;
   private mesh: THREE.Mesh | null = null;
   private colors: Uint8Array | null = null;
+  /** Triangles the bucket would fill, tinted with its colour until it applies or is cancelled. */
+  private highlight: { tris: number[]; rgb: [number, number, number] } | null = null;
   private data: PreviewMesh | null = null;
   private palette: [number, number, number][] = [];
   private view: View = "filament";
@@ -363,6 +383,7 @@ export class Viewer {
   /** Replaces the mesh. Keeps the camera unless `frame` is set. */
   load(data: PreviewMesh, frame: boolean) {
     this.data = data;
+    this.highlight = null;
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -453,6 +474,88 @@ export class Viewer {
     this.requestRender();
   }
 
+  /**
+   * The painted model as PNG pictures `sizes` pixels square, in the filament
+   * colours whatever the view shows, without the plate, handles or the cut, on
+   * a clear background. Null when there is no model or WebGL cannot read back.
+   */
+  async snapshot(sizes: number[], angle: ThumbAngle): Promise<Uint8Array[] | null> {
+    if (!this.mesh || !this.data) return null;
+    const src = this.mesh.geometry;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", src.getAttribute("position"));
+    geo.setAttribute("normal", src.getAttribute("normal"));
+    const colors = new Uint8Array(this.data.labels.length * 9);
+    this.data.labels.forEach((label, l) => {
+      const [r, g, b] = this.palette[label] ?? [200, 200, 200];
+      for (let k = 0; k < 9; k += 3) colors.set([r, g, b], l * 9 + k);
+    });
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3, true));
+    const scene = new THREE.Scene();
+    scene.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, flatShading: true })));
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f86, 1.6));
+    const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 10000);
+    camera.up.set(0, 0, 1);
+    const key = new THREE.DirectionalLight(0xffffff, 1.6);
+    key.position.set(0.6, -1, 1.4);
+    camera.add(key);
+    scene.add(camera);
+    const sphere = src.boundingSphere!;
+    const dir = angle === "front" ? new THREE.Vector3(0, -1, 0.18)
+      : angle === "current" ? this.camera.position.clone().sub(this.controls.target)
+      : new THREE.Vector3(0.55, -1, 0.62);
+    const dist = sphere.radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.02;
+    camera.position.copy(sphere.center).addScaledVector(dir.normalize(), dist);
+    camera.near = dist / 100;
+    camera.far = dist * 10;
+    camera.lookAt(sphere.center);
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld();
+    // Frame the model's outline rather than its bounding sphere, with a little room round it.
+    const pos = src.getAttribute("position");
+    const p = new THREE.Vector3();
+    let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+    const step = Math.max(1, Math.floor(pos.count / 30000));
+    for (let i = 0; i < pos.count; i += step) {
+      p.fromBufferAttribute(pos, i).project(camera);
+      [x0, y0, x1, y1] = [Math.min(x0, p.x), Math.min(y0, p.y), Math.max(x1, p.x), Math.max(y1, p.y)];
+    }
+    const half = Math.max(x1 - x0, y1 - y0) / 2 * 1.08;
+    if (half > 0 && Number.isFinite(half)) {
+      const full = 1000;
+      const [cx, cy] = [(x0 + x1) / 2, (y0 + y1) / 2];
+      camera.setViewOffset(full, full, ((cx - half + 1) / 2) * full, ((1 - cy - half) / 2) * full, half * full, half * full);
+    }
+
+    const r = this.renderer;
+    const clear = r.getClearColor(new THREE.Color());
+    const alpha = r.getClearAlpha();
+    const out: Uint8Array[] = [];
+    try {
+      r.setClearColor(0x000000, 0);
+      for (const size of sizes) {
+        const target = new THREE.WebGLRenderTarget(size, size, { samples: 4 });
+        try {
+          r.setRenderTarget(target);
+          r.render(scene, camera);
+          const pixels = new Uint8Array(size * size * 4);
+          r.readRenderTargetPixels(target, 0, 0, size, size, pixels);
+          out.push(await toPng(pixels, size));
+        } finally {
+          r.setRenderTarget(null);
+          target.dispose();
+        }
+      }
+    } catch {
+      return null;
+    } finally {
+      r.setClearColor(clear, alpha);
+      geo.dispose();
+      this.requestRender();
+    }
+    return out;
+  }
+
   setPalette(hex: string[]) {
     this.palette = hex.map((h) => {
       const n = parseInt(h.slice(1), 16);
@@ -472,7 +575,7 @@ export class Viewer {
     if (this.cutDrag) this.releaseCut();
     this.tool = t;
     // In brush mode the left button paints; the right button orbits and the middle pans.
-    this.controls.mouseButtons = t === "brush"
+    this.controls.mouseButtons = t === "brush" || t === "bucket"
       ? { LEFT: null as unknown as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }
       : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
     if (t !== "brush") {
@@ -480,6 +583,7 @@ export class Viewer {
       this.canvas.style.cursor = "";
     }
     if (t !== "measure") this.setHover(null);
+    if (t !== "bucket") this.setHighlight(null);
     this.sizeBox.visible = t === "size" && this.mesh !== null;
     this.grips.visible = this.sizeBox.visible;
     this.heightLine.visible = false;
@@ -521,9 +625,26 @@ export class Viewer {
     this.requestRender();
   }
 
+  /** Tints `tris` half way to `hex`; null clears the tint. */
+  setHighlight(tris: number[] | null, hex = "#ffffff") {
+    const n = parseInt(hex.slice(1), 16);
+    this.highlight = tris && { tris, rgb: [(n >> 16) & 255, (n >> 8) & 255, n & 255] };
+    this.recolorAll();
+  }
+
   private recolorAll() {
     if (!this.data || !this.colors) return;
     this.colorLeaves(0, this.data.labels.length);
+    if (this.highlight) {
+      const { offsets } = this.data;
+      const [hr, hg, hb] = this.highlight.rgb;
+      const c = this.colors;
+      for (const t of this.highlight.tris) {
+        for (let i = offsets[t] * 9; i < offsets[t + 1] * 9; i += 3) {
+          c[i] = (c[i] + hr) >> 1; c[i + 1] = (c[i + 1] + hg) >> 1; c[i + 2] = (c[i + 2] + hb) >> 1;
+        }
+      }
+    }
     this.mesh!.geometry.getAttribute("color").needsUpdate = true;
     this.requestRender();
   }
@@ -1347,7 +1468,7 @@ export class Viewer {
   }
 
   private onDown(e: PointerEvent) {
-    if (this.tool === "measure" && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
+    if ((this.tool === "measure" || this.tool === "bucket") && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
     if (this.drag || this.moveDrag || this.turnDrag || this.cutDrag) return;
     if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
     this.painting = true;
@@ -1364,6 +1485,10 @@ export class Viewer {
     // A click, not a drag to orbit, places a measuring point.
     const d = this.down;
     this.down = null;
+    if (this.tool === "bucket" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+      const [o, dir] = this.rayFrom(e);
+      this.handlers.bucket(o, dir);
+    }
     if (this.tool === "measure" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
       this.shift = e.shiftKey;
       // With Shift the point is where the tape shows it, on the axis; otherwise on the model.

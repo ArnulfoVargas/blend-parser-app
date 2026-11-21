@@ -3,7 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type Vec3 = [number, number, number];
 
-export interface Slot { hex: string; triangles: number; nearest: [number, number] | null }
+/** A spool colour: Bambu Lab's catalogue or the user's own. */
+export interface Filament { id: string; brand: string; kind: string; nameEs: string; nameEn: string; hex: string; custom: boolean }
+export interface Filaments { filaments: Filament[]; owned: string[]; inventoryOnly: boolean }
+/** `hex` is what the slot prints (its filament's colour, when it has one); `detectedHex`, the colour found in the model. */
+export interface Slot { hex: string; detectedHex: string; filament: Filament | null; filamentDeltaE: number | null; triangles: number; nearest: [number, number] | null }
 export interface Repair { weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
@@ -122,11 +126,24 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | "fix" | null;
+  undoLabel: "stroke" | "merge" | "bucket" | "fix" | null;
   paintedTriangles: number;
+  kit: KitOptions | null; // how the colour kit was last cut
 }
 
+/** How the kit is cut: joint detail, colour depth over a one-colour core, and the least piece kept apart. */
+export interface KitOptions { voxelMm: number; depthMm: number; coreSlot: number | null; minPieceMm3: number; mix: boolean; contents: KitContents; pins?: KitPins | null }
+/** Pins keying the kit's pieces together: their size and the gap round them. */
+export interface KitPins { diameterMm: number; depthMm: number; clearanceMm: number }
+/** What the kit ZIP holds besides its summary, and how sharp its pictures are. */
+export interface KitContents { threeMf: boolean; stl: "none" | "piece" | "colour"; guide: boolean; text: boolean; quality: "low" | "medium" | "high" }
+/** How far the kit export has got; 0 of 0 while it cannot tell. */
+export interface KitProgress { stage: "split" | "plates" | "pictures" | "files"; done: number; total: number }
+/** What the kit came out with: pieces, plates, and what to look at (too big, to review, left out). */
+export interface KitResult { pieces: number; plates: number; oversize: number; review: number; dropped: number; pins: number; unpinned: number; bytes: number }
 export interface Hit { point: Vec3; normal: Vec3 }
+/** What the bucket would fill: the colour found (or added), its slot now, and the triangles it reaches. */
+export interface BucketPick { targetHex: string; added: boolean; slot: number | null; sampleHex: string; deltaE: number; tris: number[] }
 export interface PaintResult extends Hit { tris: number[] }
 
 /** The paintable mesh, decoded from the binary preview payload. */
@@ -162,10 +179,20 @@ export const api = {
   setBlenderPath: (path: string) => invoke<string>("set_blender_path", { path }),
   openBlend: (path: string, added: { files: string[]; textures: [string, string][]; library: string | null; blend: string | null }) =>
     invoke<Summary>("open_blend", { path, extras: added.files, textures: added.textures, library: added.library, blend: added.blend }),
+  /** Opens a saved `.bpproj` in place of the open document; Blender is not needed. */
+  openProject: (path: string) => invoke<Summary>("open_project", { path }),
+  saveProject: (path: string) => invoke<void>("save_project", { path }),
   inspectModel: (path: string, extras: string[], library: string | null = null) =>
     invoke<Companion[]>("inspect_model", { path, extras, library }),
   setPalette: (colors: string[]) => invoke<Summary>("set_palette", { colors }),
   suggestPalette: (count: number) => invoke<Summary>("suggest_palette", { count }),
+  filaments: () => invoke<Filaments>("filaments"),
+  setFilamentOwned: (id: string, owned: boolean) => invoke<Filaments>("set_filament_owned", { id, owned }),
+  saveFilament: (filament: Filament) => invoke<Filaments>("save_filament", { filament }),
+  deleteFilament: (id: string) => invoke<Filaments>("delete_filament", { id }),
+  setInventoryOnly: (on: boolean) => invoke<Filaments>("set_inventory_only", { on }),
+  /** Puts a filament on a slot; null takes it off. */
+  setSlotFilament: (slot: number, id: string | null) => invoke<Summary>("set_slot_filament", { slot, id }),
   setSize: (mm: Vec3) => invoke<Summary>("set_size", { mm }),
   undoSize: () => invoke<Summary>("undo_size"),
   resetSize: () => invoke<Summary>("reset_size"),
@@ -196,12 +223,16 @@ export const api = {
   previewMesh: async () => decodePreview(await invoke<ArrayBuffer>("preview_mesh")),
   pick: (origin: Vec3, dir: Vec3) => invoke<Hit | null>("pick", { origin, dir }),
   paint: (origin: Vec3, dir: Vec3, radiusMm: number, slot: number) => invoke<PaintResult | null>("paint", { origin, dir, radiusMm, slot }),
+  bucketPick: (origin: Vec3, dir: Vec3, region: boolean, add: boolean) => invoke<BucketPick | null>("bucket_pick", { origin, dir, region, add }),
+  bucket: (origin: Vec3, dir: Vec3, slot: number, region: boolean, add: boolean) => invoke<Summary>("bucket", { origin, dir, slot, region, add }),
   endStroke: () => invoke<Summary>("end_stroke"),
   undo: () => invoke<Summary>("undo"),
-  /** `objects` picks the printed objects that go in; null for all. Pieces are named in `lang`. */
-  export3mf: (path: string, lang: string, objects: number[] | null = null) => invoke<void>("export_3mf", { path, lang, objects }),
-  exportColorZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
-    invoke<number>("export_color_zip", { path, thicknessMm, mainSolid, lang }),
+  /** `objects` picks the printed objects that go in; null for all. Pieces are named in `lang`. `thumbnails`: large and small PNG of the plate. */
+  export3mf: (path: string, lang: string, objects: number[] | null = null, thumbnails: [Uint8Array, Uint8Array] | null = null) =>
+    invoke<void>("export_3mf", { path, lang, objects, thumbnails: thumbnails && thumbnails.map((b) => Array.from(b)) }),
+  /** The colour kit: solid pieces on single-colour plates, STLs and an assembly guide, in one ZIP. */
+  exportColorZip: (path: string, o: KitOptions, lang: string) => invoke<KitResult>("export_color_zip", { path, options: o, lang }),
+  cancelColorZip: () => invoke<void>("cancel_color_zip"),
 };
 
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */

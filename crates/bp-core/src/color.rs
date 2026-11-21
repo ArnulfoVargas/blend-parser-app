@@ -50,6 +50,67 @@ pub fn dist2(a: Lab, b: Lab) -> f32 {
     d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
 }
 
+/// CIEDE2000 colour difference, as Bambu Studio compares filament colours.
+pub fn delta_e2000(lab1: Lab, lab2: Lab) -> f32 {
+    use std::f64::consts::PI;
+    let [l1, a1, b1] = lab1.map(f64::from);
+    let [l2, a2, b2] = lab2.map(f64::from);
+    let p25 = 25f64.powi(7);
+    let c_mean = ((a1 * a1 + b1 * b1).sqrt() + (a2 * a2 + b2 * b2).sqrt()) / 2.0;
+    let g = 0.5 * (1.0 - (c_mean.powi(7) / (c_mean.powi(7) + p25)).sqrt());
+    let (pa1, pa2) = ((1.0 + g) * a1, (1.0 + g) * a2);
+    let (pc1, pc2) = ((pa1 * pa1 + b1 * b1).sqrt(), (pa2 * pa2 + b2 * b2).sqrt());
+    let hue = |a: f64, b: f64| {
+        if a == 0.0 && b == 0.0 {
+            0.0
+        } else {
+            let h = b.atan2(a);
+            if h < 0.0 {
+                h + 2.0 * PI
+            } else {
+                h
+            }
+        }
+    };
+    let (ph1, ph2) = (hue(pa1, b1), hue(pa2, b2));
+    let dl = l2 - l1;
+    let dc = pc2 - pc1;
+    let dh = if pc1 * pc2 == 0.0 {
+        0.0
+    } else {
+        let mut d = ph2 - ph1;
+        if d < -PI {
+            d += 2.0 * PI;
+        } else if d > PI {
+            d -= 2.0 * PI;
+        }
+        2.0 * (pc1 * pc2).sqrt() * (d / 2.0).sin()
+    };
+    let l_mean = (l1 + l2) / 2.0;
+    let c_mean2 = (pc1 + pc2) / 2.0;
+    let h_sum = ph1 + ph2;
+    let h_mean = if pc1 * pc2 == 0.0 {
+        h_sum
+    } else if (ph1 - ph2).abs() <= PI {
+        h_sum / 2.0
+    } else if h_sum < 2.0 * PI {
+        (h_sum + 2.0 * PI) / 2.0
+    } else {
+        (h_sum - 2.0 * PI) / 2.0
+    };
+    let rad = |d: f64| d.to_radians();
+    let t =
+        1.0 - 0.17 * (h_mean - rad(30.0)).cos() + 0.24 * (2.0 * h_mean).cos() + 0.32 * (3.0 * h_mean + rad(6.0)).cos()
+            - 0.2 * (4.0 * h_mean - rad(63.0)).cos();
+    let dtheta = rad(30.0) * (-((h_mean - rad(275.0)) / rad(25.0)).powi(2)).exp();
+    let rc = 2.0 * (c_mean2.powi(7) / (c_mean2.powi(7) + p25)).sqrt();
+    let sl = 1.0 + 0.015 * (l_mean - 50.0).powi(2) / (20.0 + (l_mean - 50.0).powi(2)).sqrt();
+    let sc = 1.0 + 0.045 * c_mean2;
+    let sh = 1.0 + 0.015 * c_mean2 * t;
+    let rt = -(2.0 * dtheta).sin() * rc;
+    ((dl / sl).powi(2) + (dc / sc).powi(2) + (dh / sh).powi(2) + rt * (dc / sc) * (dh / sh)).sqrt() as f32
+}
+
 pub fn parse_hex(s: &str) -> Option<Rgb> {
     let h = s.trim().trim_start_matches('#');
     if h.len() != 6 {
@@ -141,6 +202,20 @@ mod tests {
         let a = srgb8_to_lab([232, 164, 97]);
         let b = srgb_to_lab([232.0 / 255.0, 164.0 / 255.0, 97.0 / 255.0]);
         assert!(dist2(a, b) < 1e-6);
+    }
+
+    #[test]
+    fn ciede2000_matches_the_reference_pairs() {
+        // Sharma, Wu and Dalal's test data.
+        let pairs = [
+            ([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485], 2.0425),
+            ([50.0, 2.5, 0.0], [73.0, 25.0, -18.0], 27.1492),
+            ([50.0, 2.5, 0.0], [50.0, 3.2592, 0.335], 1.0),
+            ([60.2574, -34.0099, 36.2677], [60.4626, -34.1751, 39.4387], 1.2644),
+        ];
+        for (a, b, de) in pairs {
+            assert!((delta_e2000(a, b) - de).abs() < 1e-3, "{a:?} {b:?}: {} vs {de}", delta_e2000(a, b));
+        }
     }
 
     #[test]

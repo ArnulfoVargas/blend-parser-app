@@ -1,0 +1,20 @@
+[package]
+name = "bp-cli"
+description = "BlendParser sin interfaz: convierte modelos y proyectos a 3MF por lotes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "blendparser-cli"
+path = "src/main.rs"
+
+[dependencies]
+bp-core.workspace = true
+bp-blend.workspace = true
+bp-3mf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
