@@ -1,5 +1,5 @@
 //! Local FDM screening in final millimetres. A report is evidence, never a print guarantee.
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -224,7 +224,7 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
     let mut shells: Vec<(usize, u32, f64, Vec3)> = vec![];
     let mut part_ids: Vec<Vec<u32>> = vec![];
     for (pi, part) in mesh.parts.iter().enumerate() {
-        let mut vertices = HashMap::<[i64; 3], u32>::new();
+        let mut vertices = HashMap::<[i64; 3], u32>::default();
         let remap: Vec<u32> = part
             .positions
             .iter()
@@ -233,8 +233,8 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
                 *vertices.entry(p.map(|v| (v / params.tolerance_mm).round() as i64)).or_insert(next)
             })
             .collect();
-        let mut edges = HashMap::<(u32, u32), Vec<(usize, bool)>>::new();
-        let mut faces = HashSet::new();
+        let mut edges = HashMap::<(u32, u32), Vec<(usize, bool)>>::default();
+        let mut faces = HashSet::default();
         let mut welded = part.clone();
         // Components use welded positions so exported seams do not look disconnected.
         welded.positions = vec![[0.0; 3]; vertices.len()];
@@ -272,13 +272,13 @@ pub fn analyze(mesh: &Mesh, params: Params) -> Report {
             if link.is_empty() {
                 continue;
             }
-            let mut graph = HashMap::<u32, Vec<u32>>::new();
+            let mut graph = HashMap::<u32, Vec<u32>>::default();
             for &(a, b) in link {
                 graph.entry(a).or_default().push(b);
                 graph.entry(b).or_default().push(a);
             }
             let first = *graph.keys().next().unwrap();
-            let mut visited = HashSet::new();
+            let mut visited = HashSet::default();
             let mut stack = vec![first];
             while let Some(v) = stack.pop() {
                 if visited.insert(v) {

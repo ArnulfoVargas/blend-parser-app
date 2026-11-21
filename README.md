@@ -4,6 +4,12 @@ App de escritorio (Tauri 2 + Rust) que convierte modelos `.blend`, OBJ, FBX, glT
 texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
 
 - Carga por arrastrar y soltar, por el diálogo o con "Abrir con…".
+- Proyectos `.bpproj` (`Ctrl+S`, `Ctrl+Shift+S`): guardan el modelo extraído con sus texturas,
+  la paleta y sus uniones, la pintura manual, las zonas de la cubeta, el tamaño, el giro,
+  los cortes, las operaciones de malla y color, la impresora y la purga por par. Se reabren
+  sin Blender, desde el menú Archivo (con los recientes), arrastrándolos o con "Abrir con…".
+  El historial de deshacer no se guarda. Al cerrar o abrir otro archivo con cambios sin
+  guardar se pide confirmación. Exportar el 3MF pasa a `Ctrl+E`.
 - Importación multicolor mediante Blender, con avisos persistentes de recursos faltantes y
   aproximaciones de color. Consulta [formatos, unidades y limitaciones](docs/importacion.md).
 - Materiales a pintura por triángulo (`paint_color`), con bordes subdivididos como hace Bambu.
@@ -13,6 +19,19 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   a mano) y persisten aunque se recalcule.
 - Vista previa 3D: orbitar, mover y acercar; vista de filamentos o de textura original.
 - Pincel sobre la malla con los colores objetivo, con deshacer (`Ctrl+Z`).
+- Mis filamentos (menú Editar): los 298 colores de un solo tono de Bambu Lab, con su línea
+  (PLA Basic, PETG HF…) y su nombre en español e inglés, más los tuyos. Marca los que tienes y,
+  con «Sugerir colores solo con los que tengo», la paleta se elige entre esas bobinas (la
+  combinación de N que deja menos ΔE frente al modelo). Cada ranura puede llevar su filamento:
+  sigue pintando lo mismo, se imprime y estima con el color de la bobina, avisa si se aleja del
+  color del modelo, y el 3MF nombra su material y, si Bambu Studio lo trae para la impresora,
+  su preset («Bambu PETG HF @BBL X1C»). El inventario se guarda en `filaments.json` y los
+  filamentos de cada ranura, en el proyecto.
+- Cubeta por color original (`K`): un clic elige el color que el modelo tiene ahí (aunque
+  la paleta lo haya unido a otra ranura) y lo manda a la ranura del pincel, en esa zona
+  conectada o en todo el modelo, o lo añade como color nuevo. La zona se resalta antes de
+  aplicar, se vuelve a clasificar con los bordes finos del modelo original, sobrevive a
+  recalcular la pintura mientras no cambien los triángulos y se deshace con `Ctrl+Z`.
 - Impresora y boquilla, con buscador: las 87 impresoras de una sola boquilla que trae Bambu
   Studio (Bambu Lab, Anker, Anycubic, Creality, Elegoo, Geeetech, Prusa, Qidi, Tronxy, Troodon,
   Voron y Voxelab), con las boquillas de su perfil, o una impresora propia con su volumen, sus
@@ -32,8 +51,60 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   simplificar la malla y aplanar la base, con estimación de cambios de filamento y purga.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
+- Separar piezas (`D`): detecta la geometría desconectada de cada objeto (uniendo antes los
+  vértices a menos de una tolerancia explícita, para no partir mallas sin soldar), la colorea
+  por objeto de destino y permite agrupar piezas, dejarlas en el modelo y elegir si quedan en
+  su posición de ensamblaje o sobre la placa. En mallas continuas sólo propone cortes
+  (estrechamientos y cambios de color), que se revisan y confirman en Sección.
+- Cortar con conectores (`J`): sobre el plano de corte, pasadores con alojamiento o espigas
+  sueltas, redondos o cuadrados, con diámetro, profundidad, giro y holgura en mm. Cada conector
+  se comprueba antes de cortar (dentro de la sección, separado de los demás, con pared alrededor
+  y sin atravesar el modelo) y se ve en la vista antes de confirmar.
+- Dividir para la impresora (`K`): cuando el modelo no cabe a su escala, propone el menor
+  número de cortes iguales por eje para que cada pieza quepa en el espacio útil de la placa
+  (margen, zonas excluidas y torre), permite ajustarlos, apoyar las piezas sobre su corte y
+  añadir espigas en las uniones, y reparte las piezas en varias placas del 3MF.
+- Región (`X`): un pincel que selecciona parte de la superficie sin pintarla (sólo caras
+  visibles o atravesando el modelo, con borrar, ampliar, pieza entera, suavizar e invertir) y la
+  elimina o la extrae como pieza, cerrada con una carcasa de grosor elegido o con una tapa a una
+  profundidad elegida. La superficie de cierre se ve antes de aplicar.
+- Separar por color: en Región, un clic elige todas las caras del mismo filamento, material
+  original o color parecido (ΔE ajustable), en todo el modelo o sólo las unidas. Los bordes de
+  color que cruzan triángulos pueden convertirse en aristas para que la selección los siga. Cada
+  región separada sale como pieza propia o todas en un objeto, y con carcasa se puede dar holgura
+  para que la pieza encaje en el hueco que deja.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
+- Piezas en un solo 3MF: cada pieza que se conserva al cortar es un objeto aparte, con su
+  origen en el centro de su huella y un nombre estable («Modelo – pieza 2») que sigue a la
+  pieza aunque se dejen otras fuera. Al exportar se eligen las piezas; el acomodo fino y el
+  reparto en placas se dejan a Bambu Studio (Organizar).
+- Miniatura en el 3MF: el modelo con sus colores de filamento, dibujado por el visor
+  (tres cuartos, de frente o como se ve; en Preferencias), para Bambu Studio, Bambu Handy y
+  el explorador de archivos. Si el visor no puede dibujarla, el 3MF sale sin ella.
+- Exportar por color: divide el modelo en piezas **sólidas** (no cáscaras) que encajan entre sí.
+  Cada voxel interior toma el color de la superficie pintada más cercana, o solo hasta una
+  profundidad dada sobre un núcleo de un color; las migas se unen a su vecina. Las superficies se
+  pulen igual a ambos lados de cada unión: el borde de color queda sobre la superficie del modelo
+  (sin ranura), la piel sigue al modelo sin escalones y cada unión se simplifica una sola vez y se
+  usa volteada por la otra pieza, así que encajan exactas y siguen cerradas. Por fuera, cada
+  pieza lleva la superficie exacta del modelo (aristas vivas incluidas): se hace un poco más grande
+  y se recorta contra el modelo con una booleana exacta ([manifold-rust](https://github.com/larsbrubaker/manifold-rust),
+  Rust puro). Si el modelo no está cerrado, esa pieza conserva la superficie aproximada y el resumen
+  lo dice. Opcionalmente,
+  **espigas** como de bloque de juguete: en cada unión con sitio, una espiga redonda (diámetro,
+  alto y holgura a elegir) sale de una pieza y entra en un alojamiento de la otra, con pared
+  alrededor; la superficie de ambas se coloca exacta sobre su cilindro, así que la holgura se
+  respeta aunque sea menor que el vóxel. La guía avisa de qué uniones llevan espiga y de las que
+  entrarían desde direcciones cruzadas. El `.zip` trae un
+  3MF con las piezas giradas sobre su cara más plana y acomodadas en placas de un solo color, un
+  STL por pieza y una guía de armado (`guia-de-armado.html` con imágenes de cada paso, e
+  `instrucciones.txt`).
+- Exportar por color: un `.zip` con un STL cerrado por color y una lista de colores. Las piezas
+  siguen los bordes pintados (cada subdivisión de la pintura, no el color dominante de cada
+  triángulo) y cada color es una cáscara del grosor elegido hacia dentro. Opcionalmente el color
+  principal es el cuerpo, con un hueco de ese grosor donde encaja cada cáscara: juntos forman el
+  modelo sin solaparse.
 
 ## Perfiles de impresora en el 3MF
 
@@ -59,14 +130,29 @@ la boquilla y la altura de capa.
 Quedan fuera las impresoras de dos extrusores (H2D, H2D Pro, H2C, X2D): su 3MF necesita otra
 configuración de filamentos.
 
+## Catálogo de filamentos
+
+`crates/bp-3mf/src/filaments.json` sale de `resources/profiles/BBL/filament/filaments_color_codes.json`
+y `resources/profiles/BBL.json` de [BambuStudio](https://github.com/bambulab/BambuStudio):
+
+```sh
+node scripts/sync-filaments.mjs [commit]
+```
+
+Guarda los colores de un solo tono (los degradados y multicolor no son un color de ranura), el
+material de cada línea según su preset y las impresoras para las que Bambu Studio tiene preset.
+Como el de impresoras, se ejecuta solo a mano y el JSON se guarda en Git.
+
 ## Torre de purga y desperdicio
 
 BlendParser **no cambia la torre** que el 3MF pide a Bambu Studio: sigue en la posición de
-siempre (`wipe_tower_x/y`) y la genera el laminador. La app estima su huella (20 mm de ancho
-más 3 mm de borde, y un fondo según la purga de la capa con más cambios, o el que se indique)
-y aparta ese espacio, con la separación y el margen elegidos, al comprobar si el modelo cabe
-y al ajustarlo a la placa. El modelo sigue centrado. Las zonas excluidas (`bed_exclude_area`)
-salen del perfil de Bambu Studio.
+siempre (`wipe_tower_x/y`) y la genera el laminador. La app estima su huella como la imprime
+Bambu Studio 2, cuadrada y con nervios: el lado justo para el cebado de la capa con más
+cambios con un 150 % de separación, nunca menos que el mínimo para su altura (5 mm hasta
+5 mm de alto, 20 a 100 mm, 40 a 250 mm, 60 desde 350 mm), más los nervios (8 mm / √2) y 3 mm
+de borde; o el lado que se indique. Aparta ese espacio, con la separación y el margen
+elegidos, al comprobar si el modelo cabe y al ajustarlo a la placa. El modelo sigue
+centrado. Las zonas excluidas (`bed_exclude_area`) salen del perfil de Bambu Studio.
 
 Los cambios se cuentan como el laminador los hace: un color solo cuenta en una capa si ocupa
 al menos dos líneas de la boquilla (las astillas de borde no provocan un cambio), y el orden de
@@ -75,9 +161,20 @@ filamento cargado y termina en el que conviene a la siguiente.
 
 El desperdicio suma tres partes, cada una una sola vez: purga en los cambios (a la basura;
 la parte aprovechada en relleno o soportes se muestra aparte y no suma), purga inicial y
-torre (paredes, relleno de capas sin cambios, borde y cebado por cambio). En las impresoras
-sin conducto de purga la purga acaba en la torre, pero se cuenta como purga. La purga por
-cambio va de 107 a 800 mm³ según ΔE y lo que aclara el nuevo color, como sugiere Bambu Studio.
+torre (paredes y nervios con líneas de 1,25 × la boquilla, puentes cada 10 mm en las capas sin
+cambios, primera capa maciza, borde y 45 mm³ de cebado por cambio, como `filament_prime_volume`).
+En las impresoras sin conducto de purga la purga acaba en la torre, pero se cuenta como purga.
+
+La purga por cambio es la de la tabla de Bambu Studio (`FlushVolCalc.cpp`):
+
+- Si los dos colores están a menos de ΔE00 5 de los que Bambu midió
+  (`resources/flush/flush_data_standard.txt`), el valor medido; si no, su fórmula, que combina
+  la distancia de tono y saturación con cuánto aclara el nuevo color (de oscuro a claro cuesta
+  mucho más), con un mínimo de 60 mm³.
+- Encima, el volumen de la boquilla de la impresora (`nozzle_volume`: 92 mm³ en A1, A1 mini y
+  A2L, 107 en X1 y P1, 110 en P2S, 145 en H2S; 0 en las demás), con un tope de 900 mm³.
+- Con filamentos elegidos en las ranuras, al menos lo que Bambu midió entre materiales (PLA y
+  PETG, 650 mm³), 230 mm³ al pasar a un material de soporte y 700 como mínimo al salir de él.
 
 Pendiente: comparar la estimación con lo que informa Bambu Studio al laminar. La CLI de
 Bambu Studio 2.x se cierra al laminar desde la línea de comandos en Windows, así que hay que
@@ -181,6 +278,25 @@ Prueba con un modelo real y Blender instalado:
 BP_SAMPLE_BLEND=ruta/al/modelo.blend cargo test --release -p bp-blend -- --ignored --nocapture
 ```
 
+## Línea de comandos
+
+`blendparser-cli` convierte modelos (con Blender) y proyectos `.bpproj` (sin Blender) a 3MF
+sin abrir la ventana, uno o una carpeta entera, con el mismo núcleo y escritor que la app.
+Toma las impresoras propias, la última elegida y los ajustes del desperdicio de la carpeta de
+configuración de la app, así que con el mismo modelo y ajustes da el mismo 3MF (sin miniatura,
+que la dibuja el visor).
+
+```sh
+cargo build --release -p bp-cli          # target/release/blendparser-cli
+blendparser-cli convert dragon.blend --colors 4 --size 80 -o dragon.3mf
+blendparser-cli convert modelos/ --out-dir 3mf/ --printer "Bambu Lab X1 Carbon" --nozzle 0.6 --json
+blendparser-cli printers                 # identificadores de impresora
+blendparser-cli --help
+```
+
+Un archivo que falla no detiene el lote. Códigos de salida: 0 todo convertido, 1 convertido con
+avisos, 2 algún archivo falló, 64 uso incorrecto.
+
 ## Actualizaciones automáticas
 
 Desde la 0.0.2, BlendParser busca una versión nueva al arrancar (y al pulsar la versión en
@@ -251,11 +367,23 @@ crates/
     optimize    Limpieza de islas de color por adyacencia
     estimate    Cambios de filamento por capa, con su sentido
     waste       Desperdicio: purga por par de colores, purga inicial y torre
-    split       Una pieza cerrada por color (cáscara o sólido completo)
+    split       Piezas sólidas por color: vóxeles, Voronoi de la superficie, tetraedros marchantes,
+                pulido compartido entre piezas, espigas con holgura (split/pins.rs) y piel
+                exacta del modelo por booleanas (split/skin.rs)
+    kit         Orientación de cada pieza, acomodo en placas por color y orden de armado
+    render      Renderizador por software para las imágenes de la guía
+    split/shells  Cáscaras que siguen la pintura y encajan en el cuerpo principal
     bvh         Picking del pincel, consulta por esfera, punto más cercano
+    fit         Cortes necesarios para caber en la placa y reparto de piezas en placas
+    connect     Conectores de un corte: geometría, holgura, validación y colocación automática
+    separate    Piezas desconectadas con tolerancia de soldadura y propuestas de corte
+    region      Cortar una región de la superficie: carcasa (con holgura) o tapa, con su validación
+    refine      Bordes de color dentro de un triángulo convertidos en aristas, sin uniones en T
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
-  bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa
+  bp-3mf/     Escritor del 3MF de Bambu (pintado o por placas), STL binario y ZIP con guía de armado;
+              plate: espacio en la placa; project_file: el contenedor .bpproj
+  bp-cli/     blendparser-cli: conversión por lotes sin interfaz
 src-tauri/    Capa de aplicación: comandos, estado, malla en binario hacia la UI
 src/          Interfaz (TypeScript + three.js), diseño Dose
   api.ts        Tipos y llamadas al backend
@@ -282,6 +410,121 @@ con Blender unos 2,5 s.
   detectados a 5 bajó los cambios estimados de 1 472 a 641.
 - **Aplanar base**: corta la base en un plano (la malla sigue cerrada) para dar más
   contacto con la placa y evitar soportes o despegues.
+
+### Separar piezas (#36, primera etapa y propuestas)
+
+- **Piezas desconectadas.** Dos triángulos son de la misma pieza si comparten un vértice después
+  de unir los vértices a menos de la tolerancia elegida (0,01 mm por defecto, de 0 a 5 mm).
+  Las posiciones idénticas siempre se unen; piezas que sólo se tocan cara con cara sin compartir
+  vértices siguen separadas. Cada pieza informa si su superficie es cerrada y coherente; una
+  pieza abierta se puede separar, pero se marca para revisarla.
+- **Separar** no cambia la geometría de ninguna pieza: sus triángulos, colores y pintura a mano
+  pasan tal cual a su objeto nuevo, y todo se deshace con `Ctrl+Z` en un solo paso.
+- **Mallas continuas.** Nunca se presentan como ya separadas. Las propuestas se leen de perfiles
+  de sección a lo largo de X, Y y Z: un estrechamiento con secciones al menos el doble de anchas a
+  ambos lados (sólo en superficies cerradas, donde el área tiene sentido) o un cambio del
+  filamento dominante que se mantiene varias secciones. Cada propuesta dice qué señal la origina
+  y se abre en Sección para ajustar el plano y confirmar; no hay porcentajes de confianza.
+  El reconocimiento semántico (IA) queda para una etapa posterior.
+
+### Cortar con conectores (#34, primera etapa)
+
+- **Tipos.** *Pasador y alojamiento*: los pasadores salen de una mitad (A, bajo el plano, o B) y
+  entran en alojamientos de la otra. *Espiga suelta*: alojamientos en las dos mitades y espigas
+  impresas aparte, cada una como objeto propio, de pie junto al modelo.
+- **Medidas.** Diámetro (redondo, polígono de 32 lados con los vértices sobre el círculo) o lado
+  (cuadrado, con giro), profundidad en cada mitad y **holgura**: el alojamiento es la forma del
+  conector crecida la holgura en cada lado y también en el fondo. El panel muestra siempre las
+  medidas resultantes (p. ej. *Pasador Ø5 × 6 mm → alojamiento Ø5,4 × 6,2 mm*).
+- **Colocar.** Clic sobre el plano para añadir, clic sobre uno para quitarlo; *Colocar
+  automáticamente* pone uno o dos por sección donde caben con pared. Los conectores siguen al
+  plano si se mueve o gira.
+- **Validación** (en el backend, antes de ofrecer el corte): fuera de la sección, solapado con
+  otro, pared demasiado fina (al borde de la sección o a la superficie alrededor del alojamiento,
+  mínimo dos anchos de boquilla y 0,8 mm) o alojamiento que atraviesa el modelo. Después se
+  hace el corte completo en una copia y se exige que todas las piezas queden cerradas.
+- **Geometría.** Los alojamientos y pasadores se construyen como agujeros en la tapa del corte
+  con su pared y su fondo, sin operaciones booleanas generales: las mitades quedan cerradas y
+  coinciden al volver a su posición de ensamblaje. Las mitades se llaman `… A` y `… B` y las
+  espigas `… espiga N`; cortar con conectores se deshace en un solo paso con `Ctrl+Z`.
+- La unión de cola de milano queda para una etapa posterior.
+
+### Dividir para caber en la impresora (#35)
+
+- **Espacio útil por placa.** El rectángulo centrado en la placa que respeta el margen, las zonas
+  que la impresora excluye y la reserva de la torre (con su separación), y la altura máxima de la
+  impresora. Cada placa recibe sus piezas centradas, igual que un modelo entero.
+- **Propuesta.** Por eje, el menor número de cortes iguales para que cada celda quepa de pie
+  (X e Y pueden intercambiarse, porque las piezas se giran 90° en la placa). Cada corte se ve
+  como un plano del color de su eje y se puede mover, añadir o quitar; *Proponer de nuevo*
+  vuelve a la propuesta. **Nunca se reduce la escala**: sólo con *Prefiero reducir la escala*,
+  que aplica *Ajustar a la placa*.
+- **Comprobación.** Antes de aplicar se corta una copia y se informa de piezas, placas, cortes y
+  espigas; las piezas que no caben (por ejemplo, tras mover un corte), las uniones sin sitio
+  para una espiga y las piezas de menos de 3 mm se muestran y, si alguna no cabe, no se divide.
+- **Orientación.** *Como está el modelo* (siempre cabe en la altura propuesta) o *Sobre un corte*:
+  cada pieza se apoya en su mayor cara de corte cuando así sigue cabiendo.
+- **Placas.** Las piezas se reparten en filas, con la separación elegida, en el menor número de
+  placas. El 3MF lleva una placa de Bambu Studio por grupo, colocada en la rejilla que usa
+  Bambu Studio (columnas ≈ √n, una quinta parte de placa entre placas) y una torre por placa.
+- **Identificadores estables.** Cada pieza es un objeto llamado por su celda, `nombre X-Y-Z`
+  (`dragón 2-1-1`), y las espigas `nombre espiga N`, para la exportación y una futura guía de
+  armado (#11). Toda la división se deshace en un paso, con la pintura.
+- **Espigas opcionales** (#34): en cada unión, donde caben con pared, alojamientos en las dos
+  piezas y espigas sueltas que se reparten como una pieza más.
+### Región: cortar, extraer o separar lo seleccionado (#37)
+
+- **Seleccionar no pinta.** La selección es una máscara aparte sobre los triángulos de la vista
+  previa; no cambia colores ni pintura y no es un paso de deshacer. El pincel usa el radio del
+  pincel de color. **Caras visibles** sólo toma las caras que miran a la cámara y siguen a la que
+  toca el puntero; **Atravesar** toma todas las del radio, también las de detrás. `Alt` borra
+  mientras se mantiene.
+- **Una selección de superficie no define un volumen,** así que el cierre se elige siempre:
+  - **Carcasa:** la región se empuja hacia dentro el grosor elegido a lo largo de las normales y
+    se cierra con paredes por su borde. El resto recibe la misma cara interior y las mismas paredes
+    al revés: un hueco donde la carcasa encaja, sin solaparse con ella.
+  - **Tapa:** cada borde se cierra con un abanico hasta su centro, hundido la profundidad elegida
+    (negativa: hacia fuera). El resto recibe el mismo abanico al revés.
+- **Validación antes de aplicar.** Se rechazan, diciendo por qué, la selección vacía, bordes que
+  pasan por aristas con más de dos caras, bordes que se tocan en un vértice, tapas que se doblan o
+  atraviesan la superficie, paredes más delgadas que la carcasa, carcasas que se doblan en curvas
+  cerradas, piezas sin volumen y eliminar todo el modelo. Un agujero que el modelo ya tenía se
+  conserva y se avisa; no se presenta como cerrado.
+- **Vista previa:** la selección se resalta sobre la pintura, la superficie de cierre propuesta se
+  ve en naranja a través del modelo y, con **Ver separadas**, las piezas se apartan en la dirección
+  en que salen. Se indican los volúmenes de las piezas y del resto.
+- **Aplicar** es un solo paso de `Ctrl+Z`. Las caras que quedan conservan colores y pintura a mano;
+  la cara interior de una carcasa toma la pintura de la cara de la que sale, y paredes y tapas el
+  color de la superficie donde la tocan. Varias regiones separadas son varias piezas; extraídas
+  quedan en su sitio o sobre la placa junto al modelo, con la cara exterior hacia arriba.
+
+### Separar por color y volúmenes complementarios (#38)
+
+- **Elegir por color.** Con **Por color**, un clic toma las caras del mismo **filamento**, del mismo
+  **material original** o de un **color parecido** al de la cara tocada (ΔE CIE76 con tolerancia
+  ajustable), en todo el modelo o **sólo unidas**. Ctrl o Mayús añaden y Alt quita. Al cambiar el
+  criterio o la tolerancia se repite la última elección sobre la selección de la que partió, y el
+  recuento de triángulos y regiones deja ver si la selección se fragmenta.
+- **Bordes dentro de un triángulo.** La pintura subdivide los triángulos donde cruza un borde de
+  color. **Seguir los bordes de color** convierte esas subdivisiones en triángulos reales: los
+  triángulos vecinos se dividen igual y no quedan uniones en T, así que la malla sigue cerrada.
+  Después, elegir por filamento sigue el borde tal como está pintado, también donde cruzaba un
+  triángulo original, en vez de tomar cada triángulo por su color mayoritario. Las UV, los colores
+  y la pintura a mano pasan a los triángulos nuevos. Es un paso de `Ctrl+Z`. Si la malla está
+  simplificada, aplanada o reparada de forma que sus triángulos ya no son los del modelo, se avisa y
+  no se hace.
+- **Piezas separadas o agrupadas.** Cada región desconectada sale como un objeto propio, o con
+  **Un solo objeto** todas juntas.
+- **Volúmenes complementarios.** Con carcasa, la pieza ya no se superpone al modelo: el resto queda
+  con el hueco que ocupaba. La **holgura** hace la pieza más pequeña que su hueco por el borde (se
+  retira a lo largo de la superficie) y por debajo (es más fina), sin tocar el hueco. Se rechazan
+  una holgura igual o mayor que el grosor, una holgura que dobla las caras del borde y unas piezas
+  que sumen más volumen que el modelo, es decir, que se solapan. Se avisa de las piezas más
+  estrechas que dos anchos de boquilla, además de lo que ya comprueba Región (paredes finas y
+  carcasas que se doblan en curvas cerradas).
+- Las piezas son objetos del 3MF como cualquier corte. La exportación por color en ZIP sigue oculta
+  y se rehace en #1; cuando vuelva, los bordes ajustados también le sirven, porque usa el color
+  mayoritario de cada triángulo.
 
 ### Diagnóstico local de viabilidad FDM (alcance inicial de #7)
 

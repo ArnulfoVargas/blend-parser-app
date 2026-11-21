@@ -1,7 +1,7 @@
 //! The working geometry that gets painted and exported, derived from the source
 //! scene by the mesh operations: simplification and base flattening.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::bvh::TriSoup;
 use crate::geom::{self, BaryTri, Vec3, ROOT};
@@ -100,7 +100,7 @@ impl MeshPart {
                 }
             }
         }
-        let mut ids: HashMap<u32, u32> = HashMap::new();
+        let mut ids: HashMap<u32, u32> = HashMap::default();
         self.tris
             .iter()
             .map(|t| {
@@ -375,7 +375,7 @@ impl Mesh {
             origin: None,
         }
         .components();
-        let mut owner_of_piece: HashMap<u32, u32> = HashMap::new();
+        let mut owner_of_piece: HashMap<u32, u32> = HashMap::default();
         let mut added: Vec<Vec<usize>> = vec![vec![]; work.parts.len()];
         for (t, &piece) in pieces.iter().enumerate() {
             let owner = *owner_of_piece.entry(piece).or_insert_with(|| {
@@ -385,7 +385,7 @@ impl Mesh {
             added[owner as usize].push(t);
         }
         // The biggest piece of wall is the cavity the drains go into.
-        let mut sizes: HashMap<u32, usize> = HashMap::new();
+        let mut sizes: HashMap<u32, usize> = HashMap::default();
         for &p in &pieces {
             *sizes.entry(p).or_default() += 1;
         }
@@ -396,7 +396,7 @@ impl Mesh {
             }
             let part = &mut work.parts[pi];
             let outer_tris = part.tris.len();
-            let mut local: HashMap<u32, u32> = HashMap::new();
+            let mut local: HashMap<u32, u32> = HashMap::default();
             let mut main_tris = vec![];
             for &t in tris {
                 let f = inner.tris[t].map(|v| {
@@ -573,7 +573,7 @@ impl Mesh {
             fixed += keep.iter().filter(|&&k| !k).count();
             s.retain(&keep);
             w.retain(&keep);
-            let mut weld: HashMap<[i64; 3], u32> = HashMap::new();
+            let mut weld: HashMap<[i64; 3], u32> = HashMap::default();
             let id: Vec<u32> = w
                 .positions
                 .iter()
@@ -583,7 +583,7 @@ impl Mesh {
             let key = |a: u32, b: u32| (id[a as usize].min(id[b as usize]), id[a as usize].max(id[b as usize]));
             // A flip can leave the next needle beside it; a few passes settle it.
             for _ in 0..4 {
-                let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+                let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::default();
                 for (ti, t) in w.tris.iter().enumerate() {
                     for k in 0..3 {
                         edges.entry(key(t[k], t[(k + 1) % 3])).or_default().push(ti);
@@ -664,7 +664,8 @@ impl Mesh {
     fn weld(&mut self, eps: f32, min_area: f32) {
         let mut report = self.repair;
         for part in &mut self.parts {
-            let mut seen: HashMap<[i64; 3], u32> = HashMap::with_capacity(part.positions.len());
+            let mut seen: HashMap<[i64; 3], u32> =
+                HashMap::with_capacity_and_hasher(part.positions.len(), Default::default());
             let mut remap = Vec::with_capacity(part.positions.len());
             let mut positions = Vec::with_capacity(part.positions.len());
             for p in &part.positions {
@@ -680,8 +681,8 @@ impl Mesh {
             for t in &mut part.tris {
                 *t = t.map(|v| remap[v as usize]);
             }
-            let mut faces: std::collections::HashSet<[u32; 3]> =
-                std::collections::HashSet::with_capacity(part.tris.len());
+            let mut faces: rustc_hash::FxHashSet<[u32; 3]> =
+                rustc_hash::FxHashSet::with_capacity_and_hasher(part.tris.len(), Default::default());
             let keep: Vec<bool> = (0..part.tris.len())
                 .map(|i| {
                     let t = part.tris[i];
@@ -714,7 +715,7 @@ impl Mesh {
         for part in &mut self.parts {
             // Taking a fin off can turn the next one into a fin; a few passes settle it.
             for _ in 0..8 {
-                let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+                let mut edges: HashMap<(u32, u32), Vec<usize>> = HashMap::default();
                 for (ti, t) in part.tris.iter().enumerate() {
                     for k in 0..3 {
                         let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -816,7 +817,7 @@ impl Mesh {
         }
         let mut report = self.repair;
         for part in &mut self.parts {
-            let mut uses: HashMap<(u32, u32), usize> = HashMap::new();
+            let mut uses: HashMap<(u32, u32), usize> = HashMap::default();
             for t in &part.tris {
                 for k in 0..3 {
                     let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -837,7 +838,7 @@ impl Mesh {
                 continue;
             }
             // A loop is the boundary vertices its edges join.
-            let mut parent: HashMap<u32, u32> = HashMap::new();
+            let mut parent: HashMap<u32, u32> = HashMap::default();
             for &(a, b, _) in &boundary {
                 parent.entry(a).or_insert(a);
                 parent.entry(b).or_insert(b);
@@ -846,14 +847,14 @@ impl Mesh {
                     parent.insert(rb, ra);
                 }
             }
-            let mut centre: HashMap<u32, (Vec3, f32)> = HashMap::new();
+            let mut centre: HashMap<u32, (Vec3, f32)> = HashMap::default();
             for &(a, _, _) in &boundary {
                 let root = find(&mut parent, a);
                 let c = centre.entry(root).or_insert(([0.0; 3], 0.0));
                 c.0 = geom::add(c.0, part.positions[a as usize]);
                 c.1 += 1.0;
             }
-            let mut hub: HashMap<u32, u32> = HashMap::new();
+            let mut hub: HashMap<u32, u32> = HashMap::default();
             for (&root, &(sum, n)) in &centre {
                 hub.insert(root, part.positions.len() as u32);
                 part.positions.push(geom::scale(sum, 1.0 / n));
@@ -878,7 +879,7 @@ impl Mesh {
     pub fn orient(&mut self) {
         let mut report = self.repair;
         for part in &mut self.parts {
-            let mut edges: HashMap<(u32, u32), Vec<(usize, bool)>> = HashMap::new();
+            let mut edges: HashMap<(u32, u32), Vec<(usize, bool)>> = HashMap::default();
             for (ti, t) in part.tris.iter().enumerate() {
                 for k in 0..3 {
                     let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -1214,7 +1215,7 @@ impl Mesh {
     /// vertices between neighbours so the mesh stays closed.
     pub fn split_at(&mut self, cut: f32) {
         for part in &mut self.parts {
-            let mut on_edge: HashMap<(u32, u32), u32> = HashMap::new();
+            let mut on_edge: HashMap<(u32, u32), u32> = HashMap::default();
             let mut tris = Vec::with_capacity(part.tris.len());
             let mut origin = part.origin.as_ref().map(|o| Vec::with_capacity(o.len()));
             let below = |z: f32| z < cut;
@@ -1304,13 +1305,8 @@ impl Mesh {
     }
 
     pub fn soup(&self) -> TriSoup {
-        let mut s = TriSoup::default();
-        for (pi, part) in self.parts.iter().enumerate() {
-            for i in 0..part.tris.len() {
-                s.push(part.corners(i), pi as u32, i as u32);
-            }
-        }
-        s
+        let counts: Vec<usize> = self.parts.iter().map(|p| p.tris.len()).collect();
+        TriSoup::gather(&counts, |p, t| self.parts[p].corners(t))
     }
 }
 
@@ -1579,7 +1575,7 @@ pub(crate) fn boundary_loops(part: &MeshPart) -> (usize, usize) {
         }
         i = j;
     }
-    let mut parent: HashMap<u32, u32> = HashMap::new();
+    let mut parent: HashMap<u32, u32> = HashMap::default();
     fn find(parent: &mut HashMap<u32, u32>, x: u32) -> u32 {
         let mut root = x;
         while let Some(&up) = parent.get(&root).filter(|&&up| up != root) {
@@ -1823,7 +1819,7 @@ mod tests {
     /// Every edge of every part run once each way: closed and consistently wound.
     fn sealed(m: &Mesh) -> bool {
         m.parts.iter().all(|p| {
-            let mut count: HashMap<(u32, u32), i32> = HashMap::new();
+            let mut count: HashMap<(u32, u32), i32> = HashMap::default();
             for t in &p.tris {
                 for k in 0..3 {
                     *count.entry((t[k], t[(k + 1) % 3])).or_default() += 1;

@@ -40,28 +40,66 @@ impl Node {
         match self {
             Node::Leaf(l) => *l,
             Node::Split(_) => {
+                // Slots are few: a small table on the stack, the full one only if a label needs it.
+                let mut small = [0.0f32; 32];
+                if self.area_by_label(1.0, &mut small) {
+                    return argmax(&small);
+                }
                 let mut area = [0.0f32; 256];
-                let mut top = 0u8;
-                self.area_by_label(1.0, &mut area, &mut top);
-                // Labels above `top` have no area; ties go to the higher label, as before.
-                area[..=top as usize].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u8)
+                self.area_by_label(1.0, &mut area);
+                argmax(&area)
             }
         }
     }
 
-    /// Adds each leaf's share of `a` to its label; `top` ends at the highest label seen.
-    fn area_by_label(&self, a: f32, out: &mut [f32; 256], top: &mut u8) {
+    /// Adds each leaf's share of the area to its label; false when a label does not fit in `out`.
+    fn area_by_label(&self, a: f32, out: &mut [f32]) -> bool {
         match self {
-            Node::Leaf(l) => {
-                out[*l as usize] += a;
-                *top = (*top).max(*l);
-            }
-            Node::Split(k) => k.iter().for_each(|n| n.area_by_label(a * 0.25, out, top)),
+            Node::Leaf(l) => match out.get_mut(*l as usize) {
+                Some(v) => {
+                    *v += a;
+                    true
+                }
+                None => false,
+            },
+            Node::Split(k) => k.iter().all(|n| n.area_by_label(a * 0.25, out)),
+        }
+    }
+
+    /// Whether any leaf has `label`.
+    pub fn has(&self, label: u8) -> bool {
+        match self {
+            Node::Leaf(l) => *l == label,
+            Node::Split(k) => k.iter().any(|n| n.has(label)),
         }
     }
 
     pub fn is_split(&self) -> bool {
         matches!(self, Node::Split(_))
+    }
+
+    /// The label of the leaf containing barycentric point `b` of the root triangle.
+    pub fn label_at(&self, b: Bary) -> u8 {
+        let (mut node, mut u) = (self, b);
+        loop {
+            match node {
+                Node::Leaf(l) => return *l,
+                Node::Split(k) => {
+                    // Inverse of `geom::split4`: which child holds `u`, and where in it.
+                    let (i, w) = if u[0] >= 0.5 {
+                        (0, [2.0 * u[0] - 1.0, 2.0 * u[1], 2.0 * u[2]])
+                    } else if u[1] >= 0.5 {
+                        (1, [2.0 * u[0], 2.0 * u[1] - 1.0, 2.0 * u[2]])
+                    } else if u[2] >= 0.5 {
+                        (2, [2.0 * u[1], 2.0 * u[2] - 1.0, 2.0 * u[0]])
+                    } else {
+                        (3, [1.0 - 2.0 * u[2], 1.0 - 2.0 * u[0], 1.0 - 2.0 * u[1]])
+                    };
+                    node = &k[i];
+                    u = w;
+                }
+            }
+        }
     }
 
     /// Relabels every leaf through `map` (old slot -> new slot), collapsing
@@ -82,15 +120,46 @@ impl Node {
     }
 }
 
+/// The index of the largest value; the last one on a tie, as `Iterator::max_by` gives.
+fn argmax(v: &[f32]) -> u8 {
+    let mut best = 0;
+    for (i, &x) in v.iter().enumerate() {
+        if x >= v[best] {
+            best = i;
+        }
+    }
+    best as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dominant_takes_the_largest_area_also_past_32_slots() {
+        let n = Node::Split(Box::new([Node::Leaf(3), Node::Leaf(5), Node::Leaf(3), Node::Leaf(1)]));
+        assert_eq!(n.dominant(), 3);
+        // A tie goes to the higher slot, as before.
+        let n = Node::Split(Box::new([Node::Leaf(3), Node::Leaf(5), Node::Leaf(5), Node::Leaf(3)]));
+        assert_eq!(n.dominant(), 5);
+        let n = Node::Split(Box::new([Node::Leaf(40), Node::Leaf(40), Node::Leaf(2), Node::Leaf(1)]));
+        assert_eq!(n.dominant(), 40);
+    }
 
     #[test]
     fn relabel_collapses_uniform_splits() {
         let n = Node::Split(Box::new([Node::Leaf(0), Node::Leaf(2), Node::Leaf(0), Node::Leaf(2)]));
         assert_eq!(n.relabel(&[0, 1, 0]), Node::Leaf(0));
         assert!(n.relabel(&[0, 1, 1]).is_split());
+    }
+
+    #[test]
+    fn label_at_finds_the_leaf_under_a_point() {
+        let n = Node::Split(Box::new([Node::Leaf(1), Node::Leaf(2), Node::Leaf(3), Node::Leaf(4)]));
+        // The centre of each child, mapped back to the root.
+        for (kid, label) in geom::split4(&ROOT).iter().zip(1..) {
+            assert_eq!(n.label_at(geom::bary_in(kid, [1.0 / 3.0; 3])), label);
+        }
     }
 }
 
@@ -145,6 +214,19 @@ fn build_node(cx: &Ctx, t: &BaryTri, edge: f32, depth: u8) -> Node {
     }
     counts[labels[0] as usize] += 1;
     Node::Leaf(counts.iter().enumerate().max_by_key(|c| *c.1).map_or(0, |(i, _)| i as u8))
+}
+
+/// Paints triangle `tri` of part `part` alone, as [`build`] does.
+pub fn build_one(
+    field: &ColorField,
+    shape: &Mesh,
+    cls: &Classifier,
+    params: PaintParams,
+    part: usize,
+    tri: usize,
+) -> Node {
+    let cx = Ctx { field, shape, cls, params, part, tri };
+    build_node(&cx, &ROOT, geom::longest_edge(&shape.parts[part].corners(tri)), 0)
 }
 
 /// Paints every triangle of every part, in parallel.

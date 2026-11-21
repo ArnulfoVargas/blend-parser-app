@@ -3,7 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type Vec3 = [number, number, number];
 
-export interface Slot { hex: string; triangles: number; nearest: [number, number] | null }
+/** A spool colour: Bambu Lab's catalogue or the user's own. */
+export interface Filament { id: string; brand: string; kind: string; nameEs: string; nameEn: string; hex: string; custom: boolean }
+export interface Filaments { filaments: Filament[]; owned: string[]; inventoryOnly: boolean }
+/** `hex` is what the slot prints (its filament's colour, when it has one); `detectedHex`, the colour found in the model. */
+export interface Slot { hex: string; detectedHex: string; filament: Filament | null; filamentDeltaE: number | null; triangles: number; nearest: [number, number] | null }
 export interface Repair {
   weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number;
   filledHoles: number; flippedTriangles: number; splitVertices: number; droppedPieces: number; finTriangles: number;
@@ -86,6 +90,14 @@ export interface Plate {
   rotated: boolean; // turned from the file's orientation
   canUndoCut: boolean;
   objects: number; // the model and the pieces cut off it that were kept
+  objectIds: number[]; // their ids: 0 is the model, piece `id` is named with `id + 1`
+  /** Split across plates, each plate's own check; empty on one plate. */
+  plates: (PlateCheck & { objects: number; sizeMm: Vec3; centre: Vec3; fits: boolean; fitsHeight: boolean })[];
+}
+/** Where one plate's pieces land and what is wrong with them. */
+export interface PlateCheck {
+  area: Rect; excluded: Rect[]; model: Rect; tower: Rect | null; usable: Rect;
+  offPlate: boolean; inMargin: boolean; onExcluded: boolean; onTower: boolean; towerOffPlate: boolean; fitFactor: number;
 }
 
 /** The turn with the least overhang: areas in mm² as now and after it; `down` faces the plate after it. */
@@ -108,7 +120,7 @@ export interface Summary {
   fileName: string;
   fileSize: number;
   importWarnings: { code: string; detail: string }[];
-  parts: { name: string; triangles: number }[];
+  parts: { name: string; triangles: number; object: number; plate: number; previewStart: number; previewEnd: number }[];
   materials: Material[];
   slots: Slot[];
   sourceTriangles: number;
@@ -135,14 +147,68 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | "fix" | null;
+  undoLabel: "stroke" | "merge" | "fix" | "cut" | "separate" | "connect" | "split" | "regionRemove" | "regionExtract" | "refine" | "bucket" | null;
   paintedTriangles: number;
+  kit: KitOptions | null; // how the colour kit was last cut
 }
 
+/** How the kit is cut: joint detail, colour depth over a one-colour core, and the least piece kept apart. */
+export interface KitOptions { voxelMm: number; depthMm: number; coreSlot: number | null; minPieceMm3: number; mix: boolean; contents: KitContents; pins?: KitPins | null }
+/** Pins keying the kit's pieces together: their size and the gap round them. */
+export interface KitPins { diameterMm: number; depthMm: number; clearanceMm: number }
+/** What the kit ZIP holds besides its summary, and how sharp its pictures are. */
+export interface KitContents { threeMf: boolean; stl: "none" | "piece" | "colour"; guide: boolean; text: boolean; quality: "low" | "medium" | "high" }
+/** How far the kit export has got; 0 of 0 while it cannot tell. */
+export interface KitProgress { stage: "split" | "plates" | "pictures" | "files"; done: number; total: number }
+/** What the kit came out with: pieces, plates, and what to look at (too big, to review, left out). */
+export interface KitResult { pieces: number; plates: number; oversize: number; review: number; dropped: number; pins: number; unpinned: number; bytes: number }
 export interface Hit { point: Vec3; normal: Vec3 }
 /** A wall: where it was measured, the point across, and its thickness in mm (null with nothing across). */
 export interface Wall { point: Vec3; across: Vec3; mm: number | null }
+
+/** What the bucket would fill: the colour found (or added), its slot now, and the triangles it reaches. */
+export interface BucketPick { targetHex: string; added: boolean; slot: number | null; sampleHex: string; deltaE: number; tris: number[] }
+
+/** The connectors of a cut: sizes in mm, centres on the plane in preview coordinates. */
+export interface Connectors {
+  kind: "pin" | "dowel"; pinsOnA: boolean; shape: "round" | "square" | "hexagon";
+  sizeMm: number; depthMm: number; clearanceMm: number; angleDeg: number; at: Vec3[];
+}
+/** Per connector what is wrong with it (null when fine) and, when all are fine, the objects the cut leaves. */
+export interface ConnectReview { issues: ("outside" | "overlap" | "thinWall" | "tooDeep" | null)[]; objects: number | null }
+
+/** Cuts that make every piece fit the printer, and the room each plate has. */
+export interface SplitProposal { cuts: [number[], number[], number[]]; roomMm: [number, number]; heightMm: number; sizeMm: Vec3 }
+export interface SplitPlan {
+  cuts: [number[], number[], number[]]; // preview coordinates
+  layOnCut: boolean; gapMm: number;
+  dowels: { shape: "round" | "square" | "hexagon"; sizeMm: number; depthMm: number; clearanceMm: number } | null;
+}
+export interface SplitPiece { name: string; sizeMm: Vec3; plate: number | null; laid: boolean; small: boolean; dowel: boolean }
+export interface SplitReport { pieces: SplitPiece[]; plates: number; cuts: number; joints: number; jointsMissing: number; fits: boolean }
+
+/** A disconnected piece of the model. */
+export interface Piece { part: number; partName: string; object: number; triangles: number; sizeMm: Vec3; centre: Vec3; closed: boolean }
+/** The pieces and, per preview triangle, the index of its piece (2³²−1 for none). */
+export interface Pieces { pieces: Piece[]; triPiece: number[] }
+/** A plane worth reviewing as a cut, in preview coordinates, with the signal behind it. */
+export interface CutProposal {
+  part: number; axis: 0 | 1 | 2; point: Vec3; normal: Vec3;
+  signal: { kind: "neck"; areaMm2: number; beforeMm2: number; afterMm2: number } | { kind: "colour"; from: number; to: number };
+}
 export interface PaintResult extends Hit { tris: number[] }
+
+/** The region selection: global preview triangle ids, and how many separate regions they make. */
+export interface Selection { tris: number[]; count: number; regions: number }
+export type SelectionOp = "grow" | "connected" | "smooth" | "invert" | "clear" | "get";
+/** How a cut region is closed: a shell `mm` thick, the piece `clearanceMm` smaller than its pocket; or a cap `mm` deep (negative bulges out). */
+export type Closure = { kind: "shell"; mm: number; clearanceMm?: number } | { kind: "cap"; mm: number };
+/** The region goes, or each connected region becomes an object of its own (with `group`, all one object). */
+export type RegionAction = { kind: "remove" } | { kind: "extract"; layFlat: boolean; group?: boolean };
+/** What makes faces the same colour: the model's material, the filament slot, or the colour within ΔE. */
+export type ColourMatch = { kind: "material" } | { kind: "filament" } | { kind: "similar"; deltaE: number };
+/** What cutting the region out would make, in preview units: flat xyz triangles (9 numbers each). */
+export interface RegionPreview { closure: number[]; pieces: number[][]; directions: Vec3[]; pieceMm3: number[]; restMm3: number; closed: boolean; small: number }
 
 /** The paintable mesh, decoded from the binary preview payload. */
 export interface PreviewMesh {
@@ -186,10 +252,20 @@ export const api = {
   setBlenderPath: (path: string) => invoke<string>("set_blender_path", { path }),
   openBlend: (path: string, added: { files: string[]; textures: [string, string][]; library: string | null; blend: string | null }) =>
     invoke<Summary>("open_blend", { path, extras: added.files, textures: added.textures, library: added.library, blend: added.blend }),
+  /** Opens a saved `.bpproj` in place of the open document; Blender is not needed. */
+  openProject: (path: string) => invoke<Summary>("open_project", { path }),
+  saveProject: (path: string) => invoke<void>("save_project", { path }),
   inspectModel: (path: string, extras: string[], library: string | null = null) =>
     invoke<Companion[]>("inspect_model", { path, extras, library }),
   setPalette: (colors: string[]) => invoke<Summary>("set_palette", { colors }),
   suggestPalette: (count: number) => invoke<Summary>("suggest_palette", { count }),
+  filaments: () => invoke<Filaments>("filaments"),
+  setFilamentOwned: (id: string, owned: boolean) => invoke<Filaments>("set_filament_owned", { id, owned }),
+  saveFilament: (filament: Filament) => invoke<Filaments>("save_filament", { filament }),
+  deleteFilament: (id: string) => invoke<Filaments>("delete_filament", { id }),
+  setInventoryOnly: (on: boolean) => invoke<Filaments>("set_inventory_only", { on }),
+  /** Puts a filament on a slot; null takes it off. */
+  setSlotFilament: (slot: number, id: string | null) => invoke<Summary>("set_slot_filament", { slot, id }),
   setSize: (mm: Vec3) => invoke<Summary>("set_size", { mm }),
   undoSize: () => invoke<Summary>("undo_size"),
   resetSize: () => invoke<Summary>("reset_size"),
@@ -198,9 +274,42 @@ export const api = {
   /** Turns the model about X (0), Y (1) or Z (2); it lands back on the plate. */
   rotate: (axis: number, degrees: number) => invoke<TurnResult>("rotate", { axis, degrees }),
   resetRotation: () => invoke<TurnResult>("reset_rotation"),
-  /** Cuts `t` of the way along `axis`, keeping the low or high side, and the other as its own object if asked. */
-  cutModel: (axis: number, t: number, keepLow: boolean, keepOther: boolean) => invoke<Summary>("cut_model", { axis, t, keepLow, keepOther }),
+  /** The exact preview plane; its coordinates include stretch, before uniform scale. */
+  cutModel: (point: Vec3, normal: Vec3, keepLow: boolean, keepOther: boolean, layOnCut: boolean, selected: number[]) =>
+    invoke<Summary>("cut_model", { point, normal, keepLow, keepOther, layOnCut, selected }),
+  previewCut: (point: Vec3, normal: Vec3, keepLow: boolean, keepOther: boolean, layOnCut: boolean, selected: number[]) =>
+    invoke<number>("preview_cut", { point, normal, keepLow, keepOther, layOnCut, selected }),
   undoCut: () => invoke<Summary>("undo_cut"),
+  detectPieces: (weldMm: number) => invoke<Pieces>("detect_pieces", { weldMm }),
+  /** Same group: one object; null: the piece stays in the object it is in. */
+  separatePieces: (weldMm: number, groups: (number | null)[], layFlat: boolean) => invoke<Summary>("separate_pieces", { weldMm, groups, layFlat }),
+  proposeCuts: (selected: number[]) => invoke<CutProposal[]>("propose_cuts", { selected }),
+  proposeSplit: (gapMm: number) => invoke<SplitProposal>("propose_split", { gapMm }),
+  previewSplit: (plan: SplitPlan) => invoke<SplitReport>("preview_split", { plan }),
+  splitForPrinter: (plan: SplitPlan, dowelLabel: string) => invoke<Summary>("split_for_printer", { plan, dowelLabel }),
+  addPlate: () => invoke<Summary>("add_plate"),
+  moveToPlate: (object: number, plate: number) => invoke<Summary>("move_to_plate", { object, plate }),
+  cloneObject: (object: number, label: string, gapMm?: number) => invoke<Summary>("clone_object", { object, label, gapMm }),
+  arrangePlates: (gapMm: number) => invoke<Summary>("arrange_plates", { gapMm }),
+  clearPlate: (plate: number) => invoke<Summary>("clear_plate", { plate }),
+  suggestConnectors: (point: Vec3, normal: Vec3, selected: number[], connectors: Connectors) =>
+    invoke<Vec3[]>("suggest_connectors", { point, normal, selected, connectors }),
+  /** Checks every connector on a copy and, when all are fine, makes the cut there. */
+  previewConnectedCut: (point: Vec3, normal: Vec3, layOnCut: boolean, selected: number[], connectors: Connectors) =>
+    invoke<ConnectReview>("preview_connected_cut", { point, normal, layOnCut, selected, connectors }),
+  cutConnected: (point: Vec3, normal: Vec3, layOnCut: boolean, selected: number[], connectors: Connectors, dowelLabel: string) =>
+    invoke<Summary>("cut_connected", { point, normal, layOnCut, selected, connectors, dowelLabel }),
+  /** Adds to the region selection, or with `add` false takes from it; never paints. */
+  selectRegion: (origin: Vec3, dir: Vec3, radiusMm: number, add: boolean, through: boolean) =>
+    invoke<PaintResult | null>("select_region", { origin, dir, radiusMm, add, through }),
+  selectionOp: (op: SelectionOp) => invoke<Selection>("selection_op", { op }),
+  previewRegion: (closure: Closure, action: RegionAction) => invoke<RegionPreview>("preview_region", { closure, action }),
+  applyRegion: (closure: Closure, action: RegionAction) => invoke<Summary>("apply_region", { closure, action }),
+  /** Selects (or with `add` false, deselects) the faces the same colour as preview triangle `seed`; with `base`, starting from that selection. */
+  selectByColour: (seed: number, how: ColourMatch, contiguous: boolean, add: boolean, base: number[] | null = null) =>
+    invoke<Selection>("select_by_colour", { seed, how, contiguous, add, base }),
+  /** Makes colour borders that cross triangles edges of the mesh; one undoable step. */
+  refineToPaint: () => invoke<Summary>("refine_to_paint"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),
   setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number, protectColors?: boolean, protectDetail?: boolean) =>
@@ -229,11 +338,20 @@ export const api = {
     return { positions: new Float32Array(buf, 8, vertices * 3), ends: new Uint32Array(buf, 8 + vertices * 12, edges * 2) };
   },
   paint: (origin: Vec3, dir: Vec3, radiusMm: number, slot: number) => invoke<PaintResult | null>("paint", { origin, dir, radiusMm, slot }),
+  bucketPick: (origin: Vec3, dir: Vec3, region: boolean, add: boolean) => invoke<BucketPick | null>("bucket_pick", { origin, dir, region, add }),
+  bucket: (origin: Vec3, dir: Vec3, slot: number, region: boolean, add: boolean) => invoke<Summary>("bucket", { origin, dir, slot, region, add }),
   endStroke: () => invoke<Summary>("end_stroke"),
   undo: () => invoke<Summary>("undo"),
-  export3mf: (path: string) => invoke<void>("export_3mf", { path }),
-  exportColorZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
-    invoke<number>("export_color_zip", { path, thicknessMm, mainSolid, lang }),
+  /** `objects` picks the printed objects that go in; null for all. Pieces are named in `lang`. `thumbnails`: large and small PNG of the plate. */
+  export3mf: (path: string, lang: string, objects: number[] | null = null, thumbnails: [Uint8Array, Uint8Array] | null = null) =>
+    invoke<void>("export_3mf", { path, lang, objects, thumbnails: thumbnails && thumbnails.map((b) => Array.from(b)) }),
+  /** The colour kit: solid pieces on single-colour plates, STLs and an assembly guide, in one ZIP. */
+  exportColorZip: (path: string, o: KitOptions, lang: string) => invoke<KitResult>("export_color_zip", { path, options: o, lang }),
+  cancelColorZip: () => invoke<void>("cancel_color_zip"),
+  exportColorShellsZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
+    invoke<number>("export_color_shells_zip", { path, thicknessMm, mainSolid, lang }),
+  exportColorAssembly: (path: string, thicknessMm: number, mainSolid: boolean) =>
+    invoke<number>("export_color_assembly", { path, thicknessMm, mainSolid }),
 };
 
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */

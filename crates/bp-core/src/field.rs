@@ -16,12 +16,8 @@ pub struct ColorField<'a> {
 impl<'a> ColorField<'a> {
     pub fn new(scene: &'a Scene, mesh: &Mesh) -> Self {
         let transfer = mesh.parts.iter().any(|p| p.origin.is_none()).then(|| {
-            let mut soup = TriSoup::default();
-            for (pi, p) in scene.parts.iter().enumerate() {
-                for t in 0..p.tris.len() {
-                    soup.push(p.corners(t), pi as u32, t as u32);
-                }
-            }
+            let counts: Vec<usize> = scene.parts.iter().map(|p| p.tris.len()).collect();
+            let soup = TriSoup::gather(&counts, |p, t| scene.parts[p].corners(t));
             (Bvh::build(&soup), soup)
         });
         Self { scene, transfer }

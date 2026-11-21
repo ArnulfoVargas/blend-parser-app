@@ -13,6 +13,16 @@ pub struct TriSoup {
 }
 
 impl TriSoup {
+    /// The triangles of several parts, `count[p]` of part `p` with `corners(p, t)`, gathered in parallel.
+    pub fn gather(counts: &[usize], corners: impl Fn(usize, usize) -> [Vec3; 3] + Sync) -> Self {
+        let n = counts.iter().sum();
+        let mut s = TriSoup { corners: Vec::with_capacity(n), owner: Vec::with_capacity(n) };
+        for (p, &count) in counts.iter().enumerate() {
+            s.corners.par_extend((0..count).into_par_iter().map(|t| corners(p, t)));
+            s.owner.extend((0..count as u32).map(|t| (p as u32, t)));
+        }
+        s
+    }
     pub fn push(&mut self, corners: [Vec3; 3], part: u32, tri: u32) {
         self.corners.push(corners);
         self.owner.push((part, tri));
@@ -80,7 +90,93 @@ pub struct RayHit {
 
 const LEAF: usize = 4;
 
+/// A traversal stack that lives on the call stack. Queries run millions of
+/// times from every core while painting; a heap stack per query made the
+/// threads queue on the allocator. Each split halves its triangles, so the tree
+/// is at most 32 levels deep for a u32 count and a depth-first walk holds at
+/// most one entry per level plus one: 64 slots never run out.
+struct Stack<T: Copy> {
+    items: [T; 64],
+    len: usize,
+}
+
+impl<T: Copy> Stack<T> {
+    #[inline]
+    fn new(first: T) -> Self {
+        Self { items: [first; 64], len: 1 }
+    }
+    #[inline]
+    fn push(&mut self, v: T) {
+        self.items[self.len] = v;
+        self.len += 1;
+    }
+    #[inline]
+    fn pop(&mut self) -> Option<T> {
+        (self.len > 0).then(|| {
+            self.len -= 1;
+            self.items[self.len]
+        })
+    }
+}
+/// Subtrees under this many triangles are built whole by one thread.
+const PARALLEL_MIN: usize = 1 << 13;
+
+/// Sets the bounds of `nodes[ni]` and, unless it is small or flat, splits it at
+/// the median of its longest axis. `order` is the part of the global order that
+/// starts at `base`. Returns whether it split.
+fn split(nodes: &mut Vec<Node>, ni: usize, order: &mut [u32], base: usize, soup: &TriSoup, centroid: &[Vec3]) -> bool {
+    let (start, count) = (nodes[ni].start as usize, nodes[ni].count as usize);
+    let range = &mut order[start - base..start - base + count];
+    let grow = |(mut b, mut cb): (Aabb, Aabb), &t: &u32| {
+        for p in soup.corners[t as usize] {
+            b.grow(p);
+        }
+        cb.grow(centroid[t as usize]);
+        (b, cb)
+    };
+    let merge = |(a, ca): (Aabb, Aabb), (b, cb): (Aabb, Aabb)| {
+        // Componentwise, so an empty box (lo = MAX, hi = MIN) changes nothing.
+        let join = |x: Aabb, y: Aabb| Aabb {
+            lo: std::array::from_fn(|i| x.lo[i].min(y.lo[i])),
+            hi: std::array::from_fn(|i| x.hi[i].max(y.hi[i])),
+        };
+        (join(a, b), join(ca, cb))
+    };
+    let empty = (Aabb::EMPTY, Aabb::EMPTY);
+    let (b, cb) = if count >= PARALLEL_MIN * 4 {
+        range.par_iter().fold(|| empty, grow).reduce(|| empty, merge)
+    } else {
+        range.iter().fold(empty, grow)
+    };
+    nodes[ni].bounds = b;
+    if count <= LEAF {
+        return false;
+    }
+    let ext = geom::sub(cb.hi, cb.lo);
+    let axis = if ext[0] >= ext[1] && ext[0] >= ext[2] {
+        0
+    } else if ext[1] >= ext[2] {
+        1
+    } else {
+        2
+    };
+    if ext[axis] <= 0.0 {
+        return false;
+    }
+    let half = count / 2;
+    range.select_nth_unstable_by(half, |&a, &b| centroid[a as usize][axis].total_cmp(&centroid[b as usize][axis]));
+    let left = nodes.len();
+    nodes.push(Node { bounds: Aabb::EMPTY, start: start as u32, count: half as u32 });
+    nodes.push(Node { bounds: Aabb::EMPTY, start: (start + half) as u32, count: (count - half) as u32 });
+    nodes[ni].start = left as u32;
+    nodes[ni].count = 0;
+    true
+}
+
 impl Bvh {
+    /// Median-split tree, four triangles a leaf. The top is split on one
+    /// thread until there is a subtree for every core; those are built in
+    /// parallel and appended.
     pub fn build(soup: &TriSoup) -> Self {
         let n = soup.len();
         if n == 0 {
@@ -89,7 +185,59 @@ impl Bvh {
         let centroid: Vec<Vec3> =
             soup.corners.par_iter().map(|c| geom::scale(geom::add(geom::add(c[0], c[1]), c[2]), 1.0 / 3.0)).collect();
         let mut order: Vec<u32> = (0..n as u32).collect();
-        let nodes = subtree(&mut order, 0, &centroid, &soup.corners);
+        let mut nodes = vec![Node { bounds: Aabb::EMPTY, start: 0, count: n as u32 }];
+        let want = rayon::current_num_threads() * 4;
+        let mut queue = std::collections::VecDeque::from([0usize]);
+        let mut subtrees = vec![];
+        while let Some(ni) = queue.pop_front() {
+            if nodes[ni].count as usize <= PARALLEL_MIN || queue.len() + subtrees.len() + 1 >= want {
+                subtrees.push(ni);
+            } else if split(&mut nodes, ni, &mut order, 0, soup, &centroid) {
+                let left = nodes[ni].start as usize;
+                queue.push_back(left);
+                queue.push_back(left + 1);
+            }
+        }
+        // Each subtree owns its run of `order`.
+        subtrees.sort_by_key(|&ni| nodes[ni].start);
+        let mut runs = Vec::with_capacity(subtrees.len());
+        let mut rest = order.as_mut_slice();
+        let mut at = 0usize;
+        for &ni in &subtrees {
+            let (start, count) = (nodes[ni].start as usize, nodes[ni].count as usize);
+            let (_, tail) = rest.split_at_mut(start - at);
+            let (mine, tail) = tail.split_at_mut(count);
+            runs.push((ni, nodes[ni], start, mine));
+            rest = tail;
+            at = start + count;
+        }
+        let built: Vec<(usize, Vec<Node>)> = runs
+            .into_par_iter()
+            .map(|(ni, root, base, run)| {
+                let mut local = vec![root];
+                let mut stack = vec![0usize];
+                while let Some(li) = stack.pop() {
+                    if split(&mut local, li, run, base, soup, &centroid) {
+                        let left = local[li].start as usize;
+                        stack.push(left);
+                        stack.push(left + 1);
+                    }
+                }
+                (ni, local)
+            })
+            .collect();
+        for (ni, local) in built {
+            // Local node i > 0 lands at offset + i - 1.
+            let offset = nodes.len();
+            let place = |mut node: Node| {
+                if node.count == 0 {
+                    node.start = (offset + node.start as usize - 1) as u32;
+                }
+                node
+            };
+            nodes[ni] = place(local[0]);
+            nodes.extend(local[1..].iter().map(|&node| place(node)));
+        }
         Self { nodes, order }
     }
 
@@ -122,6 +270,34 @@ impl Bvh {
             }
         }
         best
+    }
+
+    /// Every crossing of the ray, unsorted: its distance and +1 when the ray
+    /// enters the surface (against the triangle normal) or -1 when it leaves.
+    pub fn ray_crossings(&self, soup: &TriSoup, o: Vec3, d: Vec3, out: &mut Vec<(f32, i8)>) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
+        let mut stack = vec![0usize];
+        while let Some(ni) = stack.pop() {
+            let node = self.nodes[ni];
+            if node.bounds.ray(o, inv, f32::MAX).is_none() {
+                continue;
+            }
+            if node.count == 0 {
+                stack.push(node.start as usize);
+                stack.push(node.start as usize + 1);
+                continue;
+            }
+            for &t in &self.order[node.start as usize..(node.start + node.count) as usize] {
+                let c = &soup.corners[t as usize];
+                if let Some((dist, _)) = geom::ray_triangle(o, d, c) {
+                    let n = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+                    out.push((dist, if geom::dot(n, d) < 0.0 { 1 } else { -1 }));
+                }
+            }
+        }
     }
 
     /// Triangles with any corner or their centroid inside the sphere.
@@ -157,10 +333,17 @@ impl Bvh {
 
     /// Nearest triangle to `q` and the barycentrics of the closest point on it.
     pub fn nearest(&self, soup: &TriSoup, q: Vec3) -> Option<(u32, Bary)> {
+        self.nearest_within(soup, q, f32::MAX)
+    }
+
+    /// [`Bvh::nearest`] among the triangles closer than `r`; much quicker when
+    /// `r` is small.
+    pub fn nearest_within(&self, soup: &TriSoup, q: Vec3, r: f32) -> Option<(u32, Bary)> {
         if self.nodes.is_empty() {
             return None;
         }
-        let mut best = (f32::MAX, 0u32, [1.0, 0.0, 0.0]);
+        let bound = if r < f32::MAX.sqrt() { r * r } else { f32::MAX };
+        let mut best = (bound, 0u32, [1.0, 0.0, 0.0]);
         let mut stack = Stack::new((0usize, 0.0f32));
         while let Some((ni, d)) = stack.pop() {
             if d >= best.0 {
@@ -190,116 +373,8 @@ impl Bvh {
                 }
             }
         }
-        (best.0 < f32::MAX).then_some((best.1, best.2))
+        (best.0 < bound).then_some((best.1, best.2))
     }
-}
-
-/// The nodes still to visit in a query, on the thread's stack: queries run
-/// millions of times from every thread (colour transfer after simplifying),
-/// and a heap vector per query made them contend in the allocator. Every split
-/// halves its range, so a path is at most 32 nodes deep and the stack never
-/// holds more than one pending sibling per level, plus the node in hand.
-struct Stack<T: Copy> {
-    items: [T; 64],
-    len: usize,
-}
-
-impl<T: Copy> Stack<T> {
-    fn new(root: T) -> Self {
-        Self { items: [root; 64], len: 1 }
-    }
-    fn push(&mut self, v: T) {
-        self.items[self.len] = v;
-        self.len += 1;
-    }
-    fn pop(&mut self) -> Option<T> {
-        self.len = self.len.checked_sub(1)?;
-        Some(self.items[self.len])
-    }
-}
-
-/// Above this many triangles the two halves of a node are built in parallel.
-const PARALLEL: usize = 16_384;
-
-/// The tree over `order` (which starts at `offset` in the whole order), root
-/// first and every inner node's children side by side, as `Bvh` reads it.
-/// Large ranges build their halves on two threads and splice them together;
-/// the split is the same median split either way, so the tree is too.
-fn subtree(order: &mut [u32], offset: usize, centroid: &[Vec3], corners: &[[Vec3; 3]]) -> Vec<Node> {
-    let count = order.len();
-    if count < PARALLEL {
-        return subtree_serial(order, offset, centroid, corners);
-    }
-    let (b, axis) = split_axis(order, centroid, corners);
-    let Some(axis) = axis else {
-        return vec![Node { bounds: b, start: offset as u32, count: count as u32 }];
-    };
-    let half = count / 2;
-    order.select_nth_unstable_by(half, |&a, &b| centroid[a as usize][axis].total_cmp(&centroid[b as usize][axis]));
-    let (lo, hi) = order.split_at_mut(half);
-    let (l, r) =
-        rayon::join(|| subtree(lo, offset, centroid, corners), || subtree(hi, offset + half, centroid, corners));
-    // Root, both children, then the rest of the left tree and of the right one.
-    let at_l = |i: u32| if i == 0 { 1 } else { 2 + i };
-    let r_base = 2 + l.len() as u32 - 1;
-    let at_r = |i: u32| if i == 0 { 2 } else { r_base + i };
-    let remap = |n: &Node, at: &dyn Fn(u32) -> u32| if n.count == 0 { Node { start: at(n.start), ..*n } } else { *n };
-    let mut out = Vec::with_capacity(1 + l.len() + r.len());
-    out.push(Node { bounds: b, start: 1, count: 0 });
-    out.push(remap(&l[0], &at_l));
-    out.push(remap(&r[0], &at_r));
-    out.extend(l[1..].iter().map(|n| remap(n, &at_l)));
-    out.extend(r[1..].iter().map(|n| remap(n, &at_r)));
-    out
-}
-
-/// The bounds of the triangles in `order`, and the axis their centres spread
-/// most along; none when the range is a leaf or the centres all coincide.
-fn split_axis(order: &[u32], centroid: &[Vec3], corners: &[[Vec3; 3]]) -> (Aabb, Option<usize>) {
-    let mut b = Aabb::EMPTY;
-    let mut cb = Aabb::EMPTY;
-    for &t in order {
-        for p in corners[t as usize] {
-            b.grow(p);
-        }
-        cb.grow(centroid[t as usize]);
-    }
-    if order.len() <= LEAF {
-        return (b, None);
-    }
-    let ext = geom::sub(cb.hi, cb.lo);
-    let axis = if ext[0] >= ext[1] && ext[0] >= ext[2] {
-        0
-    } else if ext[1] >= ext[2] {
-        1
-    } else {
-        2
-    };
-    (b, (ext[axis] > 0.0).then_some(axis))
-}
-
-fn subtree_serial(order: &mut [u32], offset: usize, centroid: &[Vec3], corners: &[[Vec3; 3]]) -> Vec<Node> {
-    let mut nodes = vec![Node { bounds: Aabb::EMPTY, start: 0, count: order.len() as u32 }];
-    let mut stack = vec![0usize];
-    while let Some(ni) = stack.pop() {
-        let (start, count) = (nodes[ni].start as usize, nodes[ni].count as usize);
-        let (b, axis) = split_axis(&order[start..start + count], centroid, corners);
-        nodes[ni].bounds = b;
-        nodes[ni].start = (offset + start) as u32;
-        let Some(axis) = axis else { continue };
-        let half = count / 2;
-        order[start..start + count]
-            .select_nth_unstable_by(half, |&a, &b| centroid[a as usize][axis].total_cmp(&centroid[b as usize][axis]));
-        let left = nodes.len();
-        // Children hold positions relative to `order` until they are visited.
-        nodes.push(Node { bounds: Aabb::EMPTY, start: start as u32, count: half as u32 });
-        nodes.push(Node { bounds: Aabb::EMPTY, start: (start + half) as u32, count: (count - half) as u32 });
-        nodes[ni].start = left as u32;
-        nodes[ni].count = 0;
-        stack.push(left);
-        stack.push(left + 1);
-    }
-    nodes
 }
 
 #[cfg(test)]
@@ -316,6 +391,30 @@ mod tests {
             }
         }
         s
+    }
+
+    #[test]
+    fn parallel_build_keeps_tight_bounds() {
+        // Large enough that the top is split in parallel.
+        let s = grid(300);
+        let bvh = Bvh::build(&s);
+        let root = bvh.nodes[0].bounds;
+        assert_eq!((root.lo, root.hi), ([0.0, 0.0, 0.0], [300.0, 300.0, 0.0]));
+        // Every triangle is in exactly one leaf, inside the leaf's box.
+        let mut seen = vec![false; s.len()];
+        for node in bvh.nodes.iter().filter(|n| n.count > 0) {
+            for &t in &bvh.order[node.start as usize..(node.start + node.count) as usize] {
+                assert!(!seen[t as usize]);
+                seen[t as usize] = true;
+                for p in s.corners[t as usize] {
+                    assert!((0..3).all(|i| node.bounds.lo[i] <= p[i] && p[i] <= node.bounds.hi[i]));
+                }
+            }
+        }
+        assert!(seen.iter().all(|&x| x));
+        let (t, b) = bvh.nearest(&s, [123.4, 56.7, 3.0]).unwrap();
+        let p = geom::at(&s.corners[t as usize], b);
+        assert!((p[0] - 123.4).abs() < 1e-3 && (p[1] - 56.7).abs() < 1e-3);
     }
 
     #[test]
@@ -359,7 +458,7 @@ mod tests {
                 s.push([p(0, 0), p(1, 1), p(0, 1)], 0, (2 * (y * n + x) + 1) as u32);
             }
         }
-        assert!(s.len() > PARALLEL);
+        assert!(s.len() > PARALLEL_MIN);
         let bvh = Bvh::build(&s);
         let mut sorted = bvh.order.clone();
         sorted.sort_unstable();

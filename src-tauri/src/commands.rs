@@ -9,7 +9,7 @@ use serde_json::json;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::dto::{self, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary, TurnDto};
+use crate::dto::{self, BucketPickDto, HitDto, PaintDto, PrefsDto, PrintersDto, ProgressDto, Summary, TurnDto};
 use crate::error::{in_range, AppError, CmdResult};
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::profiles::Store;
@@ -96,10 +96,10 @@ pub async fn inspect_model(
     .map_err(AppError::internal)?
 }
 
-/// A supported model passed on the command line ("Open with…"), if any.
+/// A supported model or project passed on the command line ("Open with…"), if any.
 #[tauri::command]
 pub fn initial_file() -> Option<String> {
-    std::env::args().skip(1).find(|a| bp_blend::supports(Path::new(a)))
+    std::env::args().skip(1).find(|a| bp_blend::supports(Path::new(a)) || crate::saved::is_project(Path::new(a)))
 }
 
 #[tauri::command]
@@ -145,7 +145,7 @@ pub async fn open_blend(
         let state = handle.state::<AppState>();
         let prefs = state.prefs.lock()?;
         project.set_print_ops(print_ops(&printer, &prefs));
-        let doc = Document {
+        let mut doc = Document {
             project,
             file_name: file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path.clone()),
             file_size: size,
@@ -153,7 +153,46 @@ pub async fn open_blend(
             printer,
             flush: Default::default(),
             offset_mm: [0.0; 2],
+            filaments: Default::default(),
+            kit: None,
         };
+        // With colours from the inventory only, the model starts with spools the user has.
+        if let Some(owned) = state.filaments.lock()?.inventory() {
+            doc.suggest_from_inventory(&owned, 4);
+        }
+        let summary = dto::summary(&doc, &prefs);
+        *state.doc.lock()? = Some(doc);
+        Ok(summary)
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Saves the open document as a `.bpproj` at `path`.
+#[tauri::command]
+pub async fn save_project(app: AppHandle, path: String) -> CmdResult<()> {
+    with_doc(app, move |d, _| crate::saved::save(d, &path)).await
+}
+
+/// Opens a `.bpproj`, without Blender, in place of the open document. The
+/// printer it was prepared for is picked again when it is still known.
+#[tauri::command]
+pub async fn open_project(app: AppHandle, path: String) -> CmdResult<Summary> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        let mut doc = {
+            let mut store = state.printers.lock()?;
+            let doc = crate::saved::open(&path, &store)?;
+            let id = doc.printer.profile.id.clone();
+            if store.profiles().iter().any(|p| p.id == id) {
+                store.select(&id, doc.printer.nozzle_mm)?;
+                store.save()?;
+            }
+            doc
+        };
+        let prefs = state.prefs.lock()?;
+        doc.project.set_print_ops(print_ops(&doc.printer, &prefs));
         let summary = dto::summary(&doc, &prefs);
         *state.doc.lock()? = Some(doc);
         Ok(summary)
@@ -175,11 +214,88 @@ pub async fn set_palette(app: AppHandle, colors: Vec<String>) -> CmdResult<Summa
     .await
 }
 
+/// Detects up to `count` colours again, picking from the owned spools in inventory mode.
 #[tauri::command]
 pub async fn suggest_palette(app: AppHandle, count: usize) -> CmdResult<Summary> {
+    let owned = app.state::<AppState>().filaments.lock()?.inventory();
     with_doc(app, move |d, prefs| {
-        let pal = d.project.suggest_palette(count);
-        d.project.set_palette(pal);
+        match &owned {
+            Some(owned) => d.suggest_from_inventory(owned, count),
+            None => {
+                let pal = d.project.suggest_palette(count);
+                d.project.set_palette(pal);
+            }
+        }
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Every filament to pick from, which ones the user has, and whether colours
+/// come only from those.
+#[tauri::command]
+pub fn filaments(app: AppHandle) -> CmdResult<dto::FilamentsDto> {
+    let state = app.state::<AppState>();
+    let store = state.filaments.lock()?;
+    Ok(dto::filaments(&store))
+}
+
+fn with_filaments(
+    app: &AppHandle,
+    f: impl FnOnce(&mut crate::filaments::FilamentStore) -> CmdResult<()>,
+) -> CmdResult<dto::FilamentsDto> {
+    let state = app.state::<AppState>();
+    let mut store = state.filaments.lock()?;
+    f(&mut store)?;
+    store.save()?;
+    Ok(dto::filaments(&store))
+}
+
+#[tauri::command]
+pub fn set_filament_owned(app: AppHandle, id: String, owned: bool) -> CmdResult<dto::FilamentsDto> {
+    with_filaments(&app, |s| s.set_owned(&id, owned))
+}
+
+/// Saves one of the user's filaments; a blank id makes a new one, which they own.
+#[tauri::command]
+pub fn save_filament(app: AppHandle, filament: bp_3mf::filament::Filament) -> CmdResult<dto::FilamentsDto> {
+    with_filaments(&app, |s| s.upsert(filament).map(|_| ()))
+}
+
+#[tauri::command]
+pub fn delete_filament(app: AppHandle, id: String) -> CmdResult<dto::FilamentsDto> {
+    with_filaments(&app, |s| {
+        s.remove(&id);
+        Ok(())
+    })
+}
+
+/// Whether suggested colours come only from the owned filaments.
+#[tauri::command]
+pub fn set_inventory_only(app: AppHandle, on: bool) -> CmdResult<dto::FilamentsDto> {
+    with_filaments(&app, |s| {
+        s.inventory_only = on;
+        Ok(())
+    })
+}
+
+/// Puts filament `id` on `slot`, or takes it off with `None`. The slot keeps
+/// painting what it painted; it prints in the filament's colour.
+#[tauri::command]
+pub async fn set_slot_filament(app: AppHandle, slot: usize, id: Option<String>) -> CmdResult<Summary> {
+    let filament = match &id {
+        Some(id) => {
+            Some(app.state::<AppState>().filaments.lock()?.find(id).ok_or(AppError::new("error.unknownFilament"))?)
+        }
+        None => None,
+    };
+    with_doc(app, move |d, prefs| {
+        let hex =
+            d.project.palette().get(slot).map(|c| bp_core::color::to_hex(*c)).ok_or(AppError::new("error.badSlots"))?;
+        match filament {
+            Some(f) => d.filaments.insert(hex, f),
+            None => d.filaments.remove(&hex),
+        };
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -274,15 +390,359 @@ pub async fn reset_rotation(app: AppHandle) -> CmdResult<TurnDto> {
     .await
 }
 
-/// Cuts the model `t` of the way along `axis` (0 to 1 over the preview) and
-/// keeps the low or the high side; with `keep_other`, the other side too, as an
-/// object of its own beside it.
+fn cut_error(error: bp_core::cut::CutError) -> AppError {
+    AppError::new(match error {
+        bp_core::cut::CutError::Misses => "error.cutMisses",
+        bp_core::cut::CutError::InvalidPlane => "error.cutPlane",
+        bp_core::cut::CutError::InvalidGeometry => "error.cutGeometry",
+    })
+}
+
+/// Dry run on a snapshot: validates the actual caps and retained geometry without
+/// changing the document, its paint or its undo history. Releases the document
+/// lock before the expensive cut so navigation and new file loads stay responsive.
 #[tauri::command]
-pub async fn cut_model(app: AppHandle, axis: usize, t: f32, keep_low: bool, keep_other: bool) -> CmdResult<Summary> {
+pub async fn preview_cut(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    keep_low: bool,
+    keep_other: bool,
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+) -> CmdResult<usize> {
+    let mut project = with_doc(app, |d, _| Ok(d.project.clone())).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        project.cut_plane(point, normal, keep_low, keep_other, lay_on_cut, &selected).map_err(cut_error)?;
+        Ok(project.object_count())
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Cuts selected parts using the exact plane displayed by the preview.
+/// Both halves can be retained and optionally laid on their cut faces.
+#[tauri::command]
+pub async fn cut_model(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    keep_low: bool,
+    keep_other: bool,
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {
-        if !d.project.cut(axis, t, keep_low, keep_other) {
-            return Err(AppError::new("error.cutMisses"));
+        d.project.cut_plane(point, normal, keep_low, keep_other, lay_on_cut, &selected).map_err(cut_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// The connectors of a cut as the UI sends them.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectorsDto {
+    /// "pin" or "dowel".
+    kind: String,
+    /// Pins stand out of half A (below the plane) unless this is false.
+    pins_on_a: bool,
+    /// "round" or "square".
+    shape: String,
+    size_mm: f32,
+    depth_mm: f32,
+    clearance_mm: f32,
+    angle_deg: f32,
+    at: Vec<[f32; 3]>,
+}
+
+impl ConnectorsDto {
+    fn core(self) -> CmdResult<bp_core::connect::Connectors> {
+        use bp_core::connect::{Connectors, Kind, Shape};
+        let kind = match self.kind.as_str() {
+            "pin" => Kind::Pin { on_low: self.pins_on_a },
+            "dowel" => Kind::Dowel,
+            _ => return Err(AppError::new("error.connectParams")),
+        };
+        let shape = match self.shape.as_str() {
+            "round" => Shape::Round,
+            "square" => Shape::Square,
+            "hexagon" => Shape::Hexagon,
+            _ => return Err(AppError::new("error.connectParams")),
+        };
+        let c = Connectors {
+            kind,
+            shape,
+            size_mm: self.size_mm,
+            depth_mm: self.depth_mm,
+            clearance_mm: self.clearance_mm,
+            angle_deg: self.angle_deg,
+            at: self.at,
+        };
+        if !c.valid() || c.at.len() > 64 {
+            return Err(AppError::new("error.connectParams"));
         }
+        Ok(c)
+    }
+}
+
+fn issue_key(issue: Option<bp_core::connect::Issue>) -> Option<&'static str> {
+    use bp_core::connect::Issue;
+    issue.map(|i| match i {
+        Issue::Outside => "outside",
+        Issue::Overlap => "overlap",
+        Issue::ThinWall => "thinWall",
+        Issue::TooDeep => "tooDeep",
+    })
+}
+
+fn connect_error(e: bp_core::ConnectError) -> AppError {
+    match e {
+        bp_core::ConnectError::Cut(e) => cut_error(e),
+        bp_core::ConnectError::Params => AppError::new("error.connectParams"),
+        bp_core::ConnectError::NoConnectors => AppError::new("error.connectNone"),
+        bp_core::ConnectError::Connectors(_) => AppError::new("error.connectIssues"),
+    }
+}
+
+/// Where connectors of this size fit on the cut, in preview coordinates.
+#[tauri::command]
+pub async fn suggest_connectors(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+) -> CmdResult<Vec<[f32; 3]>> {
+    let c = connectors.core()?;
+    with_doc(app, move |d, _| d.project.suggest_connectors(point, normal, &selected, &c).map_err(cut_error)).await
+}
+
+/// Dry run of a cut with connectors on a copy: what is wrong with each
+/// connector or, when they are all fine, how many objects the cut leaves.
+#[tauri::command]
+pub async fn preview_connected_cut(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+) -> CmdResult<dto::ConnectReviewDto> {
+    let c = connectors.core()?;
+    let mut project = with_doc(app, |d, _| Ok(d.project.clone())).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let issues = project.check_connectors(point, normal, &selected, &c).map_err(cut_error)?;
+        if issues.iter().any(Option::is_some) || c.at.is_empty() {
+            return Ok(dto::ConnectReviewDto { issues: issues.into_iter().map(issue_key).collect(), objects: None });
+        }
+        let objects = project.cut_connected(point, normal, lay_on_cut, &selected, &c, "").map_err(connect_error)?;
+        Ok(dto::ConnectReviewDto { issues: vec![None; c.at.len()], objects: Some(objects) })
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Cuts keeping both halves with the connectors made in them; one undoable step.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn cut_connected(
+    app: AppHandle,
+    point: [f32; 3],
+    normal: [f32; 3],
+    lay_on_cut: bool,
+    selected: Vec<usize>,
+    connectors: ConnectorsDto,
+    dowel_label: String,
+) -> CmdResult<Summary> {
+    let c = connectors.core()?;
+    let label: String = dowel_label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        d.project.cut_connected(point, normal, lay_on_cut, &selected, &c, &label).map_err(connect_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// What a split for the printer asks for, as the UI sends it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitPlanDto {
+    /// Cut positions along X, Y and Z in preview coordinates.
+    cuts: [Vec<f32>; 3],
+    lay_on_cut: bool,
+    gap_mm: f32,
+    /// Dowels across the joints: "round" or "square", and their sizes.
+    dowels: Option<SplitDowelsDto>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitDowelsDto {
+    shape: String,
+    size_mm: f32,
+    depth_mm: f32,
+    clearance_mm: f32,
+}
+
+impl SplitPlanDto {
+    fn core(self) -> CmdResult<(bp_core::SplitPlan, f32)> {
+        let dowels = match self.dowels {
+            None => None,
+            Some(d) => Some(
+                ConnectorsDto {
+                    kind: "dowel".into(),
+                    pins_on_a: true,
+                    shape: d.shape,
+                    size_mm: d.size_mm,
+                    depth_mm: d.depth_mm,
+                    clearance_mm: d.clearance_mm,
+                    angle_deg: 0.0,
+                    at: vec![],
+                }
+                .core()?,
+            ),
+        };
+        in_range(self.gap_mm, 0.0..=50.0, "error.splitGap")?;
+        Ok((bp_core::SplitPlan { cuts: self.cuts, lay_on_cut: self.lay_on_cut, dowels }, self.gap_mm))
+    }
+}
+
+/// The room every plate has for pieces: centred, clear of the margin, the
+/// excluded zones and the tower, and as tall as the printer prints.
+fn plate_room(d: &Document, prefs: &Prefs, gap_mm: f32, offset_mm: [f32; 2]) -> bp_core::fit::Room {
+    let stats = d.project.stats();
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
+    let reserve = bp_3mf::Reserve {
+        tower: prefs.plate.tower && plate.needs_tower,
+        tower_mm: plate.tower_mm,
+        tower_gap_mm: prefs.plate.tower_gap_mm,
+        margin_mm: prefs.plate.margin_mm,
+    };
+    bp_core::fit::Room {
+        area_mm: bp_3mf::plate::centred_room_at(&d.printer, &reserve, offset_mm),
+        height_mm: d.printer.max_height_mm(),
+        gap_mm,
+    }
+}
+
+fn split_error(e: bp_core::SplitError) -> AppError {
+    match e {
+        bp_core::SplitError::NoCuts => AppError::new("error.splitNoCuts"),
+        bp_core::SplitError::Params => AppError::new("error.splitParams"),
+        bp_core::SplitError::Cut(e) => cut_error(e),
+        bp_core::SplitError::DoesNotFit(_) => AppError::new("error.splitDoesNotFit"),
+    }
+}
+
+/// Where to cut so every piece fits the printer, and the room it was worked out for.
+#[tauri::command]
+pub async fn propose_split(app: AppHandle, gap_mm: f32) -> CmdResult<dto::SplitProposalDto> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, [0.0; 2]);
+        let stats = d.project.stats();
+        Ok(dto::SplitProposalDto {
+            cuts: d.project.propose_split(&room),
+            room_mm: room.area_mm,
+            height_mm: room.height_mm,
+            size_mm: stats.size_mm,
+        })
+    })
+    .await
+}
+
+/// What a split would make, without changing the document.
+#[tauri::command]
+pub async fn preview_split(app: AppHandle, plan: SplitPlanDto) -> CmdResult<dto::SplitReportDto> {
+    let (plan, gap) = plan.core()?;
+    let (project, room) =
+        with_doc(app, move |d, prefs| Ok((d.project.clone(), plate_room(d, prefs, gap, [0.0; 2])))).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        project.preview_split(&plan, &room).map(dto::split_report).map_err(split_error)
+    })
+    .await
+    .map_err(AppError::internal)?
+}
+
+/// Splits the model into pieces that fit and shares them out across plates; one undoable step.
+#[tauri::command]
+pub async fn split_for_printer(app: AppHandle, plan: SplitPlanDto, dowel_label: String) -> CmdResult<Summary> {
+    let (plan, gap) = plan.core()?;
+    let label: String = dowel_label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap, [0.0; 2]);
+        d.project.split_for_printer(&plan, &room, &label).map_err(split_error)?;
+        // Each plate's pieces go on its centre.
+        d.offset_mm = [0.0; 2];
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+fn plate_edit_error(error: bp_core::PlateEditError) -> AppError {
+    AppError::new(match error {
+        bp_core::PlateEditError::Plate => "error.plateMissing",
+        bp_core::PlateEditError::Object => "error.plateObjectMissing",
+        bp_core::PlateEditError::ObjectLimit => "error.plateObjectLimit",
+        bp_core::PlateEditError::NoRoom => "error.noRoom",
+        bp_core::PlateEditError::DoesNotFit => "error.plateArrangeOversize",
+    })
+}
+
+#[tauri::command]
+pub async fn add_plate(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, |d, prefs| {
+        d.project.add_plate();
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn move_to_plate(app: AppHandle, object: u32, plate: u32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.move_to_plate(object, plate, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clone_object(app: AppHandle, object: u32, label: String, gap_mm: Option<f32>) -> CmdResult<Summary> {
+    if let Some(gap) = gap_mm {
+        in_range(gap, 0.0..=50.0, "error.splitGap")?;
+    }
+    let label: String = label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let width = d.printer.bed_mm().0;
+        if let Some(gap) = gap_mm {
+            let room = plate_room(d, prefs, gap, d.offset_mm);
+            d.project.clone_and_arrange(object, &label, &room, width)
+        } else {
+            d.project.clone_object(object, &label, width)
+        }
+        .map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn arrange_plates(app: AppHandle, gap_mm: f32) -> CmdResult<Summary> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, d.offset_mm);
+        d.project.arrange_plates(&room, d.printer.bed_mm().0).map_err(plate_edit_error)?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clear_plate(app: AppHandle, plate: u32) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.clear_plate(plate).map_err(plate_edit_error)?;
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -292,6 +752,161 @@ pub async fn cut_model(app: AppHandle, axis: usize, t: f32, keep_low: bool, keep
 pub async fn undo_cut(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {
         d.project.undo_cut();
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Tolerance for welding corners when looking for pieces, in millimetres.
+const WELD_RANGE: std::ops::RangeInclusive<f32> = 0.0..=5.0;
+
+/// The model's disconnected pieces and, per preview triangle, the piece it is in.
+#[tauri::command]
+pub async fn detect_pieces(app: AppHandle, weld_mm: f32) -> CmdResult<dto::PiecesDto> {
+    in_range(weld_mm, WELD_RANGE, "error.weldRange")?;
+    with_doc(app, move |d, _| Ok(dto::pieces(&d.project, weld_mm))).await
+}
+
+/// Pieces with the same group become one object; `None` leaves a piece where it is.
+#[tauri::command]
+pub async fn separate_pieces(
+    app: AppHandle,
+    weld_mm: f32,
+    groups: Vec<Option<u32>>,
+    lay_flat: bool,
+) -> CmdResult<Summary> {
+    in_range(weld_mm, WELD_RANGE, "error.weldRange")?;
+    with_doc(app, move |d, prefs| {
+        d.project.separate_pieces(weld_mm, &groups, lay_flat).map_err(|e| {
+            AppError::new(match e {
+                bp_core::SeparateError::Stale => "error.separateStale",
+                bp_core::SeparateError::NothingToSeparate => "error.separateNothing",
+            })
+        })?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Planes to review for splitting a continuous mesh; nothing is cut here.
+#[tauri::command]
+pub async fn propose_cuts(app: AppHandle, selected: Vec<usize>) -> CmdResult<Vec<dto::ProposalDto>> {
+    with_doc(app, move |d, _| Ok(d.project.propose_cuts(&selected).into_iter().map(dto::proposal).collect())).await
+}
+
+/// Brush radius for the region selection, and how thick a shell or deep a cap can be, in millimetres.
+const REGION_RADIUS: std::ops::RangeInclusive<f32> = 0.1..=100.0;
+const CLOSURE_RANGE: std::ops::RangeInclusive<f32> = -50.0..=50.0;
+
+/// Adds to the region selection (or with `add` false, takes from it) where
+/// the ray lands; with `through`, the brush reaches walls behind the surface too.
+#[tauri::command]
+pub async fn select_region(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    radius_mm: f32,
+    add: bool,
+    through: bool,
+) -> CmdResult<Option<dto::SelectStrokeDto>> {
+    in_range(radius_mm, REGION_RADIUS, "error.radiusRange")?;
+    with_doc(app, move |d, _| {
+        Ok(d.project.select(origin, dir, radius_mm, add, through).map(|(h, tris)| dto::SelectStrokeDto {
+            point: h.point,
+            normal: h.normal,
+            tris,
+        }))
+    })
+    .await
+}
+
+/// Reshapes the region selection: "grow", "connected", "smooth", "invert" or "clear"; "get" only reads it.
+#[tauri::command]
+pub async fn selection_op(app: AppHandle, op: String) -> CmdResult<dto::SelectionDto> {
+    with_doc(app, move |d, _| {
+        match op.as_str() {
+            "grow" => d.project.grow_selection(),
+            "connected" => d.project.select_connected(),
+            "smooth" => d.project.smooth_selection(),
+            "invert" => d.project.invert_selection(),
+            "clear" => d.project.clear_selection(),
+            "get" => {}
+            _ => return Err(AppError::with("error.internal", json!({ "detail": op }))),
+        }
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
+fn closure(c: dto::ClosureDto) -> CmdResult<bp_core::region::Closure> {
+    let (dto::ClosureDto::Shell { mm, .. } | dto::ClosureDto::Cap { mm }) = c;
+    in_range(mm, CLOSURE_RANGE, "error.closureRange")?;
+    if let dto::ClosureDto::Shell { clearance_mm, .. } = c {
+        if mm <= 0.0 {
+            return Err(AppError::with("error.closureRange", json!({ "min": 0.0, "max": CLOSURE_RANGE.end() })));
+        }
+        in_range(clearance_mm, 0.0..=5.0, "error.clearanceRange")?;
+    }
+    Ok(c.into())
+}
+
+/// Selects (or with `add` false, deselects) the faces the same colour as
+/// preview triangle `seed`: only those joined to it with `contiguous`. With
+/// `base`, the selection is that first, so trying a pick again with another
+/// tolerance is one step that no other pick can come between.
+#[tauri::command]
+pub async fn select_by_colour(
+    app: AppHandle,
+    seed: u32,
+    how: dto::ColourMatchDto,
+    contiguous: bool,
+    add: bool,
+    base: Option<Vec<u32>>,
+) -> CmdResult<dto::SelectionDto> {
+    if let dto::ColourMatchDto::Similar { delta_e } = how {
+        in_range(delta_e, 0.0..=100.0, "error.deltaERange")?;
+    }
+    with_doc(app, move |d, _| {
+        if let Some(base) = base {
+            d.project.set_selection(&base);
+        }
+        d.project.select_by_colour(seed, how.into(), contiguous, add);
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
+/// Makes colour borders that cross triangles edges of the mesh; one undoable step.
+#[tauri::command]
+pub async fn refine_to_paint(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.refine_to_paint()?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// What cutting the selected region out would make; nothing changes.
+#[tauri::command]
+pub async fn preview_region(
+    app: AppHandle,
+    closure: dto::ClosureDto,
+    action: dto::RegionActionDto,
+) -> CmdResult<dto::RegionPreviewDto> {
+    let c = self::closure(closure)?;
+    with_doc(app, move |d, _| Ok(dto::region_preview(d.project.preview_region(c, action.into())?))).await
+}
+
+/// Cuts the selected region out as one undoable step.
+#[tauri::command]
+pub async fn apply_region(
+    app: AppHandle,
+    closure: dto::ClosureDto,
+    action: dto::RegionActionDto,
+) -> CmdResult<Summary> {
+    let c = self::closure(closure)?;
+    with_doc(app, move |d, prefs| {
+        d.project.apply_region(c, action.into())?;
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -461,24 +1076,7 @@ pub async fn set_flush(app: AppHandle, from: Option<usize>, to: Option<usize>, m
 /// `u32 leaves, u32 tris | f32 positions[9 * leaves] | u32 offsets[tris + 1] | u8 labels[leaves] | u8 rgb[3 * leaves]`.
 #[tauri::command]
 pub async fn preview_mesh(app: AppHandle) -> CmdResult<Response> {
-    let bytes = with_doc(app, |d, _| {
-        let pv = d.project.preview();
-        let leaves = pv.labels.len();
-        let tris = pv.offsets.len() - 1;
-        let mut out = Vec::with_capacity(8 + leaves * (36 + 4) + tris * 4);
-        out.extend((leaves as u32).to_le_bytes());
-        out.extend((tris as u32).to_le_bytes());
-        for v in &pv.positions {
-            out.extend(v.to_le_bytes());
-        }
-        for o in &pv.offsets {
-            out.extend(o.to_le_bytes());
-        }
-        out.extend(&pv.labels);
-        out.extend(&pv.source_rgb);
-        Ok(out)
-    })
-    .await?;
+    let bytes = with_doc(app, |d, _| Ok(d.project.preview_bytes())).await?;
     Ok(Response::new(bytes))
 }
 
@@ -549,6 +1147,36 @@ pub async fn paint(
     .await
 }
 
+/// What a bucket click along the ray would fill: in the connected `region`
+/// only or everywhere, and with `add` the clicked colour as a target of its own.
+#[tauri::command]
+pub async fn bucket_pick(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    region: bool,
+    add: bool,
+) -> CmdResult<Option<BucketPickDto>> {
+    with_doc(app, move |d, _| Ok(d.project.bucket_pick(origin, dir, region, add).map(Into::into))).await
+}
+
+/// Sends the model colour under the click to `slot`; one undoable step.
+#[tauri::command]
+pub async fn bucket(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    slot: u8,
+    region: bool,
+    add: bool,
+) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.bucket(origin, dir, slot, region, add).ok_or(AppError::new("error.bucketMisses"))?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn end_stroke(app: AppHandle) -> CmdResult<Summary> {
     with_doc(app, |d, prefs| {
@@ -567,9 +1195,257 @@ pub async fn undo(app: AppHandle) -> CmdResult<Summary> {
     .await
 }
 
-/// One STL per colour in a ZIP, its colour list in `lang`. Returns how many colour files were written.
+/// Set to stop the colour kit being exported.
+static KIT_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stops the colour kit export at its next picture or file; nothing is left behind.
+#[tauri::command]
+pub fn cancel_color_zip() {
+    KIT_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The model split into solid pieces per colour, laid out on plates, with
+/// STLs and an assembly guide in `lang`, all in one ZIP. It is written next to
+/// `path` and renamed into place only once complete; `kitProgress` events say
+/// how far it has got, and [`cancel_color_zip`] stops it.
 #[tauri::command]
 pub async fn export_color_zip(
+    app: AppHandle,
+    path: String,
+    options: bp_3mf::project_file::KitSettings,
+    lang: String,
+) -> CmdResult<dto::KitDto> {
+    let bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot, min_piece_mm3, mix, contents, pins } =
+        options;
+    let lang = bp_3mf::KitLang::from_code(&lang);
+    in_range(voxel_mm, 0.2..=2.0, "error.kitDetailRange")?;
+    in_range(depth_mm, 0.0..=50.0, "error.kitDepthRange")?;
+    if let Some(p) = pins {
+        in_range(p.diameter_mm, 2.0..=20.0, "error.kitPinDiameterRange")?;
+        in_range(p.depth_mm, 1.0..=20.0, "error.kitPinDepthRange")?;
+        in_range(p.clearance_mm, 0.0..=1.0, "error.kitPinClearanceRange")?;
+    }
+    if !contents.any() {
+        return Err(AppError::new("error.kitNothing"));
+    }
+    KIT_CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+    let handle = app.clone();
+    with_doc(app, move |d, prefs| {
+        let emit = |stage: &str, done: usize, total: usize| {
+            let _ = handle.emit("kitProgress", dto::KitProgressDto { stage: stage.to_string(), done, total });
+        };
+        let cancelled = || KIT_CANCEL.load(std::sync::atomic::Ordering::Relaxed);
+        emit("split", 0, 0);
+        let params = bp_core::SplitParams {
+            voxel_mm,
+            depth_mm,
+            core_slot,
+            min_piece_mm3: min_piece_mm3.max(0.0),
+            pins: pins.map(|p| bp_core::PinParams {
+                diameter_mm: p.diameter_mm,
+                depth_mm: p.depth_mm,
+                clearance_mm: p.clearance_mm,
+                ..Default::default()
+            }),
+            exact_skin: true,
+        };
+        d.kit = Some(bp_3mf::project_file::KitSettings {
+            voxel_mm,
+            depth_mm,
+            core_slot,
+            min_piece_mm3: params.min_piece_mm3,
+            mix,
+            contents,
+            pins,
+        });
+        let split = d.project.split_by_color(params);
+        if split.pieces.is_empty() {
+            return Err(AppError::new("error.kitEmpty"));
+        }
+        if cancelled() {
+            return Err(AppError::new("error.kitCancelled"));
+        }
+        emit("plates", 0, 0);
+        // The plate as the user keeps it: margin, gap and, where colours mix, the tower.
+        let waste = dto::waste_params(d, prefs);
+        let tallest = split
+            .pieces
+            .iter()
+            .map(|p| {
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for v in &p.positions {
+                    lo = std::array::from_fn(|a| lo[a].min(v[a]));
+                    hi = std::array::from_fn(|a| hi[a].max(v[a]));
+                }
+                // Lying on its broad face, a piece stands about its thinnest.
+                (0..3).map(|a| hi[a] - lo[a]).fold(f32::MAX, f32::min)
+            })
+            .fold(0.0, f32::max);
+        let side = prefs
+            .plate
+            .tower_depth_mm
+            .unwrap_or_else(|| bp_core::waste::tower_side(waste.prime_mm3, waste.layer_mm, tallest))
+            + 2.0 * dto::TOWER_BRIM_MM;
+        let reserve = bp_3mf::Reserve {
+            tower: prefs.plate.tower,
+            tower_mm: [side; 2],
+            tower_gap_mm: prefs.plate.tower_gap_mm,
+            margin_mm: prefs.plate.margin_mm,
+        };
+        let kit = bp_core::kit::kit(split, bp_3mf::kit_bed(&d.printer, &reserve, prefs.plate.tower_gap_mm, mix));
+        // Each slot in the colour it prints, with its filament where one was picked.
+        let palette: Vec<String> = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+        let slots: Vec<_> =
+            d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
+        let filament_names: Vec<Option<String>> = d
+            .slot_filaments()
+            .iter()
+            .map(|f| {
+                f.map(|f| {
+                    let name = if lang == bp_3mf::KitLang::En { &f.name_en } else { &f.name_es };
+                    format!("{} {} {}", f.brand, f.kind, name).trim().to_string()
+                })
+            })
+            .collect();
+        let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let info = bp_3mf::KitInfo {
+            name: &name,
+            palette: &palette,
+            slots: &slots,
+            filament_names: &filament_names,
+            printer: &d.printer,
+            params: d.kit.unwrap_or(options),
+            density_g_cm3: prefs.waste.density_g_cm3,
+            flush: bp_3mf::Flush {
+                volumes_mm3: dto::flush_matrix(d).0,
+                multiplier: prefs.waste.flush_multiplier,
+                into_infill: prefs.waste.flush_reuse > 0.0,
+                prime_mm3: prefs.waste.prime_mm3,
+            },
+            lang,
+        };
+        // Never a half-written ZIP at `path`: write beside it, then rename.
+        let part = format!("{path}.part");
+        let written = (|| {
+            let file = std::fs::File::create(&part).map_err(|e| AppError::file(&part, e))?;
+            let mut out = std::io::BufWriter::new(file);
+            let s = bp_3mf::write_kit_zip_with(&mut out, &kit, &info, &|stage, done, total| {
+                let stage = match stage {
+                    bp_3mf::KitStage::Pictures => "pictures",
+                    bp_3mf::KitStage::Files => "files",
+                };
+                emit(stage, done, total);
+                !cancelled()
+            })
+            .map_err(|e| {
+                if cancelled() {
+                    AppError::new("error.kitCancelled")
+                } else {
+                    AppError::with("error.zipWrite", json!({ "detail": e.to_string() }))
+                }
+            })?;
+            let file = out.into_inner().map_err(|e| AppError::file(&part, e.into_error()))?;
+            file.sync_all().map_err(|e| AppError::file(&part, e))?;
+            drop(file);
+            std::fs::rename(&part, &path).map_err(|e| AppError::file(&path, e))?;
+            Ok(s)
+        })();
+        let s = match written {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(e);
+            }
+        };
+        Ok(dto::KitDto {
+            pieces: s.pieces,
+            plates: s.plates,
+            oversize: s.oversize,
+            review: s.review,
+            dropped: s.dropped,
+            pins: s.pins,
+            unpinned: s.unpinned,
+            bytes: std::fs::metadata(&path).map_or(0, |m| m.len()),
+        })
+    })
+    .await
+}
+
+/// The open model as a Bambu Studio 3MF. `objects` picks which printed objects
+/// go in (all when `None`); pieces are named in `lang`. `thumbnails` are the
+/// plate's PNG pictures, large and small, drawn by the preview; without them
+/// the file goes out without pictures.
+#[tauri::command]
+pub async fn export_3mf(
+    app: AppHandle,
+    path: String,
+    lang: String,
+    objects: Option<Vec<u32>>,
+    thumbnails: Option<(Vec<u8>, Vec<u8>)>,
+) -> CmdResult<()> {
+    with_doc(app, move |d, prefs| write_selected_3mf(d, prefs, &path, &lang, objects, thumbnails.as_ref())).await
+}
+
+#[cfg(feature = "bench")]
+pub(crate) fn write_3mf(d: &Document, prefs: &Prefs, path: &str) -> CmdResult<()> {
+    write_selected_3mf(d, prefs, path, "es", None, None)
+}
+
+fn write_selected_3mf(
+    d: &Document,
+    prefs: &Prefs,
+    path: &str,
+    lang: &str,
+    objects: Option<Vec<u32>>,
+    thumbnails: Option<&(Vec<u8>, Vec<u8>)>,
+) -> CmdResult<()> {
+    let mut parts = d.project.export_parts();
+    if let Some(keep) = &objects {
+        parts.retain(|p| keep.contains(&p.object));
+    }
+    if parts.is_empty() {
+        return Err(AppError::new("error.noObjects"));
+    }
+    let filaments = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+    let slots = d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
+    let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let (volumes_mm3, _) = dto::flush_matrix(d);
+    let model = bp_3mf::Model {
+        plate_count: d.project.plate_count(),
+        name: &name,
+        piece: bp_3mf::ZipText::for_lang(lang).piece,
+        parts: parts
+            .iter()
+            .map(|p| bp_3mf::Part {
+                name: &p.name,
+                positions: &p.positions,
+                tris: &p.tris,
+                paint: &p.paint,
+                object: p.object,
+                plate: p.plate,
+            })
+            .collect(),
+        filaments,
+        slots,
+        printer: d.printer.clone(),
+        flush: bp_3mf::Flush {
+            volumes_mm3,
+            multiplier: prefs.waste.flush_multiplier,
+            into_infill: prefs.waste.flush_reuse > 0.0,
+            prime_mm3: prefs.waste.prime_mm3,
+        },
+        layer_mm: prefs.waste.layer_mm,
+        offset_mm: d.offset_mm,
+        thumbnail: thumbnails.map(|(large, small)| bp_3mf::Thumbnail { large, small }),
+    };
+    let file = std::fs::File::create(path).map_err(|e| AppError::file(path, e))?;
+    bp_3mf::write(std::io::BufWriter::new(file), &model)
+        .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
+}
+
+/// One STL per colour in a ZIP, its colour list in `lang`. Returns how many colour files were written.
+#[tauri::command]
+pub async fn export_color_shells_zip(
     app: AppHandle,
     path: String,
     thickness_mm: f32,
@@ -579,6 +1455,9 @@ pub async fn export_color_zip(
     in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
     with_doc(app, move |d, _| {
         let pieces = d.project.color_pieces(thickness_mm, main_solid);
+        if pieces.is_empty() {
+            return Err(AppError::new("error.platesEmpty"));
+        }
         let hexes: Vec<String> =
             pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
         let files: Vec<bp_3mf::ColorFile> = pieces
@@ -596,29 +1475,55 @@ pub async fn export_color_zip(
 }
 
 #[tauri::command]
-pub async fn export_3mf(app: AppHandle, path: String) -> CmdResult<()> {
-    with_doc(app, move |d, prefs| write_3mf(d, prefs, &path)).await
-}
-
-/// Writes the document's 3MF to `path`.
-pub(crate) fn write_3mf(d: &Document, prefs: &Prefs, path: &str) -> CmdResult<()> {
-    let parts = d.project.export_parts();
-    let filaments = d.project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
-    let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let (volumes_mm3, _) = dto::flush_matrix(d);
-    let model = bp_3mf::Model {
-        name: &name,
-        parts: parts
+pub async fn export_color_assembly(
+    app: AppHandle,
+    path: String,
+    thickness_mm: f32,
+    main_solid: bool,
+) -> CmdResult<usize> {
+    in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
+    with_doc(app, move |d, prefs| {
+        let pieces = d.project.color_pieces(thickness_mm, main_solid);
+        let names: Vec<_> =
+            pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
+        let filaments: Vec<_> = pieces.iter().map(|p| p.slot).collect();
+        let parts = pieces
             .iter()
-            .map(|p| bp_3mf::Part {
-                name: &p.name,
+            .zip(&names)
+            .map(|(p, name)| bp_3mf::Part {
+                name,
                 positions: &p.positions,
                 tris: &p.tris,
-                paint: &p.paint,
-                object: p.object,
+                paint: &[],
+                object: 0,
+                plate: 0,
             })
-            .collect(),
+            .collect();
+        write_color_assembly(d, prefs, &path, parts, &filaments)?;
+        Ok(pieces.len())
+    })
+    .await
+}
+
+fn write_color_assembly(
+    d: &Document,
+    prefs: &Prefs,
+    path: &str,
+    parts: Vec<bp_3mf::Part<'_>>,
+    part_filaments: &[u8],
+) -> CmdResult<()> {
+    let filaments = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+    let slots = d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
+    let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+    let (volumes_mm3, _) = dto::flush_matrix(d);
+    let model = bp_3mf::Model {
+        plate_count: 1,
+        name: &name,
+        piece: bp_3mf::ZipText::ES.piece,
+        parts,
         filaments,
+        slots,
+        thumbnail: None,
         printer: d.printer.clone(),
         flush: bp_3mf::Flush {
             volumes_mm3,
@@ -630,8 +1535,9 @@ pub(crate) fn write_3mf(d: &Document, prefs: &Prefs, path: &str) -> CmdResult<()
         offset_mm: d.offset_mm,
     };
     let file = std::fs::File::create(path).map_err(|e| AppError::file(path, e))?;
-    bp_3mf::write(std::io::BufWriter::new(file), &model)
-        .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
+    let out = std::io::BufWriter::new(file);
+    let result = bp_3mf::write_filament_parts(out, &model, part_filaments);
+    result.map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
 }
 
 pub(crate) fn printability_for_doc(
@@ -643,8 +1549,9 @@ pub(crate) fn printability_for_doc(
     let mut report = project.printability(params);
     report.printer = Some(d.printer.profile.id.clone());
     let stats = project.stats();
-    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, stats.size_mm);
-    let fits = plate.fits && stats.size_mm[2] <= d.printer.max_height_mm();
+    let size = dto::printed_size(project, &stats);
+    let (_, plate) = dto::waste_and_plate(d, prefs, &stats.swaps, size);
+    let fits = plate.fits && size[2] <= d.printer.max_height_mm();
     report.checks.push(bp_core::printability::Check::new(
         "buildVolume",
         "checked",
