@@ -478,10 +478,28 @@ mod tests {
             assert_eq!(closed, split.pieces.len());
 
             let t = std::time::Instant::now();
-            let kit = bp_core::kit::kit(split, bp_3mf::Printer::default().bed_mm());
+            let printer = bp_3mf::Printer::default();
+            let kit = bp_core::kit::kit(split, bp_3mf::kit_bed(&printer, &Default::default(), 5.0, false));
             let palette: Vec<String> = project.palette().iter().map(|c| bp_core::color::to_hex(*c)).collect();
-            let info =
-                bp_3mf::KitInfo { name: "spider", palette: &palette, slots: &[], printer: &bp_3mf::Printer::default() };
+            let info = bp_3mf::KitInfo {
+                name: "spider",
+                palette: &palette,
+                slots: &[],
+                filament_names: &[],
+                printer: &bp_3mf::Printer::default(),
+                params: bp_3mf::project_file::KitSettings {
+                    voxel_mm,
+                    depth_mm,
+                    core_slot: None,
+                    min_piece_mm3: 20.0,
+                    mix: false,
+                    contents: Default::default(),
+                    pins: None,
+                },
+                density_g_cm3: 1.24,
+                flush: Default::default(),
+                lang: Default::default(),
+            };
             let zip = std::env::temp_dir().join(format!("blendparser-piezas-{depth_mm}.zip"));
             let summary = bp_3mf::write_kit_zip(std::fs::File::create(&zip).unwrap(), &kit, &info).unwrap();
             eprintln!(

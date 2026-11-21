@@ -123,6 +123,13 @@ mod tests {
                 depth_mm: 2.0,
                 core_slot: Some(1),
                 min_piece_mm3: 12.0,
+                mix: true,
+                contents: bp_3mf::project_file::KitContents {
+                    stl: bp_3mf::project_file::StlFiles::Colour,
+                    quality: bp_3mf::project_file::Quality::High,
+                    ..Default::default()
+                },
+                pins: Some(bp_3mf::project_file::KitPins { diameter_mm: 4.0, depth_mm: 3.0, clearance_mm: 0.2 }),
             }),
         }
     }
