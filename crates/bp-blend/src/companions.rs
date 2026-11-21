@@ -81,6 +81,17 @@ pub fn locate(name: &str, base: &Path, model_dir: &Path, extras: &[PathBuf]) -> 
     if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
         return Some(found);
     }
+    // A lowercased path only works on case-insensitive filesystems. Match the
+    // actual directory entries so Skin.png also finds skin.PNG on Linux.
+    if let Some(found) = std::fs::read_dir(model_dir).ok().and_then(|entries| {
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| p.is_file() && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_lowercase() == key))
+            .min()
+    }) {
+        return Some(found);
+    }
     extras.iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_lowercase() == key)).cloned()
 }
 
@@ -399,6 +410,29 @@ mod tests {
             (Kind::Buffers, "m data.bin", false, true)
         );
         assert_eq!((found[1].kind, found[1].found), (Kind::Textures, true));
+    }
+
+    #[test]
+    fn locate_prefers_written_paths_and_matches_local_files_before_extras() {
+        let dir = temp("locate");
+        let base = dir.join("materials");
+        std::fs::create_dir_all(&base).unwrap();
+        let exact = base.join("Skin.png");
+        let beside = dir.join("skin.PNG");
+        let extra = temp("locate-extra").join("SKIN.png");
+        for path in [&exact, &beside, &extra] {
+            std::fs::write(path, b"png").unwrap();
+        }
+        let extras = [extra.clone()];
+        assert_eq!(locate("Skin.png", &base, &dir, &extras), Some(exact));
+        let found = locate(r"C:\artist\tex\Skin.png", &base, &dir, &extras).unwrap();
+        assert_eq!(found.canonicalize().unwrap(), beside.canonicalize().unwrap());
+        std::fs::remove_file(beside).unwrap();
+        // A directory with the matching name is not a texture.
+        std::fs::create_dir(dir.join("skin.PNG")).unwrap();
+        assert_eq!(locate("maps/Skin.png", &base, &dir, &extras), Some(extra));
+        assert_eq!(locate("missing.png", &base, &dir, &extras), None);
+        assert_eq!(locate("Skin.png", &dir.join("absent"), &dir.join("absent"), &extras), Some(extras[0].clone()));
     }
 
     #[test]

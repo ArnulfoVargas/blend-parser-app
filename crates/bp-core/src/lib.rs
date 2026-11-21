@@ -16,6 +16,8 @@ pub mod paint;
 pub mod palette;
 pub mod printability;
 pub mod project;
+pub mod refine;
+pub mod region;
 pub mod scene;
 pub mod separate;
 pub mod split;
@@ -23,8 +25,9 @@ pub mod waste;
 
 pub use mesh::{MeshOps, RepairReport};
 pub use project::{
-    ColorOps, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, PlateEditError, PlateGroup, Preview,
-    PrintOps, Project, SeparateError, SplitError, SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
+    ColorOps, ColourMatch, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, PlateEditError, PlateGroup,
+    Preview, PrintOps, Project, RefineFailure, RegionAction, RegionFailure, RegionPreview, SeparateError, SplitError,
+    SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
 };
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;

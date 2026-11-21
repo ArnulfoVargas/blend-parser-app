@@ -38,6 +38,7 @@ import { CutReview } from "./cut-review";
 import { SeparatePanel } from "./separate-panel";
 import { ConnectPanel } from "./connect-panel";
 import { SplitPanel } from "./split-panel";
+import { RegionPanel } from "./region-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -221,9 +222,12 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   },
   toolClick: (tool, triangle, additive) => {
     if (tool === "separate") separatePanel.click(triangle, additive);
+    if (tool === "region") void regionPanel.click(triangle, additive);
   },
   planeClick: (point) => connectPanel.click(point),
   halfPicked: (b) => connectPanel.half(b),
+  select: (o, d) => (summary ? regionPanel.stroke(o, d) : Promise.resolve(null)),
+  endSelect: () => regionPanel.endStroke(),
 });
 
 /** Points in preview units for the current size. */
@@ -283,6 +287,12 @@ async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
 }
 document.querySelectorAll<HTMLButtonElement>("button[data-turn]").forEach((b) => b.addEventListener("click", () => void turn(() => api.rotate(Number(b.dataset.turn), 90))));
 $("#rotate-reset").addEventListener("click", () => void turn(() => api.resetRotation()));
+const turnStep = $<HTMLSelectElement>("#turn-step");
+turnStep.addEventListener("change", () => {
+  viewer.setTurnStep(Number(turnStep.value));
+  if (app.dataset.tool === "rotate") setHint(t("hint.rotate", { step: num(Number(turnStep.value)) }));
+});
+viewer.setTurnStep(Number(turnStep.value));
 
 let cutDrawing = false;
 let cutPicking = false;
@@ -494,13 +504,46 @@ const separatePanel = new SeparatePanel({
   error: errText,
 });
 
+// ---- cutting a selected region out ---------------------------------------------------
+
+const regionPanel = new RegionPanel({
+  summary: () => summary,
+  radiusMm: () => radiusMm(),
+  tint: (colors, mix) => viewer.setTriangleTint(colors, mix),
+  overlay: (preview, pull) => viewer.setRegionPreview(preview, pull),
+  apply: async (closure, action) => {
+    measured = [];
+    let done = false;
+    await apply(() => api.applyRegion(closure, action), () => {
+      done = true;
+      const n = summary?.plate.objects ?? 0;
+      toast(action.kind === "remove" ? t("reg.removed") : t("reg.extracted", { count: n, n }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  cursor: () => syncBrush(),
+  picking: (on) => {
+    app.dataset.regionPick = on ? "colour" : "brush";
+    viewer.setRegionPicking(on);
+    if (app.dataset.tool === "region") setHint(t(on ? "hint.regionColour" : "hint.region"));
+  },
+  refine: async () => {
+    const before = summary?.triangles ?? 0;
+    await apply(() => api.refineToPaint(), () =>
+      toast(t("reg.refined", { count: (summary?.triangles ?? 0) - before, n: nf((summary?.triangles ?? 0) - before) }), "ok", { label: t("cut.undo"), run: () => void undo() }));
+  },
+  close: () => setTool("orbit"),
+  error: errText,
+});
+
 const radiusInput = $<HTMLInputElement>("#radius");
 const radiusMm = () => Number(radiusInput.value);
 function syncBrush() {
   bind("radiusOut", `${nf(radiusMm(), 1)} mm`);
   const scale = summary && viewer.modelHeight() > 0 ? summary.sizeMm[2] / viewer.modelHeight() : 1;
   viewer.brushRadius = radiusMm() / scale;
-  const hex = summary?.slots[brushSlot]?.hex;
+  // The region brush selects rather than paints: its footprint has the selection's colour.
+  const hex = app.dataset.tool === "region" ? regionPanel.cursorColour() : summary?.slots[brushSlot]?.hex;
   if (hex) {
     app.style.setProperty("--brush", hex);
     viewer.setBrushColor(hex);
@@ -515,6 +558,7 @@ async function reloadMesh(frame = false) {
   syncMeasure();
   separatePanel.meshChanged();
   splitPanel.meshChanged();
+  regionPanel.meshChanged();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
@@ -1679,14 +1723,19 @@ function setTool(tool: Tool) {
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
   // A short view scrolls the shelf: the tool in use stays in sight.
   document.querySelector<HTMLButtonElement>(`#toolbar button[data-tool="${tool}"]`)?.scrollIntoView({ block: "nearest" });
-  radiusInput.disabled = tool !== "brush";
+  radiusInput.disabled = tool !== "brush" && tool !== "region";
   viewer.setTool(tool);
   if (tool === "separate") separatePanel.open(); else separatePanel.close();
   if (tool === "connect") connectPanel.open(); else connectPanel.close();
   if (tool === "split") splitPanel.open(); else splitPanel.close();
+  if (tool === "region") regionPanel.open(); else regionPanel.close();
+  syncBrush();
   // Picking the cut's tool turns the cut on.
   syncSection(viewer.getSection());
-  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") }) : t(`hint.${tool}`));
+  setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
+    : tool === "rotate" ? t("hint.rotate", { step: num(Number(turnStep.value)) })
+    : tool === "region" ? t(regionPanel.hint())
+    : t(`hint.${tool}`));
   syncMeasure();
 }
 
@@ -1764,6 +1813,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "d") setTool("separate");
   else if (e.key === "j") setTool("connect");
   else if (e.key === "k") setTool("split");
+  else if (e.key === "x") setTool("region");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
@@ -1772,6 +1822,7 @@ window.addEventListener("keydown", (e) => {
     setTool("orbit");
   }
   else if (e.key === "Escape" && (app.dataset.tool === "separate" || app.dataset.tool === "split")) setTool("orbit");
+  else if (e.key === "Escape" && app.dataset.tool === "region") setTool("orbit");
   else if (e.key === "Escape" && measured.length) {
     measured = [];
     syncMeasure();
@@ -1903,6 +1954,7 @@ onLangChange(() => {
   separatePanel.update();
   connectPanel.update();
   splitPanel.update();
+  regionPanel.update();
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });

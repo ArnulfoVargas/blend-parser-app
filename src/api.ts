@@ -128,7 +128,7 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | "fix" | "cut" | "separate" | "connect" | "split" | null;
+  undoLabel: "stroke" | "merge" | "fix" | "cut" | "separate" | "connect" | "split" | "regionRemove" | "regionExtract" | "refine" | null;
   paintedTriangles: number;
 }
 
@@ -162,6 +162,18 @@ export interface CutProposal {
   signal: { kind: "neck"; areaMm2: number; beforeMm2: number; afterMm2: number } | { kind: "colour"; from: number; to: number };
 }
 export interface PaintResult extends Hit { tris: number[] }
+
+/** The region selection: global preview triangle ids, and how many separate regions they make. */
+export interface Selection { tris: number[]; count: number; regions: number }
+export type SelectionOp = "grow" | "connected" | "smooth" | "invert" | "clear" | "get";
+/** How a cut region is closed: a shell `mm` thick, the piece `clearanceMm` smaller than its pocket; or a cap `mm` deep (negative bulges out). */
+export type Closure = { kind: "shell"; mm: number; clearanceMm?: number } | { kind: "cap"; mm: number };
+/** The region goes, or each connected region becomes an object of its own (with `group`, all one object). */
+export type RegionAction = { kind: "remove" } | { kind: "extract"; layFlat: boolean; group?: boolean };
+/** What makes faces the same colour: the model's material, the filament slot, or the colour within ΔE. */
+export type ColourMatch = { kind: "material" } | { kind: "filament" } | { kind: "similar"; deltaE: number };
+/** What cutting the region out would make, in preview units: flat xyz triangles (9 numbers each). */
+export interface RegionPreview { closure: number[]; pieces: number[][]; directions: Vec3[]; pieceMm3: number[]; restMm3: number; closed: boolean; small: number }
 
 /** The paintable mesh, decoded from the binary preview payload. */
 export interface PreviewMesh {
@@ -233,6 +245,17 @@ export const api = {
     invoke<ConnectReview>("preview_connected_cut", { point, normal, layOnCut, selected, connectors }),
   cutConnected: (point: Vec3, normal: Vec3, layOnCut: boolean, selected: number[], connectors: Connectors, dowelLabel: string) =>
     invoke<Summary>("cut_connected", { point, normal, layOnCut, selected, connectors, dowelLabel }),
+  /** Adds to the region selection, or with `add` false takes from it; never paints. */
+  selectRegion: (origin: Vec3, dir: Vec3, radiusMm: number, add: boolean, through: boolean) =>
+    invoke<PaintResult | null>("select_region", { origin, dir, radiusMm, add, through }),
+  selectionOp: (op: SelectionOp) => invoke<Selection>("selection_op", { op }),
+  previewRegion: (closure: Closure, action: RegionAction) => invoke<RegionPreview>("preview_region", { closure, action }),
+  applyRegion: (closure: Closure, action: RegionAction) => invoke<Summary>("apply_region", { closure, action }),
+  /** Selects (or with `add` false, deselects) the faces the same colour as preview triangle `seed`; with `base`, starting from that selection. */
+  selectByColour: (seed: number, how: ColourMatch, contiguous: boolean, add: boolean, base: number[] | null = null) =>
+    invoke<Selection>("select_by_colour", { seed, how, contiguous, add, base }),
+  /** Makes colour borders that cross triangles edges of the mesh; one undoable step. */
+  refineToPaint: () => invoke<Summary>("refine_to_paint"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),
   setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number) =>

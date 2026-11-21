@@ -45,6 +45,15 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   número de cortes iguales por eje para que cada pieza quepa en el espacio útil de la placa
   (margen, zonas excluidas y torre), permite ajustarlos, apoyar las piezas sobre su corte y
   añadir espigas en las uniones, y reparte las piezas en varias placas del 3MF.
+- Región (`X`): un pincel que selecciona parte de la superficie sin pintarla (sólo caras
+  visibles o atravesando el modelo, con borrar, ampliar, pieza entera, suavizar e invertir) y la
+  elimina o la extrae como pieza, cerrada con una carcasa de grosor elegido o con una tapa a una
+  profundidad elegida. La superficie de cierre se ve antes de aplicar.
+- Separar por color: en Región, un clic elige todas las caras del mismo filamento, material
+  original o color parecido (ΔE ajustable), en todo el modelo o sólo las unidas. Los bordes de
+  color que cruzan triángulos pueden convertirse en aristas para que la selección los siga. Cada
+  región separada sale como pieza propia o todas en un objeto, y con carcasa se puede dar holgura
+  para que la pieza encaje en el hueco que deja.
 - Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
   dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
 
@@ -118,9 +127,17 @@ Para añadir un idioma:
 
 ## Descarga
 
-Los instaladores de Windows (`.exe`, `.msi`) y Linux (`.AppImage`, `.deb`) están en
+Los instaladores de Windows (`.exe`, `.msi`), Linux (`.AppImage`, `.deb`, `.rpm`) y
+macOS (`.dmg` para Intel `x64` o Apple Silicon `aarch64`) se publican en
 [Releases](https://github.com/ArnulfoVargas/blend-parser-app/releases). Hace falta tener
 **Blender 3.6 o posterior** instalado.
+
+En macOS, abre el `.dmg` de tu arquitectura y arrastra BlendParser a Aplicaciones.
+Las builds usan firma **ad hoc**, sin certificado Developer ID ni notarización de Apple;
+macOS puede pedir que autorices su apertura en **Ajustes del Sistema → Privacidad y seguridad**.
+Esta firma es independiente de la firma del actualizador. No hacen falta secretos de Apple
+para generar estas builds. Consulta la [guía de firma de Tauri](https://v2.tauri.app/distribute/sign/macos/)
+para configurar Developer ID y notarización si se habilitan más adelante.
 
 Los instaladores de Windows se firman con un certificado de
 [SignPath Foundation](https://signpath.org) en cuanto el proyecto queda aprobado; hasta entonces
@@ -153,6 +170,7 @@ aprobación en SignPath, vuelve a firmarlos para el actualizador y los publica.
   `BLENDER_PATH` o desde la app.
 - Rust estable (1.88+), Node 20, y en Windows WebView2 (viene con Windows 11).
 - Linux: `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`.
+- macOS: Xcode Command Line Tools (`xcode-select --install`).
 
 ## Desarrollo
 
@@ -162,6 +180,13 @@ npm run tauri dev                    # desarrollo con recarga
 npm run tauri build -- --no-bundle   # solo el ejecutable, en target/release
 npm run tauri build                  # instaladores de la plataforma actual
 ```
+
+CI compila y ejecuta los tests de Rust en runners macOS nativos: `macos-14` para
+Apple Silicon y `macos-15-intel` para Intel. Además genera los `.dmg`, verifica la firma
+ad hoc y la arquitectura del ejecutable, y guarda los instaladores como artefactos de cada
+ejecución. Las builds de PR desactivan los artefactos del actualizador para no necesitar
+secretos; no crean releases. Todavía hace falta probar manualmente la interfaz y una
+conversión con Blender en un Mac.
 
 Antes de cada commit (lo mismo que comprueba CI):
 
@@ -183,7 +208,8 @@ BP_SAMPLE_BLEND=ruta/al/modelo.blend cargo test --release -p bp-blend -- --ignor
 Desde la 0.0.2, BlendParser busca una versión nueva al arrancar (y al pulsar la versión en
 la barra superior). Lee `latest.json` del último Release de GitHub, comprueba la firma con la
 clave pública de `tauri.conf.json`, instala y se reinicia. En Linux se actualiza el AppImage;
-`.deb` y `.rpm` se actualizan a mano.
+`.deb` y `.rpm` se actualizan a mano. En macOS se distribuye un `.app.tar.gz` firmado para
+el actualizador de cada arquitectura; el `.dmg` sirve para la instalación inicial.
 
 La clave privada de firma está fuera del repositorio, en `~/.tauri/blendparser.key` (con su
 contraseña en `~/.tauri/blendparser.key.password`), y en los secretos del repositorio
@@ -205,8 +231,12 @@ en su tag `alpha-X.Y.Z`. El tag `release-source-<sha>` permite reintentar el mis
 sin crear otra versión. Las reservas de tags son atómicas para evitar colisiones.
 
 El workflow reutilizable de Release se invoca directamente desde CI, porque los tags
-creados con `GITHUB_TOKEN` no disparan otro workflow. Compila y firma Windows y Linux,
-valida que `latest.json` contenga ambas plataformas y entonces publica el borrador.
+creados con `GITHUB_TOKEN` no disparan otro workflow. Compila Windows, Linux y macOS
+(Intel y Apple Silicon), firma los paquetes para el actualizador y valida que `latest.json`
+contenga las cuatro entradas: `windows-x86_64`, `linux-x86_64`, `darwin-x86_64` y
+`darwin-aarch64`. Solo entonces publica el borrador. Las subidas se ejecutan en serie
+para no sobrescribir entradas del manifiesto. El soporte macOS se aplica a tags que
+incluyan estos cambios.
 Si falla una build, el release queda como borrador y la versión anterior sigue disponible.
 Reintenta con **Re-run all jobs** en CI o con **Actions → Release → Run workflow**, indicando
 el tag existente. Un release ya publicado se omite. No borres los tags de seguimiento.
@@ -223,7 +253,7 @@ npm run release -- 0.0.3 --push
 
 El script sube la versión en `package.json`, `Cargo.toml` y `tauri.conf.json`, hace commit,
 crea el tag `alpha-0.0.3` y lo sube. El tag lanza `.github/workflows/release.yml`, que comprueba
-que tag y versión coinciden, compila y firma Windows y Linux y publica el Release con
+que tag y versión coinciden, compila Windows, Linux y macOS, firma los paquetes del actualizador y publica el Release con
 `latest.json`. Las versiones usan tres números (`mayor.menor.parche`). Usa `--channel beta` o
 `--channel v` para otros prefijos de tag.
 
@@ -248,6 +278,8 @@ crates/
     fit         Cortes necesarios para caber en la placa y reparto de piezas en placas
     connect     Conectores de un corte: geometría, holgura, validación y colocación automática
     separate    Piezas desconectadas con tolerancia de soldadura y propuestas de corte
+    region      Cortar una región de la superficie: carcasa (con holgura) o tapa, con su validación
+    refine      Bordes de color dentro de un triángulo convertidos en aristas, sin uniones en T
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
   bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa
@@ -339,6 +371,59 @@ con Blender unos 2,5 s.
   armado (#11). Toda la división se deshace en un paso, con la pintura.
 - **Espigas opcionales** (#34): en cada unión, donde caben con pared, alojamientos en las dos
   piezas y espigas sueltas que se reparten como una pieza más.
+### Región: cortar, extraer o separar lo seleccionado (#37)
+
+- **Seleccionar no pinta.** La selección es una máscara aparte sobre los triángulos de la vista
+  previa; no cambia colores ni pintura y no es un paso de deshacer. El pincel usa el radio del
+  pincel de color. **Caras visibles** sólo toma las caras que miran a la cámara y siguen a la que
+  toca el puntero; **Atravesar** toma todas las del radio, también las de detrás. `Alt` borra
+  mientras se mantiene.
+- **Una selección de superficie no define un volumen,** así que el cierre se elige siempre:
+  - **Carcasa:** la región se empuja hacia dentro el grosor elegido a lo largo de las normales y
+    se cierra con paredes por su borde. El resto recibe la misma cara interior y las mismas paredes
+    al revés: un hueco donde la carcasa encaja, sin solaparse con ella.
+  - **Tapa:** cada borde se cierra con un abanico hasta su centro, hundido la profundidad elegida
+    (negativa: hacia fuera). El resto recibe el mismo abanico al revés.
+- **Validación antes de aplicar.** Se rechazan, diciendo por qué, la selección vacía, bordes que
+  pasan por aristas con más de dos caras, bordes que se tocan en un vértice, tapas que se doblan o
+  atraviesan la superficie, paredes más delgadas que la carcasa, carcasas que se doblan en curvas
+  cerradas, piezas sin volumen y eliminar todo el modelo. Un agujero que el modelo ya tenía se
+  conserva y se avisa; no se presenta como cerrado.
+- **Vista previa:** la selección se resalta sobre la pintura, la superficie de cierre propuesta se
+  ve en naranja a través del modelo y, con **Ver separadas**, las piezas se apartan en la dirección
+  en que salen. Se indican los volúmenes de las piezas y del resto.
+- **Aplicar** es un solo paso de `Ctrl+Z`. Las caras que quedan conservan colores y pintura a mano;
+  la cara interior de una carcasa toma la pintura de la cara de la que sale, y paredes y tapas el
+  color de la superficie donde la tocan. Varias regiones separadas son varias piezas; extraídas
+  quedan en su sitio o sobre la placa junto al modelo, con la cara exterior hacia arriba.
+
+### Separar por color y volúmenes complementarios (#38)
+
+- **Elegir por color.** Con **Por color**, un clic toma las caras del mismo **filamento**, del mismo
+  **material original** o de un **color parecido** al de la cara tocada (ΔE CIE76 con tolerancia
+  ajustable), en todo el modelo o **sólo unidas**. Ctrl o Mayús añaden y Alt quita. Al cambiar el
+  criterio o la tolerancia se repite la última elección sobre la selección de la que partió, y el
+  recuento de triángulos y regiones deja ver si la selección se fragmenta.
+- **Bordes dentro de un triángulo.** La pintura subdivide los triángulos donde cruza un borde de
+  color. **Seguir los bordes de color** convierte esas subdivisiones en triángulos reales: los
+  triángulos vecinos se dividen igual y no quedan uniones en T, así que la malla sigue cerrada.
+  Después, elegir por filamento sigue el borde tal como está pintado, también donde cruzaba un
+  triángulo original, en vez de tomar cada triángulo por su color mayoritario. Las UV, los colores
+  y la pintura a mano pasan a los triángulos nuevos. Es un paso de `Ctrl+Z`. Si la malla está
+  simplificada, aplanada o reparada de forma que sus triángulos ya no son los del modelo, se avisa y
+  no se hace.
+- **Piezas separadas o agrupadas.** Cada región desconectada sale como un objeto propio, o con
+  **Un solo objeto** todas juntas.
+- **Volúmenes complementarios.** Con carcasa, la pieza ya no se superpone al modelo: el resto queda
+  con el hueco que ocupaba. La **holgura** hace la pieza más pequeña que su hueco por el borde (se
+  retira a lo largo de la superficie) y por debajo (es más fina), sin tocar el hueco. Se rechazan
+  una holgura igual o mayor que el grosor, una holgura que dobla las caras del borde y unas piezas
+  que sumen más volumen que el modelo, es decir, que se solapan. Se avisa de las piezas más
+  estrechas que dos anchos de boquilla, además de lo que ya comprueba Región (paredes finas y
+  carcasas que se doblan en curvas cerradas).
+- Las piezas son objetos del 3MF como cualquier corte. La exportación por color en ZIP sigue oculta
+  y se rehace en #1; cuando vuelva, los bordes ajustados también le sirven, porque usa el color
+  mayoritario de cada triángulo.
 
 ### Diagnóstico local de viabilidad FDM (alcance inicial de #7)
 

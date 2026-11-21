@@ -677,6 +677,124 @@ pub async fn propose_cuts(app: AppHandle, selected: Vec<usize>) -> CmdResult<Vec
     with_doc(app, move |d, _| Ok(d.project.propose_cuts(&selected).into_iter().map(dto::proposal).collect())).await
 }
 
+/// Brush radius for the region selection, and how thick a shell or deep a cap can be, in millimetres.
+const REGION_RADIUS: std::ops::RangeInclusive<f32> = 0.1..=100.0;
+const CLOSURE_RANGE: std::ops::RangeInclusive<f32> = -50.0..=50.0;
+
+/// Adds to the region selection (or with `add` false, takes from it) where
+/// the ray lands; with `through`, the brush reaches walls behind the surface too.
+#[tauri::command]
+pub async fn select_region(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    radius_mm: f32,
+    add: bool,
+    through: bool,
+) -> CmdResult<Option<dto::SelectStrokeDto>> {
+    in_range(radius_mm, REGION_RADIUS, "error.radiusRange")?;
+    with_doc(app, move |d, _| {
+        Ok(d.project.select(origin, dir, radius_mm, add, through).map(|(h, tris)| dto::SelectStrokeDto {
+            point: h.point,
+            normal: h.normal,
+            tris,
+        }))
+    })
+    .await
+}
+
+/// Reshapes the region selection: "grow", "connected", "smooth", "invert" or "clear"; "get" only reads it.
+#[tauri::command]
+pub async fn selection_op(app: AppHandle, op: String) -> CmdResult<dto::SelectionDto> {
+    with_doc(app, move |d, _| {
+        match op.as_str() {
+            "grow" => d.project.grow_selection(),
+            "connected" => d.project.select_connected(),
+            "smooth" => d.project.smooth_selection(),
+            "invert" => d.project.invert_selection(),
+            "clear" => d.project.clear_selection(),
+            "get" => {}
+            _ => return Err(AppError::with("error.internal", json!({ "detail": op }))),
+        }
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
+fn closure(c: dto::ClosureDto) -> CmdResult<bp_core::region::Closure> {
+    let (dto::ClosureDto::Shell { mm, .. } | dto::ClosureDto::Cap { mm }) = c;
+    in_range(mm, CLOSURE_RANGE, "error.closureRange")?;
+    if let dto::ClosureDto::Shell { clearance_mm, .. } = c {
+        if mm <= 0.0 {
+            return Err(AppError::with("error.closureRange", json!({ "min": 0.0, "max": CLOSURE_RANGE.end() })));
+        }
+        in_range(clearance_mm, 0.0..=5.0, "error.clearanceRange")?;
+    }
+    Ok(c.into())
+}
+
+/// Selects (or with `add` false, deselects) the faces the same colour as
+/// preview triangle `seed`: only those joined to it with `contiguous`. With
+/// `base`, the selection is that first, so trying a pick again with another
+/// tolerance is one step that no other pick can come between.
+#[tauri::command]
+pub async fn select_by_colour(
+    app: AppHandle,
+    seed: u32,
+    how: dto::ColourMatchDto,
+    contiguous: bool,
+    add: bool,
+    base: Option<Vec<u32>>,
+) -> CmdResult<dto::SelectionDto> {
+    if let dto::ColourMatchDto::Similar { delta_e } = how {
+        in_range(delta_e, 0.0..=100.0, "error.deltaERange")?;
+    }
+    with_doc(app, move |d, _| {
+        if let Some(base) = base {
+            d.project.set_selection(&base);
+        }
+        d.project.select_by_colour(seed, how.into(), contiguous, add);
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
+/// Makes colour borders that cross triangles edges of the mesh; one undoable step.
+#[tauri::command]
+pub async fn refine_to_paint(app: AppHandle) -> CmdResult<Summary> {
+    with_doc(app, move |d, prefs| {
+        d.project.refine_to_paint()?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// What cutting the selected region out would make; nothing changes.
+#[tauri::command]
+pub async fn preview_region(
+    app: AppHandle,
+    closure: dto::ClosureDto,
+    action: dto::RegionActionDto,
+) -> CmdResult<dto::RegionPreviewDto> {
+    let c = self::closure(closure)?;
+    with_doc(app, move |d, _| Ok(dto::region_preview(d.project.preview_region(c, action.into())?))).await
+}
+
+/// Cuts the selected region out as one undoable step.
+#[tauri::command]
+pub async fn apply_region(
+    app: AppHandle,
+    closure: dto::ClosureDto,
+    action: dto::RegionActionDto,
+) -> CmdResult<Summary> {
+    let c = self::closure(closure)?;
+    with_doc(app, move |d, prefs| {
+        d.project.apply_region(c, action.into())?;
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn reduce_palette(app: AppHandle, target: usize) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {

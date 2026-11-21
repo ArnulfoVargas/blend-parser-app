@@ -88,6 +88,16 @@ def locate(name, base):
     for candidate in candidates:
         if os.path.isfile(candidate):
             return candidate
+    # Match actual filenames: lowercasing a path alone misses skin.PNG on Linux.
+    for folder in dirs:
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for filename in names:
+            candidate = os.path.join(folder, filename)
+            if filename.lower() == key and os.path.isfile(candidate):
+                return candidate
     return BY_NAME.get(key)
 
 

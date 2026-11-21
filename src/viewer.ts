@@ -13,7 +13,7 @@ import { CutPreview, type CutExtent } from "./cut-preview";
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
-export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "separate" | "connect" | "split";
+export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "separate" | "connect" | "split" | "region";
 export type Axis = 0 | 1 | 2;
 
 /** Plane point in preview units; XYZ Euler angles in degrees; negative side kept unless flipped. */
@@ -48,15 +48,16 @@ export interface BrushHandlers {
   planeClick?(point: Vec3 | null): void;
   /** Half A or B (`b`) picked on the view with the connectors tool. */
   halfPicked?(b: boolean): void;
+  /** A stroke of the region brush: selects (never paints) what lies under it. */
+  select?(origin: Vec3, dir: Vec3): Promise<PaintResult | null>;
+  /** The region brush was lifted. */
+  endSelect?(): void;
 }
 
 /** A size handle: one axis, or all three from the corner. */
 type Grip = Axis | "all";
 /** A move handle: along X or Y, or anywhere on the plate. */
 type Slide = Axis | "plane";
-
-/** Turns snap to this many degrees unless Shift is held. */
-const TURN_STEP = 15;
 
 /** Blender's axis colours: X red, Y green, Z blue. */
 const AXIS_COLOURS = ["--axis-x", "--axis-y", "--axis-z"];
@@ -90,6 +91,12 @@ export class Viewer {
   private colors: Uint8Array | null = null;
   /** Colour per preview triangle that replaces its filament while a tool shows pieces. */
   private tint: (Vec3 | null)[] | null = null;
+  /** The region tool picks faces with a click (by colour) instead of brushing them. */
+  private regionPicking = false;
+  /** How much of a tint covers the filament under it: 1 hides it, less lets it show through. */
+  private tintMix = 1;
+  /** What cutting a region out would make: its closing faces, and the pieces pulled out along their way off. */
+  private regionView = new THREE.Group();
   private data: PreviewMesh | null = null;
   private palette: [number, number, number][] = [];
   private view: View = "filament";
@@ -123,6 +130,8 @@ export class Viewer {
   private hoverRing: Axis | null = null;
   private turnDrag: { axis: Axis; centre: THREE.Vector3; sign: number; last: number; total: number; degrees: number; section: Section | null } | null = null;
   private planeDrag: { slide: Slide; base: THREE.Vector3; from: THREE.Vector3; section: Section } | null = null;
+  /** Turns snap to this many degrees unless Shift is held. */
+  private turnStep = 15;
   private section: Section | null = null;
   private clip = new THREE.Plane();
   private cut = new THREE.Group();
@@ -193,6 +202,7 @@ export class Viewer {
     });
 
     this.scene.add(this.findings);
+    this.scene.add(this.regionView);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f86, 1.6));
     const key = new THREE.DirectionalLight(0xffffff, 1.6);
     key.position.set(0.6, -1, 1.4);
@@ -573,12 +583,18 @@ export class Viewer {
     if (this.pickingPart) this.pickCutPart(false);
     // A tool picked from the keyboard mid-drag ends the drag first.
     if (this.moveDrag || this.turnDrag || this.planeDrag) this.cancelPlace();
+    // A stroke cut short by a tool picked from the keyboard still ends, so nothing stays held.
+    if (this.painting) {
+      this.painting = false;
+      if (this.tool === "region") this.handlers.endSelect?.();
+      else this.handlers.endStroke();
+    }
     this.tool = t;
     // In brush mode the left button paints; the right button orbits and the middle pans.
-    this.controls.mouseButtons = t === "brush"
+    this.controls.mouseButtons = this.brushes(t)
       ? { LEFT: null as unknown as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }
       : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-    if (t !== "brush") {
+    if (!this.brushes(t)) {
       this.cursor.visible = false;
       this.canvas.style.cursor = "";
     }
@@ -631,10 +647,60 @@ export class Viewer {
     this.requestRender();
   }
 
-  /** Colours preview triangles (RGB 0–255) over their filament; null puts the filaments back. */
-  setTriangleTint(colors: (Vec3 | null)[] | null) {
+  /** The tools whose left button strokes the model: painting, and selecting a region. */
+  private brushes(t: Tool = this.tool) {
+    return t === "brush" || (t === "region" && !this.regionPicking);
+  }
+
+  /** With `on`, a click with the region tool picks the face under it and dragging orbits; otherwise it brushes. */
+  setRegionPicking(on: boolean) {
+    if (on === this.regionPicking) return;
+    this.regionPicking = on;
+    if (this.tool === "region") this.setTool("region");
+  }
+
+  /** Colours preview triangles (RGB 0–255) over their filament; null puts the filaments back.
+   *  With `mix` under 1 the filament shows through, so a highlight never hides the painting. */
+  setTriangleTint(colors: (Vec3 | null)[] | null, mix = 1) {
     this.tint = colors && this.data && colors.length === this.data.offsets.length - 1 ? colors : null;
+    this.tintMix = mix;
     this.recolorAll();
+  }
+
+  /**
+   * Shows what cutting a region out would make, in preview units: the faces
+   * that close the rest, and with `pull` above 0 each piece moved that far
+   * along its way off, so both sides can be seen apart. Null clears it.
+   */
+  setRegionPreview(preview: { closure: number[]; pieces: number[][]; directions: Vec3[] } | null, pull = 0) {
+    for (const child of this.regionView.children) {
+      (child as THREE.Mesh).geometry.dispose();
+      ((child as THREE.Mesh).material as THREE.Material).dispose();
+    }
+    this.regionView.clear();
+    if (preview) {
+      const surface = (flat: number[], color: string, opacity: number, xray: boolean) => {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(flat, 3));
+        geo.computeVertexNormals();
+        const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+          color: cssColor(color), roughness: 0.7, metalness: 0, flatShading: true, side: THREE.DoubleSide,
+          transparent: opacity < 1, opacity, depthTest: !xray, depthWrite: !xray,
+        }));
+        mesh.renderOrder = xray ? 16 : 15;
+        return mesh;
+      };
+      // The closing faces lie inside the model: seen through it, so the proposal is never hidden.
+      if (preview.closure.length) this.regionView.add(surface(preview.closure, "--color-warn", 0.55, true));
+      if (pull > 0) {
+        preview.pieces.forEach((flat, i) => {
+          const piece = surface(flat, "--color-accent", 1, false);
+          piece.position.copy(new THREE.Vector3(...(preview.directions[i] ?? [0, 0, 1])).multiplyScalar(pull));
+          this.regionView.add(piece);
+        });
+      }
+    }
+    this.requestRender();
   }
 
   /** The preview triangle a leaf belongs to. */
@@ -656,12 +722,14 @@ export class Viewer {
       let r: number, g: number, b: number;
       if (this.tint) while (l >= this.data!.offsets[tri + 1]) tri++;
       const tinted = this.tint?.[tri];
-      if (tinted) {
-        [r, g, b] = tinted;
-      } else if (this.view === "texture") {
+      if (this.view === "texture") {
         r = sourceRgb[l * 3]; g = sourceRgb[l * 3 + 1]; b = sourceRgb[l * 3 + 2];
       } else {
         [r, g, b] = this.palette[labels[l]] ?? [200, 200, 200];
+      }
+      if (tinted) {
+        const k = this.tintMix;
+        r = Math.round(tinted[0] * k + r * (1 - k)); g = Math.round(tinted[1] * k + g * (1 - k)); b = Math.round(tinted[2] * k + b * (1 - k));
       }
       for (let k = 0; k < 3; k++) {
         const i = l * 9 + k * 3;
@@ -682,7 +750,7 @@ export class Viewer {
 
   private showCursor(hit: Hit | null) {
     // Over the model the footprint replaces the system cursor.
-    this.canvas.style.cursor = this.tool === "brush" ? (hit ? "none" : "crosshair") : "";
+    this.canvas.style.cursor = this.brushes() ? (hit ? "none" : "crosshair") : "";
     if (!hit) {
       this.cursor.visible = false;
     } else {
@@ -747,12 +815,12 @@ export class Viewer {
       }
       return;
     }
-    if (this.tool !== "brush" || !this.mesh || this.pending) return;
+    if (!this.brushes() || !this.mesh || this.pending) return;
     this.pending = true;
     const [o, d] = this.rayFrom(e);
     try {
       if (this.painting) {
-        const r = await this.paint(o, d);
+        const r = this.tool === "region" ? await this.selectAt(o, d) : await this.paint(o, d);
         this.showCursor(r);
       } else if (e.buttons === 0) {
         this.showCursor(await this.pick(o, d));
@@ -1022,6 +1090,11 @@ export class Viewer {
     return Math.atan2(y - e.clientY, e.clientX - x);
   }
 
+  /** The angle a dragged ring snaps to. */
+  setTurnStep(degrees: number) {
+    this.turnStep = degrees;
+  }
+
   private grabRing(e: PointerEvent): boolean {
     const axis = this.ringAt();
     const section = this.planeTool() ? this.getSection() : null;
@@ -1040,7 +1113,7 @@ export class Viewer {
     r.total += Math.atan2(Math.sin(step), Math.cos(step));
     r.last = a;
     const raw = THREE.MathUtils.radToDeg(r.total * r.sign);
-    const snap = e.shiftKey ? 0.1 : r.section ? this.cutSnap : TURN_STEP;
+    const snap = e.shiftKey ? 0.1 : r.section ? this.cutSnap : this.turnStep;
     r.degrees = Math.round(raw / snap) * snap;
     // Round the centre: x' = c + q (x - c).
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3().setComponent(r.axis, 1), THREE.MathUtils.degToRad(r.degrees));
@@ -1301,6 +1374,13 @@ export class Viewer {
     const from = this.clipRay(o, d);
     if (!from || (this.section && !(await this.pick(from, d)))) return null;
     return this.handlers.paint(from, d);
+  }
+
+  /** Selects only where the cut keeps the model, as painting does. */
+  private async selectAt(o: Vec3, d: Vec3): Promise<PaintResult | null> {
+    const from = this.clipRay(o, d);
+    if (!from || !this.handlers.select || (this.section && !(await this.pick(from, d)))) return null;
+    return this.handlers.select(from, d);
   }
 
   private grabPlaneSlide(): boolean {
@@ -1664,9 +1744,11 @@ export class Viewer {
   }
 
   private onDown(e: PointerEvent) {
-    if ((this.tool === "measure" || this.tool === "separate" || this.tool === "connect") && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
+    if ((this.tool === "measure" || this.tool === "separate" || this.tool === "connect" || (this.tool === "region" && this.regionPicking)) && e.button === 0) {
+      this.down = { x: e.clientX, y: e.clientY };
+    }
     if (this.drag || this.moveDrag || this.turnDrag || this.planeDrag) return;
-    if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
+    if (!this.brushes() || e.button !== 0 || !this.mesh) return;
     this.painting = true;
     this.canvas.setPointerCapture(e.pointerId);
     this.pending = false;
@@ -1704,7 +1786,8 @@ export class Viewer {
       const hit = this.ray.ray.intersectPlane(plane, new THREE.Vector3());
       this.handlers.planeClick?.(hit ? (hit.toArray() as Vec3) : null);
     }
-    if (this.tool === "separate" && d && this.mesh && this.data && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+    const picks = this.tool === "separate" || (this.tool === "region" && this.regionPicking);
+    if (picks && d && this.mesh && this.data && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
       this.rayFrom(e);
       const hit = this.ray.intersectObject(this.mesh, false)[0];
       this.handlers.toolClick?.(this.tool, hit?.faceIndex != null ? this.triangleOf(hit.faceIndex) : null, e.ctrlKey || e.metaKey || e.shiftKey);
@@ -1721,6 +1804,8 @@ export class Viewer {
     }
     if (!this.painting) return;
     this.painting = false;
-    this.handlers.endStroke();
+    if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
+    if (this.tool === "region") this.handlers.endSelect?.();
+    else this.handlers.endStroke();
   }
 }
