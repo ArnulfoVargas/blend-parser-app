@@ -18,7 +18,11 @@
         <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.file"></button>
         <ul class="menu" role="menu" hidden>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="open"><span data-i18n="menu.open"></span> <kbd>Ctrl+O</kbd></button></li>
-          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+S</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="save"><span data-i18n="menu.save"></span> <kbd>Ctrl+S</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="saveAs"><span data-i18n="menu.saveAs"></span> <kbd>Ctrl+⇧+S</kbd></button></li>
+          <li role="separator" class="menu__sep"></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+E</kbd></button></li>
+          <li role="separator" class="menu__sep" id="recent-sep" hidden></li>
         </ul>
       </li>
       <li>
@@ -28,6 +32,7 @@
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undoSize"><span data-i18n="menu.undoSize"></span></button></li>
           <li role="separator" class="menu__sep"></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="printers"><span data-i18n="menu.printers"></span></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="filaments"><span data-i18n="menu.filaments"></span></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="waste"><span data-i18n="menu.waste"></span></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="prefs"><span data-i18n="menu.prefs"></span> <kbd>Ctrl+,</kbd></button></li>
         </ul>
@@ -49,7 +54,7 @@
         <option value="0.4">0,4 mm</option>
       </select>
       <!-- Oculto hasta que la exportación por piezas sólidas esté completa (PR #1). -->
-      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" hidden data-i18n="bar.byColour">Por color (.zip)</button>
+      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" data-i18n="bar.byColour">Por color (.zip)</button>
       <button class="btn btn--primary" type="button" id="export" aria-disabled="true"><span class="btn__warn" aria-hidden="true"></span><span data-bind="exportLabel">Exportar .3mf</span></button>
     </div>
   </header>
@@ -170,7 +175,7 @@
           <summary><h2 data-i18n="colour.title">Color</h2><span class="group__sum" data-bind="colorSum"></span></summary>
           <div class="group__body">
             <fieldset class="keys" id="count">
-              <legend data-i18n="colour.redetect">Detectar de nuevo con</legend>
+              <legend data-i18n="colour.redetect">Detectar de nuevo con hasta</legend>
               <input type="radio" name="count" id="c2" value="2"><label for="c2">2</label>
               <input type="radio" name="count" id="c3" value="3"><label for="c3">3</label>
               <input type="radio" name="count" id="c4" value="4" checked><label for="c4">4</label>
@@ -262,6 +267,7 @@
         <div class="toolbar" id="toolbar" role="toolbar" aria-orientation="vertical" data-i18n-attr="aria-label:stage.tool" data-expanded="false">
           <button class="toolbar__btn" type="button" data-tool="orbit" aria-pressed="true" data-i18n-attr="title:stage.orbitTitle;aria-label:stage.orbitTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9.5a8 8 0 0 1 13.8-3.2"/><path d="M19.5 14.5a8 8 0 0 1-13.8 3.2"/><path d="M18.6 2.8v3.7h-3.7"/><path d="M5.4 21.2v-3.7h3.7"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg><span class="toolbar__label" data-i18n="stage.orbit"></span><kbd>O</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="brush" aria-pressed="false" data-i18n-attr="title:stage.brushTitle;aria-label:stage.brushTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4.5 19.5 9.5 11 18l-5-5z"/><path d="M6 13c-2 0-3 1.5-3 3.5S2 20 2 20s2.5.5 4.5-.5S10 17 10 15.5"/></svg><span class="toolbar__label" data-i18n="stage.brush"></span><kbd>B</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="bucket" aria-pressed="false" data-i18n-attr="title:stage.bucketTitle;aria-label:stage.bucketTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11.5 11.5 5l7 7-6.5 6.5a2 2 0 0 1-2.8 0L5 14.3a2 2 0 0 1 0-2.8z"/><path d="M8.5 8 6 5.5"/><path d="M5 12.5h13.5"/><path d="M20.5 15.5s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0c0-1 1.5-3 1.5-3z" class="fill"/></svg><span class="toolbar__label" data-i18n="stage.bucket"></span><kbd>K</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="measure" aria-pressed="false" data-i18n-attr="title:stage.measureTitle;aria-label:stage.measureTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5 15.5 3l5.5 5.5L8.5 21z"/><path d="M7.5 11l2 2M10.5 8l1.5 1.5M13.5 5l2 2M5 14l1.5 1.5"/></svg><span class="toolbar__label" data-i18n="stage.measure"></span><kbd>M</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="size" aria-pressed="false" data-i18n-attr="title:stage.sizeTitle;aria-label:stage.sizeTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 15v5h-5"/><path d="M4 4l6 6M20 20l-6-6"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg><span class="toolbar__label" data-i18n="stage.size"></span><kbd>S</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="move" aria-pressed="false" data-i18n-attr="title:stage.moveTitle;aria-label:stage.moveTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5 12 3l2.5 2.5M9.5 18.5 12 21l2.5-2.5M5.5 9.5 3 12l2.5 2.5M18.5 9.5 21 12l-2.5 2.5"/></svg><span class="toolbar__label" data-i18n="stage.move"></span><kbd>G</kbd></button>
@@ -292,6 +298,16 @@
           <label for="radius" data-i18n="stage.radius">Radio</label>
           <input class="range" id="radius" type="range" min="0.5" max="20" step="0.5" value="3">
           <output for="radius" class="num" data-bind="radiusOut">3&nbsp;mm</output>
+        </div>
+        <div class="place" data-for="bucket">
+          <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:bucket.mode">
+            <button type="button" data-bucket-mode="region" aria-pressed="true" data-i18n="bucket.region">Solo esta zona</button>
+            <button type="button" data-bucket-mode="all" aria-pressed="false" data-i18n="bucket.all">Todo el modelo</button>
+          </div>
+          <label class="check" data-i18n-attr="title:bucket.addHelp"><input type="checkbox" id="bucket-add"> <span data-i18n="bucket.add">Como color nuevo</span></label>
+          <p class="bucket__pick" data-bind="bucketPick" aria-live="polite"></p>
+          <button class="btn btn--primary btn--sm" type="button" id="bucket-apply" disabled data-i18n="bucket.apply">Aplicar</button>
+          <button class="btn btn--quiet btn--sm" type="button" id="bucket-cancel" disabled data-i18n="common.cancel">Cancelar</button>
         </div>
         <div class="place" data-for="move">
           <span class="num" data-bind="placeOffset"></span>
@@ -421,21 +437,95 @@
     </form>
   </dialog>
 
-  <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
+  <dialog class="dialog dialog--wide" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>
-      <p class="help" data-i18n="zip.help">Un STL cerrado por color en un .zip, para imprimir cada color como pieza aparte.</p>
+      <p class="help" data-i18n="zip.help"></p>
       <div class="field">
-        <label for="shell" data-i18n="zip.thickness">Grosor de cada color</label>
-        <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2" aria-describedby="shell-help"><span>mm</span></div>
-        <p class="help" id="shell-help" data-bind="shellHelp"></p>
+        <label for="voxel" data-i18n="zip.detail">Detalle de las uniones</label>
+        <select class="select" id="voxel">
+          <option value="0.3" data-i18n="zip.detailFine">Fino, 0,3 mm (más lento)</option>
+          <option value="0.5" selected data-i18n="zip.detailNormal">Normal, 0,5 mm</option>
+          <option value="0.8" data-i18n="zip.detailFast">Rápido, 0,8 mm</option>
+        </select>
       </div>
-      <label class="check"><input type="checkbox" id="main-solid" checked> <span data-i18n="zip.mainSolid">Color principal como sólido completo</span></label>
+      <div class="field">
+        <label for="depth" data-i18n="zip.depth">Profundidad de cada color</label>
+        <div class="field__unit"><input class="input" id="depth" type="number" inputmode="decimal" min="0" max="50" step="0.5" value="0" aria-describedby="depth-help"><span>mm</span></div>
+        <p class="help" id="depth-help" data-i18n="zip.depthHelp"></p>
+      </div>
+      <div class="field" id="core-field">
+        <label for="core" data-i18n="zip.core">Color del núcleo</label>
+        <select class="select" id="core"></select>
+      </div>
+      <div class="field">
+        <label for="min-piece" data-i18n="zip.minPiece">Unir piezas menores de</label>
+        <div class="field__unit"><input class="input" id="min-piece" type="number" inputmode="decimal" min="0" max="10000" step="5" value="30" aria-describedby="min-piece-help"><span>mm³</span></div>
+        <p class="help" id="min-piece-help" data-i18n="zip.minPieceHelp"></p>
+      </div>
+      <div class="zip-mix">
+        <label class="check"><input type="checkbox" id="zip-pins" aria-describedby="zip-pins-help"> <span data-i18n="zip.pins">Espigas para encajar las piezas</span></label>
+        <p class="help" id="zip-pins-help" data-i18n="zip.pinsHelp"></p>
+        <div class="zip-pins" id="pin-sizes" hidden>
+          <div class="field">
+            <label for="pin-diameter" data-i18n="zip.pinDiameter">Diámetro</label>
+            <div class="field__unit"><input class="input" id="pin-diameter" type="number" inputmode="decimal" min="2" max="20" step="0.5" value="5"><span>mm</span></div>
+          </div>
+          <div class="field">
+            <label for="pin-depth" data-i18n="zip.pinDepth">Alto</label>
+            <div class="field__unit"><input class="input" id="pin-depth" type="number" inputmode="decimal" min="1" max="20" step="0.5" value="4"><span>mm</span></div>
+          </div>
+          <div class="field">
+            <label for="pin-clearance" data-i18n="zip.pinClearance">Holgura</label>
+            <div class="field__unit"><input class="input" id="pin-clearance" type="number" inputmode="decimal" min="0" max="1" step="0.05" value="0.15"><span>mm</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="zip-mix">
+        <label class="check"><input type="checkbox" id="zip-mix" aria-describedby="zip-mix-help"> <span data-i18n="zip.mix">Mezclar colores en una placa</span></label>
+        <p class="help" id="zip-mix-help" data-i18n="zip.mixHelp"></p>
+      </div>
+      <fieldset class="zip-contents" aria-describedby="zip-error">
+        <legend data-i18n="zip.contents">Qué incluir</legend>
+        <label class="check"><input type="checkbox" id="zip-3mf" checked> <span data-i18n="zip.threeMf">3MF con las piezas en sus placas</span></label>
+        <label class="check"><input type="checkbox" id="zip-guide" checked> <span data-i18n="zip.guide">Guía de armado con imágenes (HTML)</span></label>
+        <label class="check"><input type="checkbox" id="zip-text" checked> <span data-i18n="zip.text">Pasos en texto (TXT)</span></label>
+        <div class="field">
+          <label for="zip-stl" data-i18n="zip.stl">Archivos STL</label>
+          <select class="select" id="zip-stl">
+            <option value="piece" data-i18n="zip.stlPiece">Uno por pieza</option>
+            <option value="colour" data-i18n="zip.stlColour">Uno por color, con sus piezas armadas</option>
+            <option value="none" data-i18n="zip.stlNone">Ninguno</option>
+          </select>
+        </div>
+      </fieldset>
+      <div class="field" id="zip-quality-field">
+        <label for="zip-quality" data-i18n="zip.quality">Calidad de las imágenes</label>
+        <select class="select" id="zip-quality" aria-describedby="zip-estimate">
+          <option value="low" data-i18n="zip.qualityLow">Baja: más ligera</option>
+          <option value="medium" selected data-i18n="zip.qualityMedium">Media</option>
+          <option value="high" data-i18n="zip.qualityHigh">Alta: más nítida</option>
+        </select>
+        <p class="help" id="zip-estimate" aria-live="polite"></p>
+      </div>
+      <p class="form-error" id="zip-error" role="alert" hidden data-i18n="zip.nothing"></p>
       <div class="dialog__actions">
         <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
         <button class="btn btn--primary" type="button" id="export-zip" data-i18n="zip.export">Exportar .zip</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog class="dialog" id="kit-progress" aria-labelledby="h-kit-progress">
+    <div class="dialog__body">
+      <h2 id="h-kit-progress" data-i18n="zip.progressTitle">Exportando por color</h2>
+      <p id="kit-stage" aria-live="polite"></p>
+      <div class="meter" role="progressbar" aria-labelledby="kit-stage" aria-valuemin="0" aria-valuemax="100" id="kit-meter"><span></span></div>
+      <p class="help" data-i18n="zip.progressHelp"></p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="button" id="kit-cancel" data-i18n="zip.cancel">Cancelar exportación</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog class="dialog" id="pieces-dialog" aria-labelledby="h-pieces">
@@ -529,6 +619,48 @@
         <button class="btn btn--primary" type="submit" id="waste-save" data-i18n="wasteForm.save"></button>
       </footer>
     </form>
+  </dialog>
+
+  <dialog class="dialog dialog--wide dialog--sheet" id="filaments-dialog" aria-labelledby="h-filaments">
+    <div class="sheet">
+      <header class="sheet__head">
+        <h2 id="h-filaments" data-i18n="filaments.title">Mis filamentos</h2>
+        <p class="help" data-i18n="filaments.help"></p>
+        <label class="check"><input type="checkbox" id="inventory-only"> <span data-i18n="filaments.inventoryOnly"></span></label>
+        <input class="input" id="filament-search" type="search" autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:filaments.search;aria-label:filaments.search">
+      </header>
+      <div class="sheet__body">
+        <div class="filaments" id="filament-list"></div>
+        <form class="sheet__section filament-form" id="filament-form" novalidate>
+          <h3 data-i18n="filaments.addTitle">Añadir uno propio</h3>
+          <div class="filament-form__grid">
+            <div class="field"><label for="ff-brand" data-i18n="filaments.brand">Marca</label><input class="input" id="ff-brand" maxlength="40" autocomplete="off"></div>
+            <div class="field"><label for="ff-kind" data-i18n="filaments.kind">Línea</label><input class="input" id="ff-kind" maxlength="40" autocomplete="off" list="ff-kinds" placeholder="PLA Matte"><datalist id="ff-kinds"></datalist></div>
+            <div class="field"><label for="ff-name" data-i18n="filaments.name">Color</label><input class="input" id="ff-name" maxlength="60" autocomplete="off"></div>
+            <div class="field"><label for="ff-hex" data-i18n="filaments.hex">Muestra</label><input class="input filament-form__hex" id="ff-hex" type="color" value="#808080"></div>
+          </div>
+          <p class="form-error" id="filament-error" role="alert" hidden></p>
+          <div><button class="btn btn--quiet btn--sm" type="submit" data-i18n="filaments.add">Añadir a mis filamentos</button></div>
+        </form>
+      </div>
+      <footer class="sheet__foot">
+        <span class="help" data-bind="ownedCount"></span>
+        <span class="sheet__spacer"></span>
+        <button class="btn btn--primary" type="button" id="filaments-close" data-i18n="common.close">Cerrar</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="slot-filament-dialog" aria-labelledby="h-slot-filament">
+    <div class="dialog__body">
+      <h2 id="h-slot-filament" data-bind="slotFilamentTitle"></h2>
+      <p class="help" data-bind="slotFilamentHelp"></p>
+      <div class="picker--block" id="slot-filament-picker"></div>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="button" id="slot-filament-clear" data-i18n="filaments.clear">Quitar filamento</button>
+        <button class="btn btn--primary" type="button" id="slot-filament-close" data-i18n="common.close">Cerrar</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog class="dialog dialog--wide" id="printer-dialog" aria-labelledby="h-printers">
