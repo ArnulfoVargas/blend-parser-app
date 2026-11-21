@@ -1,0 +1,81 @@
+/* The separation tool's panel under the view: the same rhythm, controls and colours as the cut panel. */
+@import url("./tokens.css");
+
+.sep-controls { display: none; width: 100%; min-width: 0; padding-top: var(--space-sm); border-top: 1px solid var(--color-rule); color: var(--color-ink-2); font-size: var(--text-sm); }
+.app[data-tool="separate"] .sep-controls { display: flex; flex-direction: column; gap: var(--space-sm); }
+.app[data-tool="separate"] .stage__foot { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-xs); }
+.app[data-tool="separate"] .stage__hint { flex-basis: auto; text-align: left; white-space: normal; }
+.app[data-tool="separate"] .brush { display: none; }
+.app[data-tool="separate"] #viewport { cursor: pointer; }
+
+.sep-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs) var(--space-sm); }
+.sep-title { margin: 0; font: 600 var(--text-sm)/1.2 var(--font-body); color: var(--color-ink); }
+.sep-count { color: var(--color-muted); font-variant-numeric: tabular-nums; }
+.sep-weld { display: flex; align-items: center; gap: var(--space-xs); margin-left: auto; white-space: nowrap; font-size: var(--text-xs); color: var(--color-muted); }
+.sep-weld .unit-input { display: inline-flex; width: 6.5rem; }
+.sep-weld .unit-input span { right: var(--space-xs); font-size: var(--text-xs); }
+.sep-weld .input { min-height: 32px; padding: 0 2.2rem 0 var(--space-xs); font: 400 var(--text-sm)/1.2 var(--font-outlier); }
+.sep-controls svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+.sep-table { max-height: 136px; overflow: auto; border: 1px solid var(--color-rule); border-radius: var(--radius-input); background: var(--color-paper); }
+.sep-list { width: 100%; border-collapse: collapse; font-size: var(--text-xs); }
+.sep-list thead th { position: sticky; top: 0; z-index: 1; padding: var(--space-2xs) var(--space-xs); background: var(--color-paper-2); color: var(--color-muted); font-weight: 500; text-align: left; white-space: nowrap; }
+.sep-list td, .sep-list tbody th { padding: var(--space-2xs) var(--space-xs); border-top: 1px solid var(--color-rule); vertical-align: middle; text-align: left; font-weight: 400; }
+.sep-list tbody tr { cursor: pointer; }
+.sep-list tbody tr[data-picked="true"] { background: var(--color-accent-soft); }
+.sep-list tbody th { display: flex; align-items: center; gap: var(--space-xs); color: var(--color-ink); font-weight: 500; }
+.sep-list tbody th small { color: var(--color-muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 12rem; }
+.sep-list .num { font: 400 var(--text-xs)/1.4 var(--font-outlier); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sep-list input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--color-accent); cursor: pointer; }
+.sep-pick, .sep-list thead th:first-child { width: 28px; }
+.sep-swatch { display: inline-block; flex: none; width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-ink) 22%, transparent); vertical-align: middle; }
+.sep-chip { display: inline-block; padding: 2px var(--space-xs); border-radius: var(--radius-pill); background: var(--color-paper-3); color: var(--color-ink-2); white-space: nowrap; }
+.sep-chip.is-open { background: var(--color-warn-soft); color: var(--color-warn-ink); box-shadow: inset 0 0 0 1px var(--color-warn); }
+.sep-goes { min-height: 30px; max-width: 11rem; padding: 0 var(--space-xs); border: 1px solid var(--color-muted); border-radius: var(--radius-input); background: var(--color-paper); color: var(--color-ink); font: inherit; }
+
+.sep-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs) var(--space-sm); }
+.sep-batch { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2xs); min-width: 0; }
+.sep-batch__label { margin-right: var(--space-2xs); font-size: var(--text-xs); color: var(--color-muted); }
+.sep-batch .btn { min-height: 30px; padding: 0 var(--space-sm); font-size: var(--text-xs); white-space: nowrap; }
+.sep-controls .cut-controls__actions .btn, .sep-proposals .btn { min-height: 32px; white-space: nowrap; }
+.sep-place { display: flex; align-items: center; gap: var(--space-xs); font-size: var(--text-xs); color: var(--color-muted); }
+.sep-place .seg { background: var(--color-paper-2); }
+.sep-place .seg button { min-height: 30px; padding: 0 var(--space-sm); font-size: var(--text-xs); }
+.sep-controls .btn--primary { background: var(--color-accent); color: var(--color-accent-ink); }
+
+.sep-status { margin: 0; min-height: 1.4em; font-size: var(--text-xs); }
+.sep-status[data-state="valid"] { color: var(--color-success); }
+.sep-status[data-state="warn"] { color: var(--color-warn-ink); }
+.sep-status[data-state="error"] { color: var(--color-error); }
+.sep-status[data-state="pending"], .sep-status[data-state="info"] { color: var(--color-muted); }
+
+.sep-proposals { position: relative; margin-left: auto; font-size: var(--text-xs); }
+.sep-proposals summary { display: flex; align-items: center; gap: var(--space-2xs); min-height: 32px; padding-inline: var(--space-xs); border-radius: var(--radius-input); color: var(--color-ink-2); font-weight: 500; cursor: pointer; list-style: none; white-space: nowrap; }
+.sep-proposals summary::-webkit-details-marker { display: none; }
+.sep-proposals summary .sep-chevron { width: 14px; transition: transform var(--dur-short) var(--ease-out); }
+.sep-proposals[open] summary { background: var(--color-paper-3); color: var(--color-ink); }
+.sep-proposals[open] summary .sep-chevron { transform: rotate(180deg); }
+.sep-proposals__menu { position: absolute; bottom: calc(100% + var(--space-xs)); right: 0; z-index: var(--z-dropdown); display: flex; flex-direction: column; gap: var(--space-xs); width: min(560px, 80dvw); padding: var(--space-sm); border: 1px solid var(--color-muted); border-radius: var(--radius-input); background: var(--color-paper); box-shadow: var(--shadow-card); }
+.sep-note { margin: 0; color: var(--color-muted); font-size: var(--text-xs); }
+.sep-proposals__run { display: flex; align-items: center; gap: var(--space-sm); color: var(--color-muted); }
+.sep-proposal-list { display: grid; gap: var(--space-2xs); margin: 0; padding: 0; list-style: none; max-height: 220px; overflow: auto; }
+.sep-proposal-list:empty { display: none; }
+.sep-proposal-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); padding: var(--space-2xs) var(--space-xs); border-radius: var(--radius-input); background: var(--color-paper-2); }
+.sep-proposal-list p { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2xs); margin: 0; }
+.sep-proposal-list strong { color: var(--color-ink); font-weight: 600; }
+.sep-proposal-list small { color: var(--color-muted); }
+
+.sep-controls :is(button, input, select, summary):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.sep-controls :is(button, input, select):disabled { opacity: 0.55; cursor: not-allowed; }
+.app.is-working .sep-controls { pointer-events: none; cursor: progress; }
+@media (hover: hover) {
+  .sep-list tbody tr:not([data-picked="true"]):hover { background: var(--color-paper-2); }
+  .sep-proposals summary:hover { background: var(--color-paper-3); color: var(--color-ink); }
+  .sep-goes:hover { background: var(--color-paper-2); }
+}
+@media (max-width: 75rem) {
+  .sep-weld > span:first-child { display: none; }
+  .sep-list tbody th small { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .sep-controls * { transition: none; animation: none; } }
+.sep-foot .cut-controls__actions { margin-left: auto; }

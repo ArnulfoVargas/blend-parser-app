@@ -59,6 +59,7 @@ pub fn torus(tris: usize) -> Scene {
         uv_layers: vec![loops_uv],
         color_layers: vec![],
         object: 0,
+        plate: 0,
     };
     Scene {
         parts: vec![part],

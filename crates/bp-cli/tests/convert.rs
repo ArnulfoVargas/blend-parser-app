@@ -17,6 +17,7 @@ fn project() -> Project {
         uv_layers: vec![],
         color_layers: vec![],
         object: 0,
+        plate: 0,
     };
     Project::new(Scene { parts: vec![part], ..Default::default() }, 2)
 }

@@ -108,6 +108,7 @@ mod tests {
             uv_layers: vec![],
             color_layers: vec![],
             object: 0,
+            plate: 0,
         };
         Document {
             project: bp_core::Project::new(Scene { parts: vec![part], ..Default::default() }, 2),

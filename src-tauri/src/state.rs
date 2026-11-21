@@ -97,6 +97,7 @@ mod tests {
             uv_layers: vec![],
             color_layers: vec![],
             object: 0,
+            plate: 0,
         };
         let mut d = Document {
             project: Project::new(Scene { parts: vec![part], ..Default::default() }, 3),

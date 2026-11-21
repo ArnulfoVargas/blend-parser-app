@@ -7,7 +7,9 @@ import "@fontsource/instrument-sans/500.css";
 import "@fontsource/dm-mono/400.css";
 import "@fontsource/dm-mono/500.css";
 import "./styles/app.css";
+import "./styles/section-line.css";
 
+import * as THREE from "three";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -37,7 +39,13 @@ import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
 import { setupPrintability } from "./printability";
-import { Viewer, type Axis, type Section, type ThumbAngle, type Tool, type View } from "./viewer";
+import { Viewer, sectionNormal, type ThumbAngle, type Section, type Tool, type View } from "./viewer";
+import { CutPanel } from "./cut-panel";
+import { CutReview } from "./cut-review";
+import { SeparatePanel } from "./separate-panel";
+import { ConnectPanel } from "./connect-panel";
+import { SplitPanel } from "./split-panel";
+import { RegionPanel } from "./region-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
 
@@ -213,6 +221,33 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   },
   rotate: async (axis, degrees) => (summary ? turn(() => api.rotate(axis, degrees)) : false),
   section: (s) => syncSection(s),
+  sectionLine: (active, error) => {
+    cutDrawing = active;
+    syncCutDrawing();
+    queueCutReview();
+    if (error) toast(t(error === "tooShort" ? "cut.lineTooShort" : "cut.lineMisses"), "error");
+  },
+  cutChoice: (both) => {
+    keepOther.checked = both;
+    syncCutChoice();
+  },
+  cutPicking: (active) => {
+    cutPicking = active;
+    $("#cut-pick-part").setAttribute("aria-pressed", String(active));
+    setHint(t(active ? "cut.pickPartHelp" : "hint.section"));
+  },
+  cutDimensions: (low, high) => {
+    cutDimensions = [low, high];
+    showCutDimensions();
+  },
+  toolClick: (tool, triangle, additive) => {
+    if (tool === "separate") separatePanel.click(triangle, additive);
+    if (tool === "region") void regionPanel.click(triangle, additive);
+  },
+  planeClick: (point) => connectPanel.click(point),
+  halfPicked: (b) => connectPanel.half(b),
+  select: (o, d) => (summary ? regionPanel.stroke(o, d) : Promise.resolve(null)),
+  endSelect: () => regionPanel.endStroke(),
 });
 
 /** Points in preview units for the current size. */
@@ -284,35 +319,107 @@ turnStep.addEventListener("change", () => {
 });
 viewer.setTurnStep(Number(turnStep.value));
 
-const cutPos = $<HTMLInputElement>("#cut-pos");
+let cutDrawing = false;
+let cutPicking = false;
+let cutValidated = false;
+let cutDimensions: [Vec3 | null, Vec3 | null] = [null, null];
+const cutReview = new CutReview<{ section: Section; both: boolean; lay: boolean }>({
+  run: ({ section: s, both, lay }) => api.previewCut(s.point, sectionNormal(s), !s.flip, both, lay, s.selected),
+  pending: () => {
+    cutValidated = false;
+    $<HTMLButtonElement>("#cut-apply").disabled = true;
+    $("#cut-status").textContent = t("cut.checking");
+    $("#cut-status").dataset.state = "pending";
+  },
+  result: (objects, error) => {
+    cutValidated = objects !== null;
+    $<HTMLButtonElement>("#cut-apply").disabled = !cutValidated;
+    $("#cut-status").textContent = objects !== null ? t("cut.validated", { n: objects }) : errText(error);
+    $("#cut-status").dataset.state = objects !== null ? "valid" : "error";
+  },
+});
+function queueCutReview() {
+  const section = viewer.getSection();
+  const available = summary && section && app.dataset.tool === "section";
+  cutReview.schedule(available && !cutDrawing ? { section, both: keepOther.checked, lay: $<HTMLInputElement>("#cut-lay").checked } : null);
+  if (!available || cutDrawing) {
+    cutValidated = false;
+    $<HTMLButtonElement>("#cut-apply").disabled = true;
+    $("#cut-status").textContent = cutDrawing ? t("cut.adjusting") : "";
+  }
+}
+function showCutDimensions() {
+  const size = (value: Vec3 | null) => value ? value.map((v) => nf(v * (summary?.size.previewScale ?? 1), 1)).join(" × ") + " mm" : "—";
+  $("#cut-extents").textContent = `A: ${size(cutDimensions[0])} · B: ${size(cutDimensions[1])}`;
+  document.querySelectorAll<HTMLButtonElement>(".cut-half").forEach((button, i) => {
+    button.setAttribute("aria-label", t("cut.chooseHalf", { side: i ? "B" : "A" }));
+    button.title = t("cut.chooseHalf", { side: i ? "B" : "A" });
+  });
+}
+const cutPanel = new CutPanel({
+  current: () => currentCut(),
+  set: (s) => setSection(s),
+  reset: () => viewer.defaultSection(),
+  range: (s) => viewer.sectionRange(s),
+  snap: (degrees) => viewer.setCutSnap(degrees),
+});
+const cutDraw = document.createElement("div");
+cutDraw.className = "cut-draw";
+const cutDrawButton = Object.assign(document.createElement("button"), { type: "button", className: "btn btn--quiet btn--sm" });
+const cutDrawHelp = document.createElement("p");
+cutDrawHelp.id = "cut-draw-help";
+cutDrawHelp.setAttribute("role", "status");
+cutDrawButton.setAttribute("aria-describedby", cutDrawHelp.id);
+cutDraw.append(cutDrawButton, cutDrawHelp);
+$(".stage__view").append(cutDraw);
+cutDrawButton.addEventListener("click", () => viewer.drawSectionLine());
+function syncCutDrawing() {
+  cutDraw.dataset.drawing = String(cutDrawing);
+  cutDrawButton.textContent = t(cutDrawing ? "cut.cancelLine" : "cut.drawLine");
+  cutDrawButton.setAttribute("aria-pressed", String(cutDrawing));
+  cutDrawHelp.textContent = t(cutDrawing ? "cut.lineHelp" : "cut.lineReady");
+  $("#cut-controls").inert = cutDrawing;
+  $(".cut-guides").inert = cutDrawing;
+  $(".cut-kept").inert = cutDrawing;
+  $<HTMLButtonElement>("#cut-apply").disabled = cutDrawing || !cutValidated;
+  if (app.dataset.tool === "section") setHint(t(cutDrawing ? "cut.lineHelp" : "hint.section"));
+}
+syncCutDrawing();
 /** The cut's controls under the view, and the mark on its tool while it is on. */
 function syncSection(s: Section | null) {
   $<HTMLButtonElement>('button[data-tool="section"]').dataset.on = String(s !== null);
-  document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) => b.setAttribute("aria-pressed", String(s !== null && Number(b.dataset.cutAxis) === s.axis)));
-  if (s) cutPos.value = String(Math.round(s.t * 1000) / 10);
-  $<HTMLButtonElement>("#cut-flip").setAttribute("aria-pressed", String(s?.flip ?? false));
+  connectPanel.planeChanged();
+  cutPanel.sync(s);
+  if (keepOther.checked) $("#cut-side").textContent = t("cut.bothChoice");
+  queueCutReview();
 }
 function setSection(s: Section | null) {
+  viewer.cancelSectionLine();
   viewer.setSection(s);
   syncSection(s);
 }
-const currentCut = (): Section => viewer.getSection() ?? { axis: 2, t: 0.5, flip: false };
-cutPos.addEventListener("input", () => setSection({ ...currentCut(), t: Number(cutPos.value) / 100 }));
-document.querySelectorAll<HTMLButtonElement>("button[data-cut-axis]").forEach((b) =>
-  b.addEventListener("click", () => setSection({ ...currentCut(), axis: Number(b.dataset.cutAxis) as Axis })));
-$("#cut-flip").addEventListener("click", () => setSection({ ...currentCut(), flip: !currentCut().flip }));
+const currentCut = (): Section => viewer.getSection() ?? viewer.defaultSection();
 $("#cut-off").addEventListener("click", () => {
   setSection(null);
   setTool("orbit");
 });
 // Cutting for real keeps the side the view shows.
 const keepOther = $<HTMLInputElement>("#cut-keep-other");
+function syncCutChoice() {
+  viewer.setCutBoth(keepOther.checked);
+  $("#cut-both").setAttribute("aria-pressed", String(keepOther.checked));
+  syncSection(viewer.getSection());
+}
+keepOther.addEventListener("change", syncCutChoice);
+$("#cut-both").addEventListener("click", () => { keepOther.checked = !keepOther.checked; syncCutChoice(); });
+$("#cut-lay").addEventListener("change", queueCutReview);
+$("#cut-pick-part").addEventListener("click", () => viewer.pickCutPart(!cutPicking));
 $("#cut-apply").addEventListener("click", () => {
   const s = viewer.getSection();
-  if (!s || !summary) return;
+  if (!s || !summary || cutDrawing || !cutValidated) return;
   const both = keepOther.checked;
   measured = [];
-  void apply(() => api.cutModel(s.axis, s.t, !s.flip, both), () => {
+  void apply(() => api.cutModel(s.point, sectionNormal(s), !s.flip, both, $<HTMLInputElement>("#cut-lay").checked, s.selected), () => {
     setSection(null);
     setTool("orbit");
     toast(t(both ? "cut.doneBoth" : "cut.doneKept"), "ok", { label: t("cut.undo"), run: undoCut });
@@ -323,6 +430,136 @@ function undoCut() {
   void apply(() => api.undoCut(), () => toast(t("cut.undone")));
 }
 $("#cut-undo").addEventListener("click", undoCut);
+
+// ---- cutting with connectors ----------------------------------------------------------
+
+const connectPanel = new ConnectPanel({
+  summary: () => summary,
+  section: () => viewer.getSection(),
+  cut: async (at, spec, lay, selected) => {
+    const s = viewer.getSection();
+    if (!s) return false;
+    measured = [];
+    let done = false;
+    await apply(() => api.cutConnected(s.point, sectionNormal(s), lay, selected, { ...spec, at }, t("con.dowelName")), () => {
+      done = true;
+      setSection(null);
+      setTool("orbit");
+      toast(t("con.done", { count: summary?.plate.objects ?? 0, n: summary?.plate.objects ?? 0 }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  close: () => {
+    setSection(null);
+    setTool("orbit");
+  },
+  redraw: () => viewer.requestRender(),
+  error: errText,
+  colours: (() => {
+    const css = (name: string) => {
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "gray";
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+      return new THREE.Color(r / 255, g / 255, b / 255);
+    };
+    return { ok: css("--color-accent"), bad: css("--color-error"), glass: css("--color-ink-2") };
+  })(),
+});
+viewer.addOverlay(connectPanel.preview.group);
+
+// ---- splitting to fit the printer -------------------------------------------------------
+
+const splitPanel = new SplitPanel({
+  summary: () => summary,
+  box: () => viewer.modelBox(),
+  split: async (plan) => {
+    measured = [];
+    let done = false;
+    await apply(() => api.splitForPrinter(plan, t("con.dowelName")), () => {
+      done = true;
+      setTool("orbit");
+      setBed(true);
+      viewer.frameAll();
+      const plates = Math.max(1, summary?.plate.plates.length ?? 1);
+      toast(t("spl.done", { count: summary?.plate.objects ?? 0, n: summary?.plate.objects ?? 0, plates }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  // Shrinking is the user's call, never the split's.
+  shrink: () => void apply(() => api.fitToPlate(), () => toast(t("spl.shrunk"))),
+  close: () => setTool("orbit"),
+  redraw: () => viewer.requestRender(),
+  error: errText,
+  colours: (() => {
+    const css = (name: string) => {
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "gray";
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+      return new THREE.Color(r / 255, g / 255, b / 255);
+    };
+    return [css("--axis-x"), css("--axis-y"), css("--axis-z")];
+  })(),
+});
+viewer.addOverlay(splitPanel.planes.group);
+
+// ---- separating pieces -----------------------------------------------------------------
+
+const separatePanel = new SeparatePanel({
+  summary: () => summary,
+  tint: (colors) => viewer.setTriangleTint(colors),
+  separate: async (weldMm, groups, layFlat) => {
+    measured = [];
+    let done = false;
+    await apply(() => api.separatePieces(weldMm, groups, layFlat), () => {
+      done = true;
+      toast(t("sep.done", { count: summary?.plate.objects ?? 0, n: summary?.plate.objects ?? 0 }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  // A proposal is only a plane: the Section tool shows it, and cuts once the user confirms.
+  review: (p) => {
+    const rotation: Vec3 = p.axis === 0 ? [0, 90, 0] : p.axis === 1 ? [-90, 0, 0] : [0, 0, 0];
+    setTool("section");
+    setSection({ point: p.point, rotation, flip: false, selected: (summary?.parts.length ?? 0) > 1 ? [p.part] : [] });
+    setHint(t("sep.reviewHint"));
+  },
+  close: () => setTool("orbit"),
+  error: errText,
+});
+
+// ---- cutting a selected region out ---------------------------------------------------
+
+const regionPanel = new RegionPanel({
+  summary: () => summary,
+  radiusMm: () => radiusMm(),
+  tint: (colors, mix) => viewer.setTriangleTint(colors, mix),
+  overlay: (preview, pull) => viewer.setRegionPreview(preview, pull),
+  apply: async (closure, action) => {
+    measured = [];
+    let done = false;
+    await apply(() => api.applyRegion(closure, action), () => {
+      done = true;
+      const n = summary?.plate.objects ?? 0;
+      toast(action.kind === "remove" ? t("reg.removed") : t("reg.extracted", { count: n, n }), "ok", { label: t("cut.undo"), run: () => void undo() });
+    });
+    return done;
+  },
+  cursor: () => syncBrush(),
+  picking: (on) => {
+    app.dataset.regionPick = on ? "colour" : "brush";
+    viewer.setRegionPicking(on);
+    if (app.dataset.tool === "region") setHint(t(on ? "hint.regionColour" : "hint.region"));
+  },
+  refine: async () => {
+    const before = summary?.triangles ?? 0;
+    await apply(() => api.refineToPaint(), () =>
+      toast(t("reg.refined", { count: (summary?.triangles ?? 0) - before, n: nf((summary?.triangles ?? 0) - before) }), "ok", { label: t("cut.undo"), run: () => void undo() }));
+  },
+  close: () => setTool("orbit"),
+  error: errText,
+});
 
 // ---- bucket by original colour ---------------------------------------------------------
 
@@ -392,7 +629,8 @@ function syncBrush() {
   bind("radiusOut", `${nf(radiusMm(), 1)} mm`);
   const scale = summary && viewer.modelHeight() > 0 ? summary.sizeMm[2] / viewer.modelHeight() : 1;
   viewer.brushRadius = radiusMm() / scale;
-  const hex = summary?.slots[brushSlot]?.hex;
+  // The region brush selects rather than paints: its footprint has the selection's colour.
+  const hex = app.dataset.tool === "region" ? regionPanel.cursorColour() : summary?.slots[brushSlot]?.hex;
   if (hex) {
     app.style.setProperty("--brush", hex);
     viewer.setBrushColor(hex);
@@ -407,12 +645,22 @@ async function reloadMesh(frame = false) {
   if (bucketRay) clearBucket();
   syncBrush();
   syncMeasure();
+  separatePanel.meshChanged();
+  splitPanel.meshChanged();
+  regionPanel.meshChanged();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
 
 /** Why the model does not fit, the first problem first; null when it fits. */
 function fitProblem(s: Summary): string | null {
+  // Split across plates, the first plate that does not fit speaks, with its number.
+  const bad = s.plate.plates.findIndex((g) => !g.fits || !g.fitsHeight);
+  if (bad >= 0) {
+    const g = s.plate.plates[bad];
+    const one = fitProblem({ ...s, sizeMm: g.sizeMm, fitsHeight: g.fitsHeight, plate: { ...s.plate, ...g, plates: [] } });
+    return one && t("fit.onPlate", { n: bad + 1, problem: one });
+  }
   const [x, y, z] = s.sizeMm;
   const p = s.plate;
   const plate = dims([p.area.x1 - p.area.x0, p.area.y1 - p.area.y0], 0);
@@ -477,6 +725,9 @@ function renderImportWarnings(s: Summary) {
 
 function render(s: Summary) {
   summary = s;
+  viewer.setCutParts(s.parts);
+  cutPanel.update(s);
+  queueCutReview();
   printability.update(s);
   bind("fileName", s.fileName);
   bind("fileMeta", t("file.meta", { mb: nf(s.fileSize / 1048576, 1), count: s.materials.length, n: s.materials.length }));
@@ -546,6 +797,7 @@ function render(s: Summary) {
   undoBtn.disabled = !s.canUndo;
   undoBtn.title = s.undoLabel ? t("undo.title", { what: t(`undo.${s.undoLabel}`) }) : t("undo.nothing");
   bind("exportLabel", t("export.label"));
+  for (const id of ["#export", "#open-zip"]) $(id).setAttribute("aria-disabled", String(s.parts.length === 0));
   viewer.setPalette(s.slots.map((x) => x.hex));
   syncBrush();
   if (wasteDialog.open) fillFlushTable(s);
@@ -610,7 +862,9 @@ function renderSize(s: Summary) {
   $<HTMLButtonElement>("#size-reset").disabled = reset;
 
   const problem = fitProblem(s);
-  bind("bedFit", problem ?? t("fit.ok", { plate: dims([s.bedMm[0], s.bedMm[1]], 0), max: nf(s.maxHeightMm) }));
+  bind("bedFit", problem ?? (s.plate.plates.length > 1
+    ? t("fit.okPlates", { count: s.plate.plates.length, n: s.plate.plates.length })
+    : t("fit.ok", { plate: dims([s.bedMm[0], s.bedMm[1]], 0), max: nf(s.maxHeightMm) })));
   bind("fitBanner", problem ?? "");
   $<HTMLDivElement>("#fit-banner").hidden = problem === null;
   app.classList.toggle("is-oversize", problem !== null);
@@ -667,9 +921,92 @@ $("#size-undo").addEventListener("click", () => void apply(() => api.undoSize())
 // ---- plate and tower --------------------------------------------------------------------
 
 const plateSvg = $<SVGSVGElement & HTMLElement>("#plate-view");
+const projectPlate = $<HTMLSelectElement>("#project-plate");
+const plateObject = $<HTMLSelectElement>("#plate-object");
+const plateDestination = $<HTMLSelectElement>("#plate-destination");
+let activePlate = 0;
+
+const plateName = (index: number) => t("plates.name", { n: nf(index + 1) });
+
+function setOptions(select: HTMLSelectElement, values: [number, string][], preferred = select.value) {
+  select.replaceChildren(...values.map(([id, label]) => new Option(label, String(id))));
+  if (values.some(([id]) => String(id) === preferred)) select.value = preferred;
+  select.disabled = values.length === 0;
+}
+
+function renderPlateControls(s: Summary) {
+  const count = Math.max(1, s.plate.plates.length);
+  activePlate = Math.min(activePlate, count - 1);
+  const plates: [number, string][] = Array.from({ length: count }, (_, i) => [i, plateName(i)]);
+  setOptions(projectPlate, plates, String(activePlate));
+
+  const objects = new Map<number, string>();
+  for (const part of s.parts) {
+    if (part.plate === activePlate && !objects.has(part.object)) objects.set(part.object, part.name);
+  }
+  const options: [number, string][] = [...objects].map(([id, name], index) => [
+    id, name ? t("plates.namedObject", { n: nf(index + 1), name }) : t("plates.unnamedObject", { n: nf(index + 1) }),
+  ]);
+  setOptions(plateObject, options);
+  setOptions(plateDestination, plates.filter(([i]) => i !== activePlate));
+  $<HTMLButtonElement>("#plate-move").disabled = plateObject.disabled || plateDestination.disabled;
+  $<HTMLButtonElement>("#plate-clear").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-clone").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-arrange").disabled = s.parts.length === 0;
+}
+
+projectPlate.addEventListener("change", () => {
+  activePlate = Number(projectPlate.value);
+  if (summary) renderPlate(summary);
+});
+$("#plate-add").addEventListener("click", () => {
+  void apply(async () => {
+    const s = await api.addPlate();
+    activePlate = Math.max(0, s.plate.plates.length - 1);
+    return s;
+  });
+});
+$("#plate-move").addEventListener("click", () => {
+  const object = Number(plateObject.value);
+  const destination = Number(plateDestination.value);
+  void apply(async () => {
+    const s = await api.moveToPlate(object, destination);
+    activePlate = destination;
+    return s;
+  });
+});
+function readPlateGap(): number | null {
+  const input = $<HTMLInputElement>("#plate-arrange-gap");
+  const n = input.valueAsNumber;
+  const valid = n >= 0 && n <= 50;
+  input.setAttribute("aria-invalid", String(!valid));
+  if (valid) return n;
+  input.focus();
+  toast(t("error.splitGap", { min: nf(0), max: nf(50) }), "error");
+  return null;
+}
+
+$("#plate-clone").addEventListener("click", () => {
+  const object = Number(plateObject.value);
+  const gap = $<HTMLInputElement>("#plate-arrange-clones").checked ? readPlateGap() : undefined;
+  if (gap === null) return;
+  void apply(() => api.cloneObject(object, t("plates.copy"), gap), () => viewer.frameAll());
+});
+$("#plate-arrange").addEventListener("click", () => {
+  const gap = readPlateGap();
+  if (gap === null) return;
+  void apply(() => api.arrangePlates(gap), () => viewer.frameAll());
+});
+$("#plate-clear").addEventListener("click", async () => {
+  const plate = activePlate;
+  if (await ask(t("plates.confirmClear", { plate: plateName(plate) }), { title: t("plates.clear"), kind: "warning" })) {
+    await apply(() => api.clearPlate(plate));
+  }
+});
 
 function renderPlate(s: Summary) {
-  const p = s.plate;
+  renderPlateControls(s);
+  const p = { ...s.plate, ...s.plate.plates[activePlate] };
   const a = p.area;
   const pad = Math.max(a.x1 - a.x0, a.y1 - a.y0) * 0.03;
   const [w, h] = [a.x1 - a.x0, a.y1 - a.y0];
@@ -1383,7 +1720,7 @@ const thumbAngle = () => thumbSelect.value as ThumbAngle;
 /** Saves the 3MF with `objects` (all when null). */
 async function export3mf(objects: number[] | null) {
   const btn = $<HTMLButtonElement>("#export");
-  if (!summary || btn.getAttribute("aria-busy") === "true") return;
+  if (app.dataset.state !== "ready" || !summary?.parts.length || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
   const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
   if (!path) return;
@@ -1496,7 +1833,7 @@ const syncZipContents = () => {
 for (const id of ["#zip-3mf", "#zip-guide", "#zip-text", "#zip-stl", "#zip-quality"]) $(id).addEventListener("change", syncZipContents);
 
 $("#open-zip").addEventListener("click", () => {
-  if (app.dataset.state !== "ready" || !summary) return;
+  if (app.dataset.state !== "ready" || !summary?.parts.length) return;
   const core = $<HTMLSelectElement>("#core");
   const keep = core.value;
   core.replaceChildren(
@@ -2012,8 +2349,15 @@ function setView(v: View) {
 function setTool(tool: Tool) {
   app.dataset.tool = tool;
   document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === tool)));
-  radiusInput.disabled = tool !== "brush";
+  // A short view scrolls the shelf: the tool in use stays in sight.
+  document.querySelector<HTMLButtonElement>(`#toolbar button[data-tool="${tool}"]`)?.scrollIntoView({ block: "nearest" });
+  radiusInput.disabled = tool !== "brush" && tool !== "region";
   viewer.setTool(tool);
+  if (tool === "separate") separatePanel.open(); else separatePanel.close();
+  if (tool === "connect") connectPanel.open(); else connectPanel.close();
+  if (tool === "split") splitPanel.open(); else splitPanel.close();
+  if (tool === "region") regionPanel.open(); else regionPanel.close();
+  syncBrush();
   if (tool !== "bucket") {
     bucketRay = null;
     bucketFound = null;
@@ -2023,6 +2367,7 @@ function setTool(tool: Tool) {
   syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
     : tool === "rotate" ? t("hint.rotate", { step: num(Number(turnStep.value)) })
+    : tool === "region" ? t(regionPanel.hint())
     : t(`hint.${tool}`));
   syncMeasure();
 }
@@ -2092,16 +2437,26 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     void undo();
   } else if (e.key === "b") setTool("brush");
-  else if (e.key === "k") setTool("bucket");
+  else if (e.key === "u") setTool("bucket");
   else if (e.key === "o") setTool("orbit");
   else if (e.key === "m") setTool("measure");
   else if (e.key === "s") setTool("size");
   else if (e.key === "g") setTool("move");
   else if (e.key === "r") setTool("rotate");
   else if (e.key === "c") setTool("section");
+  else if (e.key === "d") setTool("separate");
+  else if (e.key === "j") setTool("connect");
+  else if (e.key === "k") setTool("split");
+  else if (e.key === "x") setTool("region");
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();
+  else if (e.key === "Escape" && viewer.getSection()) {
+    setSection(null);
+    setTool("orbit");
+  }
+  else if (e.key === "Escape" && (app.dataset.tool === "separate" || app.dataset.tool === "split")) setTool("orbit");
+  else if (e.key === "Escape" && app.dataset.tool === "region") setTool("orbit");
   else if (e.key === "Escape" && measured.length) {
     measured = [];
     syncMeasure();
@@ -2220,6 +2575,8 @@ window.addEventListener("keydown", (e) => {
 
 /** Everything drawn from code, worded again. */
 onLangChange(() => {
+  syncCutDrawing();
+  showCutDimensions();
   langSelect.value = currentLang();
   printerPicker.relabel(printerTexts());
   basePicker.relabel(baseTexts());
@@ -2244,6 +2601,10 @@ onLangChange(() => {
   syncOutputs();
   renderRecents();
   if (summary) render(summary);
+  separatePanel.update();
+  connectPanel.update();
+  splitPanel.update();
+  regionPanel.update();
   syncBrush();
   if (toastEl.dataset.kind !== "error") hideToast();
 });

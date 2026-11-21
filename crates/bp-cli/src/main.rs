@@ -318,6 +318,7 @@ fn convert(input: &Path, args: &Args, config: &Config) -> Result<Report, String>
 
     let parts = p.export_parts();
     let model = bp_3mf::Model {
+        plate_count: doc.project.plate_count(),
         name: &doc.name,
         piece: bp_3mf::ZipText::for_lang(&args.lang).piece,
         parts: parts
@@ -328,6 +329,7 @@ fn convert(input: &Path, args: &Args, config: &Config) -> Result<Report, String>
                 tris: &p.tris,
                 paint: &p.paint,
                 object: p.object,
+                plate: p.plate,
             })
             .collect(),
         filaments: hex.clone(),

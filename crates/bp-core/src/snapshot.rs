@@ -12,7 +12,7 @@ use crate::project::{ColorOps, PrintOps};
 use crate::scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 
 const MAGIC: &[u8; 4] = b"BPPJ";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 3;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -65,21 +65,27 @@ impl Writer {
 pub(crate) struct Reader<'a> {
     buf: &'a [u8],
     at: usize,
+    version: u32,
 }
 
 type R<T> = Result<T, SnapshotError>;
 
 impl<'a> Reader<'a> {
     pub fn new(buf: &'a [u8]) -> R<Self> {
-        let mut r = Self { buf, at: 0 };
+        let mut r = Self { buf, at: 0, version: 0 };
         if r.take(4)? != MAGIC {
             return Err(SnapshotError::Corrupt);
         }
-        match r.u32()? {
+        r.version = r.u32()?;
+        match r.version {
             v if v > VERSION => Err(SnapshotError::Version(v)),
             _ => Ok(r),
         }
     }
+    pub(crate) fn version(&self) -> u32 {
+        self.version
+    }
+
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
         let end = self.at.checked_add(n).filter(|&e| e <= self.buf.len()).ok_or(SnapshotError::Corrupt)?;
         let s = &self.buf[self.at..end];
@@ -166,6 +172,7 @@ pub(crate) fn write_scene(w: &mut Writer, s: &Scene) {
         w.vec(&p.uv_layers, |w, l| w.vec(l, |w, uv| w.f32s(*uv)));
         w.vec(&p.color_layers, |w, l| w.vec(l, |w, c| w.f32s(*c)));
         w.u32(p.object);
+        w.u32(p.plate);
     });
 }
 
@@ -197,8 +204,18 @@ pub(crate) fn read_scene(r: &mut Reader) -> R<Scene> {
         })?;
         let uv_layers = r.vec(|r| r.vec(|r| r.f32s()))?;
         let color_layers = r.vec(|r| r.vec(|r| r.f32s()))?;
-        let part =
-            Part { name, positions, tris, tri_loops, tri_source, sources, uv_layers, color_layers, object: r.u32()? };
+        let part = Part {
+            name,
+            positions,
+            tris,
+            tri_loops,
+            tri_source,
+            sources,
+            uv_layers,
+            color_layers,
+            object: r.u32()?,
+            plate: if r.version >= 2 { r.u32()? } else { 0 },
+        };
         check_part(&part, images.len())?;
         Ok(part)
     })?;
@@ -266,4 +283,31 @@ pub(crate) fn read_ops(r: &mut Reader) -> R<(ColorOps, PrintOps)> {
 
 pub(crate) fn write_rgb(w: &mut Writer, c: &Rgb) {
     w.f32s(*c);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_legacy_scene_without_plate_and_roundtrips_multiple_plates() {
+        let mut scene = Scene { parts: vec![Part { object: 3, plate: 2, ..Default::default() }], ..Default::default() };
+        let mut writer = Writer::new();
+        write_scene(&mut writer, &scene);
+        let mut reader = Reader::new(&writer.0).unwrap();
+        let restored = read_scene(&mut reader).unwrap();
+        assert_eq!(restored.parts[0].plate, 2);
+        assert_eq!(restored.parts[0].object, 3);
+        assert!(reader.done());
+        scene.parts[0].plate = 0;
+        let mut writer = Writer::new();
+        write_scene(&mut writer, &scene);
+        writer.0[4..8].copy_from_slice(&1u32.to_le_bytes());
+        writer.0.truncate(writer.0.len() - 4);
+        let mut reader = Reader::new(&writer.0).unwrap();
+        let restored = read_scene(&mut reader).unwrap();
+        assert_eq!(restored.parts[0].plate, 0);
+        assert_eq!(restored.parts[0].object, 3);
+        assert!(reader.done());
+    }
 }

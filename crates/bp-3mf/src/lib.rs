@@ -14,7 +14,7 @@ pub mod plate;
 mod printer;
 pub mod project_file;
 pub use kit::{kit_bed, write_kit_zip, write_kit_zip_with, KitInfo, KitSummary, Lang as KitLang, Stage as KitStage};
-pub use plate::{PlateCheck, Rect, Reserve};
+pub use plate::{centred_room, PlateCheck, Rect, Reserve};
 pub use printer::{canonical_id, catalog, Printer, PrinterProfile, NOZZLES};
 
 pub struct Part<'a> {
@@ -25,6 +25,8 @@ pub struct Part<'a> {
     pub paint: &'a [String],
     /// The printed object it belongs to; parts of one object are printed joined.
     pub object: u32,
+    /// The plate its object goes on, 0 for the first; all parts of an object share it.
+    pub plate: u32,
 }
 
 pub struct Model<'a> {
@@ -32,6 +34,8 @@ pub struct Model<'a> {
     /// The word for a piece cut off the model, in the user's language (see [`object_name`]).
     pub piece: &'a str,
     pub parts: Vec<Part<'a>>,
+    /// Includes empty plates after the last occupied plate.
+    pub plate_count: usize,
     /// Filament colours as `#RRGGBB`, slot 1 first.
     pub filaments: Vec<String>,
     /// The filament on each slot, where the user picked one; the rest print as
@@ -168,6 +172,29 @@ fn object_id(model: &Model, k: usize) -> usize {
     model.parts.len() + 1 + k
 }
 
+/// The plate each object goes on: its first part's.
+fn object_plate(model: &Model, parts: &[usize]) -> u32 {
+    parts.first().map_or(0, |&i| model.parts[i].plate)
+}
+
+/// Counts both declared empty plates and any plate a part occupies.
+pub fn plate_count(model: &Model) -> usize {
+    model.parts.iter().map(|p| p.plate as usize + 1).max().unwrap_or(1).max(model.plate_count)
+}
+
+/// Where Bambu Studio lays plate `index` out from the first one, in
+/// millimetres: plates fill a grid as close to square as the count allows,
+/// a fifth of a plate apart (its `PartPlateList`). Objects on another plate
+/// are placed by this offset, so they land on the plate they belong to.
+pub fn plate_origin(printer: &Printer, index: usize, count: usize) -> (f32, f32) {
+    let area = printer.printable_area();
+    let root = (count.max(1) as f32).sqrt();
+    let cols = if root > root.round() { root.round() as usize + 1 } else { root.round() as usize }.max(1);
+    let (row, col) = (index / cols, index % cols);
+    const GAP: f32 = 1.0 / 5.0;
+    (col as f32 * (area.x1 - area.x0) * (1.0 + GAP), -(row as f32) * (area.y1 - area.y0) * (1.0 + GAP))
+}
+
 /// The name of printed object `object`: the model's for the model itself and,
 /// for each piece cut off it, the model's with `piece` and the object's number
 /// ("Dragon – piece 2"). It follows the object, not its place in the file, so a
@@ -184,7 +211,10 @@ fn main_xml(model: &Model) -> String {
     let (cx, cy) = model.printer.plate_centre();
     let (cx, cy) = (cx + model.offset_mm[0], cy + model.offset_mm[1]);
     let (mut resources, mut items) = (String::new(), String::new());
+    let plates = plate_count(model);
     for (k, parts) in objects(model).iter().enumerate() {
+        let (px, py) = plate_origin(&model.printer, object_plate(model, parts) as usize, plates);
+        let (cx, cy) = (cx + px, cy + py);
         let id = object_id(model, k);
         let o = object_origin(model, parts);
         let (x, y) = (cx + o[0], cy + o[1]);
@@ -240,7 +270,8 @@ fn settings_xml(model: &Model, part_filaments: &[u8]) -> String {
     } else {
         String::new()
     };
-    let (mut objects_cfg, mut instances) = (String::new(), String::new());
+    let mut objects_cfg = String::new();
+    let mut instances = vec![String::new(); plate_count(model)];
     for (k, ids) in objects(model).iter().enumerate() {
         let id = object_id(model, k);
         let total: usize = ids.iter().map(|&i| model.parts[i].tris.len()).sum();
@@ -275,7 +306,7 @@ fn settings_xml(model: &Model, part_filaments: &[u8]) -> String {
             name = escape(&object_name(model.name, model.piece, model.parts[ids[0]].object))
         );
         let _ = write!(
-            instances,
+            instances[object_plate(model, ids) as usize],
             "    <model_instance>
       <metadata key=\"object_id\" value=\"{id}\"/>
       <metadata key=\"instance_id\" value=\"0\"/>
@@ -285,15 +316,25 @@ fn settings_xml(model: &Model, part_filaments: &[u8]) -> String {
             k + 1
         );
     }
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<config>
-{objects_cfg}  <plate>
-    <metadata key=\"plater_id\" value=\"1\"/>
+    let plates: String = instances
+        .iter()
+        .enumerate()
+        .map(|(p, instances)| {
+            format!(
+                "  <plate>
+    <metadata key=\"plater_id\" value=\"{}\"/>
     <metadata key=\"plater_name\" value=\"\"/>
     <metadata key=\"locked\" value=\"false\"/>
 {thumbnail}{instances}  </plate>
-  <assemble>
+",
+                p + 1
+            )
+        })
+        .collect();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<config>
+{objects_cfg}{plates}  <assemble>
   </assemble>
 </config>
 "
@@ -346,8 +387,9 @@ fn project_json(model: &Model) -> String {
         "flush_multiplier": format!("{}", (f.multiplier * 100.0).round() / 100.0),
         "flush_volumes_matrix": flush,
         "flush_volumes_vector": vec!["140"; 2 * n],
-        "wipe_tower_x": [format!("{tower_x}")],
-        "wipe_tower_y": [format!("{tower_y}")],
+        // One tower per plate, each where the first plate has it.
+        "wipe_tower_x": vec![format!("{tower_x}"); plate_count(model)],
+        "wipe_tower_y": vec![format!("{tower_y}"); plate_count(model)],
         "wipe_tower_rotation_angle": "0",
         "wipe_tower_no_sparse_layers": "0",
         "wipe_speed": "80%",
@@ -458,9 +500,16 @@ mod tests {
     fn a_colour_assembly_keeps_component_coordinates_and_filament_slots() {
         let positions = [[3.0, 4.0, 5.0], [4.0, 4.0, 5.0], [3.0, 5.0, 5.0]];
         let tris = [[0, 1, 2]];
-        let parts =
-            ["Body", "Highlight"].map(|name| Part { name, positions: &positions, tris: &tris, paint: &[], object: 0 });
+        let parts = ["Body", "Highlight"].map(|name| Part {
+            name,
+            positions: &positions,
+            tris: &tris,
+            paint: &[],
+            object: 0,
+            plate: 0,
+        });
         let model = Model {
+            plate_count: 1,
             name: "Assembly",
             piece: "piece",
             slots: vec![],
@@ -490,8 +539,6 @@ mod tests {
         assert!(settings.contains("extruder\" value=\"3\""));
         let mesh = read("3D/Objects/object_1.model");
         assert_eq!(mesh.matches("<triangle ").count(), 2);
-        // Both components share one footprint origin and the build item puts
-        // their vertices back into their original positions on the plate.
         assert!(mesh.contains("x=\"-0.5\" y=\"-0.5\" z=\"0\""));
         let (cx, cy) = model.printer.plate_centre();
         let mut transform = String::from("1 0 0 0 1 0 0 0 1 ");
@@ -508,9 +555,10 @@ mod tests {
         let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
         let paint = vec!["4".to_string(), "8".into(), "0C".into(), "40C0C0C30C0C0C30C0C0C3".into()];
         let model = Model {
+            plate_count: 1,
             name: "test & co",
             piece: "piece",
-            parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint, object: 0 }],
+            parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint, object: 0, plate: 0 }],
             filaments: vec!["#4d2720".into(), "#222222".into(), "#E8A461".into()],
             slots: vec![None, Some(filament::for_slot("PETG HF", &Printer::default()))],
             printer: Printer::default(),
@@ -563,8 +611,9 @@ mod tests {
         let positions = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
         let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
         let paint = vec!["4".to_string(); 4];
-        let part = |name, object| Part { name, positions: &positions, tris: &tris, paint: &paint, object };
+        let part = |name, object| Part { name, positions: &positions, tris: &tris, paint: &paint, object, plate: 0 };
         let model = Model {
+            plate_count: 1,
             name: "m",
             piece: "pieza",
             parts: vec![part("a", 0), part("b (2)", 1), part("c", 0)],
@@ -589,17 +638,61 @@ mod tests {
     }
 
     #[test]
+    fn objects_on_other_plates_go_on_plates_of_their_own_in_bambu_s_grid() {
+        let positions = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
+        let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
+        let paint = vec!["4".to_string(); 4];
+        let part =
+            |name, object, plate| Part { name, positions: &positions, tris: &tris, paint: &paint, object, plate };
+        let model = Model {
+            plate_count: 1,
+            name: "m",
+            piece: "piece",
+            slots: vec![],
+            thumbnail: None,
+            parts: vec![part("a", 0, 0), part("b", 1, 1), part("c", 2, 2), part("d", 3, 0)],
+            filaments: vec!["#FFFFFF".into(), "#000000".into()],
+            printer: Printer::default(),
+            flush: Flush::default(),
+            layer_mm: None,
+            offset_mm: [0.0; 2],
+        };
+        // Three plates: two columns (√3 rounds to 2), 256 mm plates a fifth apart.
+        assert_eq!(plate_origin(&model.printer, 1, 3), (307.2, 0.0));
+        assert_eq!(plate_origin(&model.printer, 2, 3), (0.0, -307.2));
+        assert_eq!(plate_origin(&model.printer, 3, 4), (307.2, -307.2));
+        let main = main_xml(&model);
+        assert!(main.contains("transform=\"1 0 0 0 1 0 0 0 1 440.2 133 0\""), "{main}");
+        assert!(main.contains("transform=\"1 0 0 0 1 0 0 0 1 133 -174.2 0\""));
+        let cfg = settings_xml(&model, &[]);
+        assert_eq!(cfg.matches("<plate>").count(), 3);
+        assert!(cfg.contains("key=\"plater_id\" value=\"3\""));
+        let first = &cfg[cfg.find("<plate>").unwrap()..cfg.find("plater_id\" value=\"2\"").unwrap()];
+        assert_eq!(first.matches("<model_instance>").count(), 2);
+        let v: serde_json::Value = serde_json::from_str(&project_json(&model)).unwrap();
+        assert_eq!(v["wipe_tower_x"].as_array().unwrap().len(), 3);
+        let model = Model { plate_count: 4, ..model };
+        let cfg = settings_xml(&model, &[]);
+        assert_eq!(cfg.matches("<plate>").count(), 4);
+        assert_eq!(cfg.matches("<model_instance>").count(), 4);
+        let empty = cfg.rsplit_once("<plate>").unwrap().1;
+        assert!(empty.contains("key=\"plater_id\" value=\"4\""));
+        assert!(!empty.contains("<model_instance>"));
+    }
+
+    #[test]
     fn each_object_sits_on_its_own_origin() {
         let left = [[-30.0, -5.0, 0.0], [-10.0, -5.0, 0.0], [-20.0, 5.0, 0.0], [-20.0, 0.0, 8.0]];
         let right = [[10.0, -2.0, 0.0], [30.0, -2.0, 0.0], [20.0, 2.0, 0.0], [20.0, 0.0, 4.0]];
         let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
         let paint = vec!["4".to_string(); 4];
         let model = Model {
+            plate_count: 1,
             name: "m",
             piece: "piece",
             parts: vec![
-                Part { name: "a", positions: &left, tris: &tris, paint: &paint, object: 0 },
-                Part { name: "b", positions: &right, tris: &tris, paint: &paint, object: 1 },
+                Part { name: "a", positions: &left, tris: &tris, paint: &paint, object: 0, plate: 0 },
+                Part { name: "b", positions: &right, tris: &tris, paint: &paint, object: 1, plate: 0 },
             ],
             filaments: vec!["#FFFFFF".into()],
             slots: vec![],
@@ -628,9 +721,10 @@ mod tests {
         let small = b"\x89PNG\r\n\x1a\nsmall".to_vec();
         let package = |thumbnail| {
             let model = Model {
+                plate_count: 1,
                 name: "m",
                 piece: "piece",
-                parts: vec![Part { name: "a", positions: &positions, tris: &tris, paint: &paint, object: 0 }],
+                parts: vec![Part { name: "a", positions: &positions, tris: &tris, paint: &paint, object: 0, plate: 0 }],
                 filaments: vec!["#FFFFFF".into()],
                 slots: vec![],
                 printer: Printer::default(),
@@ -669,6 +763,7 @@ mod tests {
 
     fn config(printer: Printer) -> serde_json::Value {
         let model = Model {
+            plate_count: 1,
             name: "t",
             piece: "piece",
             parts: vec![],
@@ -845,18 +940,9 @@ pub struct PlateProject<'a> {
     pub thumbnails: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
-/// Where Bambu Studio puts plate `i` of `count`: a grid `ceil(sqrt(count))`
-/// wide, a fifth of a plate apart, later rows toward -Y.
-pub fn plate_origin(printer: &Printer, i: usize, count: usize) -> (f32, f32) {
-    let cols = (count.max(1) as f32).sqrt().ceil() as usize;
-    let (w, d) = printer.bed_mm();
-    ((i % cols) as f32 * w * 1.2, -((i / cols) as f32) * d * 1.2)
-}
-
-/// The project config of a plates 3MF: its filaments, printer and flushes,
-/// Bambu's defaults for the rest. A plate of one filament flushes nothing.
 fn plates_model<'a>(project: &'a PlateProject) -> Model<'a> {
     Model {
+        plate_count: project.plates.len(),
         name: project.name,
         piece: "",
         parts: vec![],
