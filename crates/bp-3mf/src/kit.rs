@@ -1065,6 +1065,21 @@ impl<'a> Names<'a> {
                 ),
             });
         }
+        if let Some(n) = k.exact_skin.filter(|&n| n < k.pieces.len()) {
+            let rough = k.pieces.len() - n;
+            notes.push(match l {
+                Lang::Es => format!(
+                    "{} la superficie del modelo aproximada a {:.2} mm en lugar de la exacta: el modelo no está cerrado. «Reparar malla» (rellenar agujeros) suele arreglarlo.",
+                    if rough == 1 { "1 pieza lleva".to_string() } else { format!("{rough} piezas llevan") },
+                    k.voxel_mm
+                ),
+                Lang::En => format!(
+                    "{} the model's surface to within {:.2} mm instead of exactly: the model is not closed. Mesh repair (fill holes) usually fixes that.",
+                    if rough == 1 { "1 piece has".to_string() } else { format!("{rough} pieces have") },
+                    k.voxel_mm
+                ),
+            });
+        }
         if !k.pins.is_empty() || k.unpinned > 0 {
             let (pins, missed) = (k.pins.len(), k.unpinned);
             notes.push(match l {
@@ -2204,6 +2219,8 @@ mod tests {
                 // A pin out of the base into the slab on it; no room on the sliver's joint.
                 pins: vec![bp_core::PinJoin { pin: 0, socket: 1, axis: [0.0, 0.0, 1.0] }],
                 unpinned: 1,
+                // The sliver kept the voxel skin.
+                exact_skin: Some(2),
             },
             Bed::plain(256.0, 256.0),
         );
@@ -2274,7 +2291,8 @@ mod tests {
         );
         assert!(
             summary_html.contains("1 espiga con su alojamiento encaja las piezas")
-                && summary_html.contains("1 unión no tenía sitio para una y va solo pegada."),
+                && summary_html.contains("1 unión no tenía sitio para una y va solo pegada.")
+                && summary_html.contains("1 pieza lleva la superficie del modelo aproximada a 0.50 mm"),
             "{summary_html}"
         );
         let readme = String::from_utf8(read(&mut zip, "LEEME.txt")).unwrap();

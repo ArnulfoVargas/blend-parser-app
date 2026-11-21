@@ -105,6 +105,8 @@ pub struct Kit {
     /// Pins keying pieces together, and joins with no room for one.
     pub pins: Vec<PinJoin>,
     pub unpinned: usize,
+    /// When asked for, how many pieces have the model's own surface outside.
+    pub exact_skin: Option<usize>,
 }
 
 /// Why a piece needs a look before printing it.
@@ -179,6 +181,7 @@ pub fn kit(split: Split, bed: Bed) -> Kit {
         dropped: split.dropped,
         pins: split.pins,
         unpinned: split.unpinned,
+        exact_skin: split.exact_skin,
     }
 }
 
