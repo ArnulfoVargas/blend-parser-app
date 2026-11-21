@@ -186,13 +186,13 @@ pub fn smooth(part: &mut MeshPart, labels: &[u8], crease_deg: f32, passes: u32) 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::geom::ROOT;
 
     /// A closed cylinder of `sides` sides, radius 1, from z = 0 to z = 2: two
     /// triangles per side and a fan on each cap.
-    pub(crate) fn cylinder(sides: u32) -> MeshPart {
+    pub fn cylinder(sides: u32) -> MeshPart {
         let mut positions = vec![];
         for z in [0.0, 2.0] {
             for i in 0..sides {

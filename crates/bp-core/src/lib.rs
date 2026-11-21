@@ -8,6 +8,7 @@ pub mod encode;
 pub mod estimate;
 pub mod field;
 pub mod geom;
+pub mod hollow;
 pub mod mesh;
 pub mod optimize;
 pub mod paint;
