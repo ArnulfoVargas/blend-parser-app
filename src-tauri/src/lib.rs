@@ -65,6 +65,8 @@ pub fn run() {
             commands::set_flush,
             commands::preview_mesh,
             commands::pick,
+            commands::measure_thickness,
+            commands::wire_mesh,
             commands::paint,
             commands::end_stroke,
             commands::undo,

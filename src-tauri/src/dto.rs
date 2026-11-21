@@ -288,6 +288,16 @@ pub struct HitDto {
     pub normal: [f32; 3],
 }
 
+/// A wall measured where a ray landed: the point, the point across (preview
+/// units) and the thickness in mm.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallDto {
+    pub point: [f32; 3],
+    pub across: [f32; 3],
+    pub mm: Option<f32>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaintDto {

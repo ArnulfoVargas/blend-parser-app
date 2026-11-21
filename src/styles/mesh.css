@@ -20,3 +20,12 @@
 .hollow__result { font-family: var(--font-outlier); color: var(--color-ink-2); }
 .hollow__result[data-tone="warn"] { color: var(--color-warn-ink); }
 .thicken__result { font-family: var(--font-outlier); color: var(--color-ink-2); }
+/* The mesh mode's view helpers: the section's options and the wall reading. */
+.app[data-tool="clip"] .place[data-for="clip"] { display: flex; flex-wrap: wrap; white-space: normal; }
+.app:not([data-tab="model"])[data-tool="clip"] .toolopts { display: flex; }
+.thick-out { display: none; }
+.app[data-tool="thickness"] .thick-out { display: block; }
+.app[data-tool="thickness"] #viewport { cursor: crosshair; }
+.app[data-tool="clip"] .brush, .app[data-tool="thickness"] .brush { display: none; }
+#toggle-wire[aria-pressed="true"] { background: var(--color-accent-soft); color: var(--color-ink); }
+.wall-label { background: var(--color-accent-deep); color: var(--color-paper); }
