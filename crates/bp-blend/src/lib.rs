@@ -195,7 +195,9 @@ fn run(
     let script = dir.join("extract.py");
     std::fs::write(&script, SCRIPT)?;
     let mut cmd = Command::new(blender);
+    // No sound device: it is never used, and opening one slows the start on some systems.
     cmd.arg("-b")
+        .arg("-noaudio")
         .arg("--factory-startup")
         .arg("--disable-autoexec")
         .arg("--python-exit-code")

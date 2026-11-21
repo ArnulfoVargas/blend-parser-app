@@ -403,7 +403,11 @@ for oi, obj in enumerate(objs):
             layer = me.uv_layers.get(src[2]) if src[2] else me.uv_layers.active
             if layer is None:
                 warn("missingUv", label)
-                avg = np.array(src[1].pixels[:]).reshape(-1, 4)[:, :3].mean(0)
+                # foreach_get: `pixels[:]` builds a Python float per channel, minutes on a 4K image.
+                img = src[1]
+                px = np.empty(img.size[0] * img.size[1] * 4, dtype=np.float32)
+                img.pixels.foreach_get(px)
+                avg = px.reshape(-1, 4)[:, :3].mean(0) if px.size else np.full(3, 0.8)
                 src = ("flat", avg.tolist())
             else:
                 if layer.name not in uv_index:
