@@ -36,7 +36,7 @@ function ramp(t: number): [number, number, number] {
   const f = x - i;
   return [0, 1, 2].map((k) => Math.round(RAMP[i][k] + (RAMP[i + 1][k] - RAMP[i][k]) * f)) as [number, number, number];
 }
-export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section";
+export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "clip" | "thickness";
 export type Axis = 0 | 1 | 2;
 
 /** A cut across the model: what lies past `t` (0 at the low end of the axis, 1 at the high) is hidden; flipped, what lies before. */
@@ -58,6 +58,8 @@ export interface BrushHandlers {
   rotate(axis: Axis, degrees: number): Promise<boolean>;
   /** The cut was slid in the view. */
   section(s: Section): void;
+  /** A click on the model with the thickness tool, as a ray (preview units). */
+  thickness?(origin: Vec3, dir: Vec3): void;
 }
 
 /** A size handle: one axis, or all three from the corner. */
@@ -109,6 +111,11 @@ export class Viewer {
   private analysisData: AnalysisData | null = null;
   private analysisRgb: Uint8Array | null = null;
   private edgeLines = new THREE.Group();
+  /** The mesh's edges drawn over it, and the wall measured with the thickness tool. */
+  private wire: THREE.LineSegments | null = null;
+  private wall = new THREE.Group();
+  private wallLabel: HTMLDivElement;
+  private wallAt: [Vec3, Vec3] | null = null;
   /** The faces a proposed turn would rest on the plate, tinted over the model. */
   private resting: THREE.Mesh | null = null;
   private tapePoints: Vec3[] = [];
@@ -334,6 +341,9 @@ export class Viewer {
     canvas.after(this.overlay);
     this.overlay.setAttribute("aria-hidden", "true");
     this.tapeLabel = Object.assign(document.createElement("div"), { className: "tape-label", hidden: true });
+    this.wallLabel = Object.assign(document.createElement("div"), { className: "tape-label wall-label", hidden: true });
+    this.wall.renderOrder = 26;
+    this.scene.add(this.wall);
     this.heightLabel = Object.assign(document.createElement("div"), { className: "tape-label is-z", hidden: true });
     this.sizeChips = ([0, 1, 2] as Axis[]).map((axis) => {
       const chip = Object.assign(document.createElement("label"), { className: `size-chip is-${"xyz"[axis]}`, hidden: true });
@@ -341,7 +351,7 @@ export class Viewer {
       return chip;
     });
     this.placeLabel = Object.assign(document.createElement("div"), { className: "tape-label is-live", hidden: true });
-    this.overlay.append(this.tapeLabel, this.heightLabel, this.placeLabel, ...this.sizeChips);
+    this.overlay.append(this.tapeLabel, this.wallLabel, this.heightLabel, this.placeLabel, ...this.sizeChips);
 
     // Shift changes the tape while the pointer rests, so listen to the key itself too.
     const onShift = (e: KeyboardEvent) => {
@@ -398,6 +408,7 @@ export class Viewer {
   load(data: PreviewMesh, frame: boolean) {
     this.data = data;
     this.setResting(null);
+    this.setWall(null);
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -409,7 +420,8 @@ export class Viewer {
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
     geo.computeBoundingBox();
-    this.mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, flatShading: true }));
+    // Pushed back a hair, so the wireframe drawn on the faces does not flicker through them.
+    this.mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, flatShading: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }));
     // Where the cut opens the model, its inner faces show flat, as a section's face.
     const inside = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: cssColor("--color-ink-2"), side: THREE.BackSide }));
     this.mesh.add(inside);
@@ -523,7 +535,7 @@ export class Viewer {
     this.hoverRing = null;
     this.hoverCut = false;
     // The cut starts across the middle the first time its tool is picked; it stays after.
-    if (t === "section" && !this.section) this.setSection({ axis: 2, t: 0.5, flip: false });
+    if ((t === "section" || t === "clip") && !this.section) this.setSection({ axis: 2, t: 0.5, flip: false });
     this.showHandles();
     // Moving needs the plate to move against.
     this.buildBed();
@@ -533,7 +545,7 @@ export class Viewer {
     const on = this.mesh !== null;
     this.slides.visible = on && this.tool === "move";
     this.rings.visible = on && this.tool === "rotate";
-    this.cut.visible = on && this.tool === "section" && this.section !== null;
+    this.cut.visible = on && (this.tool === "section" || this.tool === "clip") && this.section !== null;
     this.placeHandles();
     this.requestRender();
   }
@@ -614,7 +626,7 @@ export class Viewer {
     if (this.moveDrag) return this.slideTo(e);
     if (this.turnDrag) return this.turnTo(e);
     if (this.cutDrag) return this.cutTo(e);
-    if ((this.tool === "move" || this.tool === "rotate" || this.tool === "section") && e.buttons === 0) {
+    if ((this.tool === "move" || this.tool === "rotate" || this.tool === "section" || this.tool === "clip") && e.buttons === 0) {
       this.rayFrom(e);
       let over = false;
       if (this.tool === "move") {
@@ -738,7 +750,7 @@ export class Viewer {
   private grab(e: PointerEvent) {
     // While the last move, turn or resize is still being applied, the pointer orbits.
     if (e.button !== 0 || !this.mesh || this.settling) return;
-    if (this.tool === "move" || this.tool === "rotate" || this.tool === "section") {
+    if (this.tool === "move" || this.tool === "rotate" || this.tool === "section" || this.tool === "clip") {
       this.rayFrom(e);
       const started = this.tool === "move" ? this.grabSlide() : this.tool === "rotate" ? this.grabRing(e) : this.grabCut();
       if (!started) return;
@@ -1012,6 +1024,11 @@ export class Viewer {
       this.clip.set(new THREE.Vector3().setComponent(s.axis, s.flip ? 1 : -1), s.flip ? -v : v);
     }
     const planes = s && box ? [this.clip] : [];
+    if (this.wire) {
+      const m = this.wire.material as THREE.Material;
+      if ((m.clippingPlanes?.length ?? 0) !== planes.length) m.needsUpdate = true;
+      m.clippingPlanes = planes;
+    }
     if (this.mesh) {
       // Uncut, the inner faces are never seen: not drawn at all.
       this.mesh.children[0].visible = planes.length > 0;
@@ -1289,6 +1306,11 @@ export class Viewer {
       put(this.tapeLabel, screen(a.add(b).multiplyScalar(0.5)));
     } else put(this.tapeLabel, null);
 
+    if (this.wallAt) {
+      const [a, b] = this.wallAt.map((p) => new THREE.Vector3(...p));
+      put(this.wallLabel, screen(a.add(b).multiplyScalar(0.5)));
+    } else put(this.wallLabel, null);
+
     // Nothing measured yet: the height, on the vertical edge nearest the camera.
     const mbox = this.mesh?.geometry.boundingBox;
     const showHeight = this.tool === "measure" && pts.length === 0 && mbox !== null && mbox !== undefined;
@@ -1355,6 +1377,53 @@ export class Viewer {
         this.controls.target.copy(center);
         this.controls.update();
       }
+    }
+    this.requestRender();
+  }
+
+  // ---- mesh helpers: wireframe and wall thickness ----------------------------------
+
+  /** Draws the mesh's edges over it (preview units), or with null takes them away. */
+  setWire(wire: { positions: Float32Array; ends: Uint32Array } | null) {
+    if (this.wire) {
+      this.scene.remove(this.wire);
+      this.wire.geometry.dispose();
+      (this.wire.material as THREE.Material).dispose();
+      this.wire = null;
+    }
+    if (wire) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(wire.positions, 3));
+      geo.setIndex(new THREE.BufferAttribute(wire.ends, 1));
+      const mat = new THREE.LineBasicMaterial({ color: cssColor("--color-ink"), transparent: true, opacity: 0.45, depthWrite: false });
+      this.wire = new THREE.LineSegments(geo, mat);
+      this.wire.renderOrder = 6;
+      this.scene.add(this.wire);
+      this.applySection();
+    }
+    this.requestRender();
+  }
+
+  /** Marks a measured wall: from where it was measured to the surface across, with `label`. Null clears. */
+  setWall(at: [Vec3, Vec3] | null, label = "") {
+    this.wall.clear();
+    this.wallAt = at;
+    this.wallLabel.textContent = label;
+    if (at) {
+      const r = this.markerSize();
+      const mat = (name: string) => new THREE.MeshBasicMaterial({ color: cssColor(name), depthTest: false, transparent: true });
+      for (const p of at) {
+        const dot = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), mat("--color-accent-deep"));
+        dot.position.set(...p);
+        dot.renderOrder = 27;
+        this.wall.add(dot);
+      }
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(at.map((p) => new THREE.Vector3(...p))),
+        new THREE.LineBasicMaterial({ color: cssColor("--color-accent-deep"), depthTest: false, transparent: true }),
+      );
+      line.renderOrder = 26;
+      this.wall.add(line);
     }
     this.requestRender();
   }
@@ -1525,7 +1594,7 @@ export class Viewer {
   }
 
   private onDown(e: PointerEvent) {
-    if (this.tool === "measure" && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
+    if ((this.tool === "measure" || this.tool === "thickness") && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
     if (this.drag || this.moveDrag || this.turnDrag || this.cutDrag) return;
     if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
     this.painting = true;
@@ -1542,6 +1611,12 @@ export class Viewer {
     // A click, not a drag to orbit, places a measuring point.
     const d = this.down;
     this.down = null;
+    if (this.tool === "thickness" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+      const [o, dir] = this.rayFrom(e);
+      // Through the section: the wall is measured where the cut shows it.
+      const from = this.clipRay(o, dir);
+      if (from) this.handlers.thickness?.(from, dir);
+    }
     if (this.tool === "measure" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
       this.shift = e.shiftKey;
       // With Shift the point is where the tape shows it, on the axis; otherwise on the model.

@@ -189,6 +189,44 @@ const attacks = {
     const h = await health(b);
     log("hollowing", "18 concurrent hollows, repairs and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
   },
+  // Thickening: hostile minimums through fix_mesh, and in a burst with undos.
+  async thickening(b) {
+    for (const thickenMm of [-1, 0, 1e30, NaN, 10, 0.05, "1"]) await attack(b, "thickening", "fix_mesh", { fix: { thickenMm } }, 180000);
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 8; i++) {
+        calls.push(I("fix_mesh", { fix: { thickenMm: (i % 4) * 0.5 } }));
+        calls.push(I("undo", {}));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("thickening", "16 concurrent thickenings and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+  },
+  // Malla's view helpers: hostile rays and tolerances, wireframe bursts, keys pressed across modes.
+  async meshView(b) {
+    const g = await box(b);
+    for (const [origin, dir, toleranceMm] of [[above(g), [0, 0, -1], 0.001], [above(g), [0, 0, 0], 0.001], [above(g), [0, 0, -1], 0], [above(g), [0, 0, -1], BIG],
+      [[BIG, BIG, BIG], [-1, -1, -1], 0.001], [[NaN, 0, 0], [0, 0, -1], 0.001], [at(g, 0.5), [1, 0, 0], 0.001]])
+      await attack(b, "meshView", "measure_thickness", { origin, dir, toleranceMm });
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 10; i++) {
+        calls.push(I("wire_mesh", {}));
+        calls.push(I("set_mesh_ops", { keepRatio: i % 2 ? 0.5 : 1, flattenMm: 0, repair: true, minPieceMm: 0 }));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("meshView", "20 concurrent wireframes and simplifications", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+    for (const k of ["z", "k", "t", "c", "k", "z", "b", "z", "k", "t"]) await b.execute((kk) => window.dispatchEvent(new KeyboardEvent("keydown", { key: kk, bubbles: true })), k);
+    for (let i = 0; i < 5; i++) for (const sel of ["#toggle-wire", 'button[data-tool="clip"]', "#clip-flip", "#clip-off", '[role=tab][data-tab=cut]', '[role=tab][data-tab=mesh]']) await click(b, sel);
+    await settle(b);
+    const h2 = await health(b);
+    log("meshView", "helper keys and buttons across modes", h2.alive && !h2.errors.length ? "ok" : "BROKEN", `${h2.why} ${h2.errors[0] ?? ""}`.slice(0, 200));
+  },
   // Cuts, in each branch's signature (the missing ones report "missing").
   async cuts(b) {
     for (const t of [0, 1, -1, 2, 0.5]) await attack(b, "cuts", "cut_model", { axis: 2, t, keepLow: true, keepOther: true, joint: null });

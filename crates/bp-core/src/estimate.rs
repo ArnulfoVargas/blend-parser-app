@@ -226,6 +226,7 @@ mod tests {
             repair: Default::default(),
             deviation: 0.0,
             hollow: None,
+            thicken: None,
         }
     }
 

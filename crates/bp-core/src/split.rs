@@ -124,6 +124,7 @@ mod tests {
             repair: RepairReport::default(),
             deviation: 0.0,
             hollow: None,
+            thicken: None,
         }
     }
 

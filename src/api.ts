@@ -12,7 +12,7 @@ export interface Repair {
 export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; hollowMm: number; drains: number; drainMm: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; hollowMm: number; drains: number; drainMm: number; thickenMm: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -126,6 +126,7 @@ export interface Summary {
   deviationMm: number;
   /** The model's volume, and what hollowing did (volumes in mm³; why not, if it did nothing). */
   volumeMm3: number;
+  thicken: { movedVertices: number; maxOffsetMm: number; areaMm2: number } | null;
   hollow: { solidMm3: number; volumeMm3: number; cellMm: number; drains: number; drainsWanted: number; refused: "open" | "noRoom" | null } | null;
   repair: Repair;
   estimate: Estimate;
@@ -139,6 +140,8 @@ export interface Summary {
 }
 
 export interface Hit { point: Vec3; normal: Vec3 }
+/** A wall: where it was measured, the point across, and its thickness in mm (null with nothing across). */
+export interface Wall { point: Vec3; across: Vec3; mm: number | null }
 export interface PaintResult extends Hit { tris: number[] }
 
 /** The paintable mesh, decoded from the binary preview payload. */
@@ -216,6 +219,15 @@ export const api = {
   setFlush: (from: number | null, to: number | null, mm3: number | null) => invoke<Summary>("set_flush", { from, to, mm3 }),
   previewMesh: async () => decodePreview(await invoke<ArrayBuffer>("preview_mesh")),
   pick: (origin: Vec3, dir: Vec3) => invoke<Hit | null>("pick", { origin, dir }),
+  /** The wall where the ray lands, as the thickness check reads it; null off the model. */
+  measureThickness: (origin: Vec3, dir: Vec3, toleranceMm: number) => invoke<Wall | null>("measure_thickness", { origin, dir, toleranceMm }),
+  /** The mesh's edges, each once: positions (3 per vertex) and vertex pairs. */
+  wireMesh: async () => {
+    const buf = await invoke<ArrayBuffer>("wire_mesh");
+    const head = new DataView(buf, 0, 8);
+    const [vertices, edges] = [head.getUint32(0, true), head.getUint32(4, true)];
+    return { positions: new Float32Array(buf, 8, vertices * 3), ends: new Uint32Array(buf, 8 + vertices * 12, edges * 2) };
+  },
   paint: (origin: Vec3, dir: Vec3, radiusMm: number, slot: number) => invoke<PaintResult | null>("paint", { origin, dir, radiusMm, slot }),
   endStroke: () => invoke<Summary>("end_stroke"),
   undo: () => invoke<Summary>("undo"),
@@ -227,7 +239,7 @@ export const api = {
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */
 export interface MeshFix {
   repair?: boolean; orient?: boolean; fillHoles?: boolean; splitVertices?: boolean; dropFloating?: boolean; deepClean?: boolean;
-  minPieceMm?: number; flattenMm?: number;
+  minPieceMm?: number; flattenMm?: number; thickenMm?: number;
 }
 export interface PrintabilityParams {
   extrusionMm: number; perimeters: number; wallMm: number; detailMm: number;
