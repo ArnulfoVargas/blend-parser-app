@@ -2676,8 +2676,8 @@ impl Project {
         let (mut positions, rest) = rest.split_at_mut(leaves * 36);
         let (offset_bytes, rest) = rest.split_at_mut((tris + 1) * 4);
         let (mut labels, mut rgb) = rest.split_at_mut(leaves);
-        for (o, b) in offsets.iter().zip(offset_bytes.chunks_exact_mut(4)) {
-            b.copy_from_slice(&o.to_le_bytes());
+        for (o, b) in offsets.iter().zip(offset_bytes.as_chunks_mut::<4>().0) {
+            *b = o.to_le_bytes();
         }
         // Blocks of triangles own consecutive runs of every array.
         let mut blocks = vec![];
