@@ -1435,6 +1435,7 @@ $("#export-pieces").addEventListener("click", () => {
 });
 
 const zipDialog = $<HTMLDialogElement>("#zip-dialog");
+
 /** The core's colour only matters when colours stop short of the centre. */
 const syncCore = () => {
   $<HTMLElement>("#core-field").hidden = !(Number($<HTMLInputElement>("#depth").value) > 0);
@@ -1625,6 +1626,35 @@ $("#export-zip").addEventListener("click", async () => {
     kitProgress.close();
   }
 });
+
+async function exportColourShells(format: "zip" | "3mf") {
+  if (!summary) return;
+  const shell = $<HTMLInputElement>("#shell");
+  const thickness = Number(shell.value);
+  const ok = thickness >= 0.2 && thickness <= 20;
+  shell.setAttribute("aria-invalid", String(!ok));
+  if (!ok) {
+    shell.focus();
+    return;
+  }
+  const mainSolid = $<HTMLInputElement>("#main-solid").checked;
+  zipDialog.close();
+  if (!(await confirmOversize())) return;
+  const suffix = currentLang() === "en" ? "_colours" : "_colores";
+  const path = await save({
+    defaultPath: summary.fileName.replace(MODEL_EXT, `${suffix}.${format}`),
+    filters: [{ name: format.toUpperCase(), extensions: [format] }],
+  });
+  if (!path) return;
+  await work(async () => {
+    const n = format === "3mf"
+      ? await api.exportColorAssembly(path, thickness, mainSolid)
+      : await api.exportColorShellsZip(path, thickness, mainSolid, currentLang());
+    toast(t("zip.shellsSaved", { count: n, n, path }));
+  });
+}
+$("#export-color-shells").addEventListener("click", () => void exportColourShells("zip"));
+$("#export-color-assembly").addEventListener("click", () => void exportColourShells("3mf"));
 
 // ---- settings ----------------------------------------------------------------------------
 

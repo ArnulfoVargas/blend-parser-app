@@ -510,6 +510,12 @@ export const en: Catalog = {
   "error.kitEmpty": "No solid piece came out: check the mesh is closed (Printability).",
   "zip.title": "Export by colour",
   "zip.export": "Export .zip",
+  "zip.thickness": "Thickness of each colour",
+  "zip.mainSolid": "Main colour as a body with pockets the others fit into",
+  "zip.shells": "Colour shells",
+  "zip.exportShells": "Export shells as ZIP",
+  "zip.exportAssembly": "Export 3MF assembly",
+  "zip.shellsSaved": { one: "{n} colour saved to {path}", other: "{n} colours saved to {path}" },
 
   "printers.title": "My printers",
   "printers.empty": "You have no printers of your own yet. Make one if yours is not among Bambu Lab's; it is kept for later sessions.",

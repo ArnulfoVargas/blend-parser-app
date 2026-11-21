@@ -514,6 +514,12 @@ export const es = {
   "error.kitEmpty": "No salió ninguna pieza sólida: revisa que la malla esté cerrada (Viabilidad de impresión).",
   "zip.title": "Exportar por color",
   "zip.export": "Exportar .zip",
+  "zip.thickness": "Grosor de cada color",
+  "zip.mainSolid": "Color principal como cuerpo con huecos donde encajan los demás",
+  "zip.shells": "Cáscaras por color",
+  "zip.exportShells": "Exportar cáscaras en ZIP",
+  "zip.exportAssembly": "Exportar conjunto 3MF",
+  "zip.shellsSaved": { one: "{n} color guardado en {path}", other: "{n} colores guardados en {path}" },
 
   "printers.title": "Mis impresoras",
   "printers.empty": "Aún no tienes impresoras propias. Crea una si la tuya no está entre las de Bambu Lab; se guarda para las próximas sesiones.",

@@ -9,4 +9,5 @@ license.workspace = true
 rayon.workspace = true
 meshopt = "0.7"
 manifold-rust = { version = "0.19", features = ["parallel"] }
+rustc-hash = "2"
 serde.workspace = true

@@ -76,6 +76,11 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   3MF con las piezas giradas sobre su cara más plana y acomodadas en placas de un solo color, un
   STL por pieza y una guía de armado (`guia-de-armado.html` con imágenes de cada paso, e
   `instrucciones.txt`).
+- Exportar por color: un `.zip` con un STL cerrado por color y una lista de colores. Las piezas
+  siguen los bordes pintados (cada subdivisión de la pintura, no el color dominante de cada
+  triángulo) y cada color es una cáscara del grosor elegido hacia dentro. Opcionalmente el color
+  principal es el cuerpo, con un hueco de ese grosor donde encaja cada cáscara: juntos forman el
+  modelo sin solaparse.
 
 ## Perfiles de impresora en el 3MF
 
@@ -343,6 +348,7 @@ crates/
                 exacta del modelo por booleanas (split/skin.rs)
     kit         Orientación de cada pieza, acomodo en placas por color y orden de armado
     render      Renderizador por software para las imágenes de la guía
+    split/shells  Cáscaras que siguen la pintura y encajan en el cuerpo principal
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario

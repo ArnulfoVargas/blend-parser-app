@@ -1,5 +1,7 @@
 //! Picks N filament colours from the colours of the model: weighted k-means++ in Lab.
 
+use rayon::prelude::*;
+
 use crate::color::{dist2, srgb_to_lab, Lab, Rgb};
 use crate::field::ColorField;
 use crate::geom;
@@ -33,29 +35,33 @@ impl Rng {
 /// Colours at `n` points spread over the surface by area.
 pub fn surface_samples(field: &ColorField, shape: &Mesh, n: usize, seed: u64) -> Vec<Rgb> {
     let mut owners = Vec::new();
-    let mut cumulative = Vec::new();
+    let mut cumulative = Vec::with_capacity(shape.triangle_count());
     let mut acc = 0.0f32;
     for (pi, part) in shape.parts.iter().enumerate() {
-        for t in 0..part.tris.len() {
-            acc += geom::area(&part.corners(t));
+        let areas: Vec<f32> = (0..part.tris.len()).into_par_iter().map(|t| geom::area(&part.corners(t))).collect();
+        for (t, a) in areas.into_iter().enumerate() {
+            acc += a;
             cumulative.push(acc);
-            owners.push((pi, t));
+            owners.push((pi as u32, t as u32));
         }
     }
     if acc <= 0.0 {
         return vec![];
     }
+    // The points are drawn in order, so the same seed gives the same palette;
+    // the colours under them are read in parallel.
     let mut rng = Rng::new(seed);
-    (0..n)
+    let points: Vec<((u32, u32), [f32; 3])> = (0..n)
         .map(|_| {
-            let (pi, t) = owners[rng.weighted(&cumulative)];
+            let owner = owners[rng.weighted(&cumulative)];
             let (mut u, mut v) = (rng.f32(), rng.f32());
             if u + v > 1.0 {
                 (u, v) = (1.0 - u, 1.0 - v);
             }
-            field.sample(shape, pi, t, [1.0 - u - v, u, v]).rgb()
+            (owner, [1.0 - u - v, u, v])
         })
-        .collect()
+        .collect();
+    points.par_iter().map(|&((pi, t), b)| field.sample(shape, pi as usize, t as usize, b).rgb()).collect()
 }
 
 /// K-means++ on colour bins weighted by sqrt(area), so a small but distinct

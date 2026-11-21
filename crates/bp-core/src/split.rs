@@ -18,7 +18,9 @@ use crate::bvh::{Bvh, TriSoup};
 use crate::geom::{self, Bary, Vec3};
 
 mod pins;
+mod shells;
 mod skin;
+pub use shells::{color_pieces, painted, pieces_of, ColorPiece};
 
 pub use pins::PinParams;
 use pins::{Pins, GAP};

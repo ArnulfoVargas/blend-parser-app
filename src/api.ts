@@ -233,6 +233,10 @@ export const api = {
   /** The colour kit: solid pieces on single-colour plates, STLs and an assembly guide, in one ZIP. */
   exportColorZip: (path: string, o: KitOptions, lang: string) => invoke<KitResult>("export_color_zip", { path, options: o, lang }),
   cancelColorZip: () => invoke<void>("cancel_color_zip"),
+  exportColorShellsZip: (path: string, thicknessMm: number, mainSolid: boolean, lang: string) =>
+    invoke<number>("export_color_shells_zip", { path, thicknessMm, mainSolid, lang }),
+  exportColorAssembly: (path: string, thicknessMm: number, mainSolid: boolean) =>
+    invoke<number>("export_color_assembly", { path, thicknessMm, mainSolid }),
 };
 
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */

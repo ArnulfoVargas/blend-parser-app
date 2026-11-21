@@ -509,6 +509,18 @@
         <p class="help" id="zip-estimate" aria-live="polite"></p>
       </div>
       <p class="form-error" id="zip-error" role="alert" hidden data-i18n="zip.nothing"></p>
+      <details>
+        <summary data-i18n="zip.shells">Cáscaras por color</summary>
+      <div class="field">
+        <label for="shell" data-i18n="zip.thickness">Grosor de cada color</label>
+        <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2"><span>mm</span></div>
+      </div>
+      <label class="check"><input type="checkbox" id="main-solid" checked> <span data-i18n="zip.mainSolid">Color principal como cuerpo con huecos donde encajan los demás</span></label>
+        <div class="dialog__actions">
+          <button class="btn" type="button" id="export-color-shells" data-i18n="zip.exportShells">Exportar cáscaras en ZIP</button>
+          <button class="btn" type="button" id="export-color-assembly" data-i18n="zip.exportAssembly">Exportar conjunto 3MF</button>
+        </div>
+      </details>
       <div class="dialog__actions">
         <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
         <button class="btn btn--primary" type="button" id="export-zip" data-i18n="zip.export">Exportar .zip</button>

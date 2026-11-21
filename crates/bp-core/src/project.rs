@@ -1,6 +1,8 @@
 //! The open document and its use cases: palette, size, mesh operations, colour
 //! clean-up, hand painting with undo, preview data and export data.
 
+use rayon::prelude::*;
+
 use crate::bvh::{Bvh, RayHit, TriSoup};
 use crate::color::{to_u8, Classifier, Rgb};
 use crate::cut;
@@ -13,7 +15,7 @@ use crate::optimize;
 use crate::paint::{self, Node, PaintParams};
 use crate::palette;
 use crate::scene::{Part, Scene};
-use crate::split::{self, Split, SplitParams};
+use crate::split::{self, ColorPiece, Split, SplitParams};
 
 /// Colour settings, in final millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -146,6 +148,9 @@ pub struct BucketPick {
 
 const NO_LABEL: u8 = u8::MAX;
 
+/// Triangles per block when the preview is filled in parallel.
+const PREVIEW_BLOCK: usize = 2048;
+
 /// Rows of a 3×3 rotation.
 pub type Mat3 = [[f32; 3]; 3];
 pub const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -169,6 +174,33 @@ fn transpose(m: &Mat3) -> Mat3 {
 pub struct RigidMove {
     pub matrix: Mat3,
     pub shift: Vec3,
+}
+
+impl RigidMove {
+    pub const IDENTITY: RigidMove = RigidMove { matrix: IDENTITY, shift: [0.0; 3] };
+
+    /// This move done after `first`.
+    fn after(self, first: RigidMove) -> RigidMove {
+        RigidMove {
+            matrix: mat_mul(self.matrix, first.matrix),
+            shift: geom::add(mat_vec(self.matrix, first.shift), self.shift),
+        }
+    }
+
+    /// A ray taken back to before the move.
+    fn ray_back(&self, origin: Vec3, dir: Vec3) -> (Vec3, Vec3) {
+        let back = transpose(&self.matrix);
+        (mat_vec(back, geom::sub(origin, self.shift)), mat_vec(back, dir))
+    }
+
+    /// A hit from before the move, where it is now.
+    fn hit(&self, h: RayHit) -> RayHit {
+        RayHit {
+            point: geom::add(mat_vec(self.matrix, h.point), self.shift),
+            normal: mat_vec(self.matrix, h.normal),
+            ..h
+        }
+    }
 }
 
 /// What a cut replaced, to undo it.
@@ -313,12 +345,15 @@ pub struct Project {
     work: Mesh,
     trees: Vec<Vec<Node>>,
     /// Triangle neighbours of each part of `work`.
-    adjacency: Vec<Vec<Vec<(u32, f32)>>>,
+    adjacency: Vec<optimize::Adjacency>,
     /// Hand-painted label per triangle, NO_LABEL where the model's colour applies.
     painted: Vec<Vec<u8>>,
     /// Bucket fills limited to a region, in the order they were made.
     regions: Vec<RegionRule>,
     picker: (Bvh, TriSoup),
+    /// Where the picker's triangles have moved since it was built, by whole
+    /// turns: rays are taken back to where it was built instead of building it again.
+    picker_frame: RigidMove,
     tri_offsets: Vec<u32>,
     stroke: Vec<Change>,
     undo: Vec<UndoEntry>,
@@ -355,6 +390,7 @@ impl Project {
             painted: vec![],
             regions: vec![],
             picker: (Bvh::default(), TriSoup::default()),
+            picker_frame: RigidMove::IDENTITY,
             tri_offsets: vec![],
             stroke: vec![],
             undo: vec![],
@@ -469,9 +505,9 @@ impl Project {
             self.placement = geom::add(mat_vec(turn, self.placement), shift);
             self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
             self.measure_source();
-            let soup = self.work.soup();
-            self.picker = (Bvh::build(&soup), soup);
-            return Some(RigidMove { matrix: turn, shift });
+            let moved = RigidMove { matrix: turn, shift };
+            self.picker_frame = moved.after(self.picker_frame);
+            return Some(moved);
         }
         self.rotation = rotation;
         self.place_from_file();
@@ -964,6 +1000,7 @@ impl Project {
         self.adjacency = self.work.parts.iter().map(optimize::adjacency).collect();
         let soup = self.work.soup();
         self.picker = (Bvh::build(&soup), soup);
+        self.picker_frame = RigidMove::IDENTITY;
         let mut acc = 0u32;
         self.tri_offsets = self
             .work
@@ -1150,7 +1187,13 @@ impl Project {
 
     /// Ray in model space (millimetres before scaling, as the preview shows it).
     pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<RayHit> {
-        self.picker.0.raycast(&self.picker.1, origin, geom::normalize(dir))
+        self.pick_built(origin, dir).map(|h| self.picker_frame.hit(h))
+    }
+
+    /// [`Self::pick`] where the picker was built.
+    fn pick_built(&self, origin: Vec3, dir: Vec3) -> Option<RayHit> {
+        let (o, d) = self.picker_frame.ray_back(origin, geom::normalize(dir));
+        self.picker.0.raycast(&self.picker.1, o, d)
     }
 
     /// Paints every triangle within `radius_mm` (final size) of where the ray
@@ -1159,7 +1202,7 @@ impl Project {
         if slot as usize >= self.palette.len() {
             return None;
         }
-        let hit = self.pick(origin, dir)?;
+        let hit = self.pick_built(origin, dir)?;
         let mut found = vec![hit.tri];
         self.picker.0.sphere(&self.picker.1, hit.point, radius_mm / self.scale, &mut found);
         found.sort_unstable();
@@ -1177,7 +1220,7 @@ impl Project {
             self.painted[p][i] = slot;
             changed.push(self.tri_offsets[p] + ti);
         }
-        Some((hit, changed))
+        Some((self.picker_frame.hit(hit), changed))
     }
 
     pub fn end_stroke(&mut self) {
@@ -1219,31 +1262,86 @@ impl Project {
 
     // ---- read models ------------------------------------------------------
 
-    pub fn preview(&self) -> Preview {
+    /// The preview as the UI receives it, one little-endian blob:
+    /// `u32 leaves, u32 tris | f32 positions[9 * leaves] | u32 offsets[tris + 1] | u8 labels[leaves] | u8 rgb[3 * leaves]`.
+    /// Filled in parallel, straight into the buffer that goes out, so a model
+    /// of millions of leaves is not held twice on its way to the UI.
+    pub fn preview_bytes(&self) -> Vec<u8> {
         let field = ColorField::new(&self.scene, &self.shape);
-        let leaves: usize = self.trees.iter().flatten().map(Node::leaf_count).sum();
-        let mut pv = Preview {
-            positions: Vec::with_capacity(leaves * 9),
-            labels: Vec::with_capacity(leaves),
-            source_rgb: Vec::with_capacity(leaves * 3),
-            offsets: Vec::with_capacity(self.work.triangle_count() + 1),
-        };
-        for (pi, (part, nodes)) in self.work.parts.iter().zip(&self.trees).enumerate() {
-            for (ti, node) in nodes.iter().enumerate() {
-                pv.offsets.push(pv.labels.len() as u32);
-                let c = part.corners(ti);
-                node.for_each_leaf(&ROOT, &mut |t, label| {
-                    for &b in t {
-                        pv.positions.extend(geom::at(&c, b));
-                    }
-                    pv.labels.push(label);
-                    let centre = geom::bary_in(t, [1.0 / 3.0; 3]);
-                    pv.source_rgb.extend(to_u8(field.sample(&self.shape, pi, ti, centre).rgb()));
-                });
+        let mut offsets = Vec::with_capacity(self.work.triangle_count() + 1);
+        offsets.push(0u32);
+        for nodes in &self.trees {
+            let counts: Vec<u32> = nodes.par_iter().map(|n| n.leaf_count() as u32).collect();
+            for c in counts {
+                offsets.push(offsets.last().unwrap() + c);
             }
         }
-        pv.offsets.push(pv.labels.len() as u32);
-        pv
+        let tris = offsets.len() - 1;
+        let leaves = *offsets.last().unwrap() as usize;
+        let mut out = vec![0u8; 8 + leaves * 36 + (tris + 1) * 4 + leaves * 4];
+        let (head, rest) = out.split_at_mut(8);
+        head[..4].copy_from_slice(&(leaves as u32).to_le_bytes());
+        head[4..].copy_from_slice(&(tris as u32).to_le_bytes());
+        let (mut positions, rest) = rest.split_at_mut(leaves * 36);
+        let (offset_bytes, rest) = rest.split_at_mut((tris + 1) * 4);
+        let (mut labels, mut rgb) = rest.split_at_mut(leaves);
+        for (o, b) in offsets.iter().zip(offset_bytes.chunks_exact_mut(4)) {
+            b.copy_from_slice(&o.to_le_bytes());
+        }
+        // Blocks of triangles own consecutive runs of every array.
+        let mut blocks = vec![];
+        let mut first = 0;
+        for (pi, nodes) in self.trees.iter().enumerate() {
+            for from in (0..nodes.len()).step_by(PREVIEW_BLOCK) {
+                let to = (from + PREVIEW_BLOCK).min(nodes.len());
+                let n = (offsets[first + to] - offsets[first + from]) as usize;
+                let (p, p_rest) = positions.split_at_mut(n * 36);
+                let (l, l_rest) = labels.split_at_mut(n);
+                let (c, c_rest) = rgb.split_at_mut(n * 3);
+                (positions, labels, rgb) = (p_rest, l_rest, c_rest);
+                blocks.push((pi, from, to, p, l, c));
+            }
+            first += nodes.len();
+        }
+        blocks.into_par_iter().for_each(|(pi, from, to, positions, labels, rgb)| {
+            let part = &self.work.parts[pi];
+            let mut li = 0;
+            for ti in from..to {
+                let c = part.corners(ti);
+                self.trees[pi][ti].for_each_leaf(&ROOT, &mut |t, label| {
+                    for (k, &b) in t.iter().enumerate() {
+                        for (j, v) in geom::at(&c, b).into_iter().enumerate() {
+                            let at = (li * 9 + k * 3 + j) * 4;
+                            positions[at..at + 4].copy_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                    labels[li] = label;
+                    let centre = geom::bary_in(t, [1.0 / 3.0; 3]);
+                    rgb[li * 3..li * 3 + 3].copy_from_slice(&to_u8(field.sample(&self.shape, pi, ti, centre).rgb()));
+                    li += 1;
+                });
+            }
+        });
+        out
+    }
+
+    /// The preview as arrays: [`Self::preview_bytes`] read back.
+    pub fn preview(&self) -> Preview {
+        let bytes = self.preview_bytes();
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let (leaves, tris) = (word(0) as usize, word(4) as usize);
+        let positions_at = 8;
+        let offsets_at = positions_at + leaves * 36;
+        let labels_at = offsets_at + (tris + 1) * 4;
+        let rgb_at = labels_at + leaves;
+        Preview {
+            positions: (0..leaves * 9)
+                .map(|i| f32::from_le_bytes(bytes[positions_at + i * 4..][..4].try_into().unwrap()))
+                .collect(),
+            offsets: (0..=tris).map(|i| word(offsets_at + i * 4)).collect(),
+            labels: bytes[labels_at..rgb_at].to_vec(),
+            source_rgb: bytes[rgb_at..].to_vec(),
+        }
     }
 
     pub fn stats(&self) -> Stats {
@@ -1286,6 +1384,22 @@ impl Project {
             .zip(&self.trees)
             .map(|((part, adj), nodes)| optimize::small_islands(part, adj, nodes, min_area))
             .sum()
+    }
+
+    /// One closed piece per colour in final millimetres, following the painted
+    /// borders: shells `thickness_mm` deep, and with `main_solid` the colour
+    /// with most triangles as the body, with a pocket for each shell.
+    pub fn color_pieces(&self, thickness_mm: f32, main_solid: bool) -> Vec<ColorPiece> {
+        let per = self.stats_per_slot();
+        let main = main_solid.then(|| (0..per.len()).max_by_key(|&i| per[i]).unwrap_or(0) as u8);
+        let mut pieces =
+            split::color_pieces(&self.work, &self.trees, self.palette.len(), thickness_mm / self.scale, main);
+        for p in &mut pieces {
+            for v in &mut p.positions {
+                *v = geom::scale(*v, self.scale);
+            }
+        }
+        pieces
     }
 
     /// The model as solid pieces per colour, in final millimetres, that fit
@@ -1412,6 +1526,7 @@ impl Project {
             painted: vec![],
             regions: vec![],
             picker: (Bvh::default(), TriSoup::default()),
+            picker_frame: RigidMove::IDENTITY,
             tri_offsets: vec![],
             stroke: vec![],
             undo: vec![],
@@ -1807,6 +1922,28 @@ mod tests {
     }
 
     #[test]
+    fn colour_pieces_of_a_painted_model_fit_back_together() {
+        let mut p = Project::new(tower(), 2);
+        p.set_height_mm(40.0);
+        let pieces = p.color_pieces(1.0, true);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces.iter().filter(|x| x.solid).count(), 1);
+        let volume = |x: &ColorPiece| -> f32 {
+            x.tris
+                .iter()
+                .map(|t| {
+                    let [a, b, c] = t.map(|v| x.positions[v as usize]);
+                    geom::dot(a, geom::cross(b, c)) / 6.0
+                })
+                .sum()
+        };
+        // In final millimetres: the 10 x 10 x 20 tower at 40 mm tall is 20 x 20 x 40.
+        let total: f32 = pieces.iter().map(volume).sum();
+        assert!((total - 16000.0).abs() < 1.0, "{total}");
+        assert!(pieces.iter().all(|x| volume(x) > 0.0));
+    }
+
+    #[test]
     fn rotation_turns_the_size_and_lands_on_the_plate() {
         let mut p = Project::new(scene(), 2);
         p.set_height_mm(40.0);
@@ -1883,6 +2020,29 @@ mod tests {
         // A stretched model is rebuilt instead.
         p.set_size_mm([20.0, 20.0, 10.0]);
         assert!(p.rotate(2, 90.0).is_none());
+    }
+
+    #[test]
+    fn picking_after_whole_turns_matches_a_fresh_picker() {
+        let mut p = Project::new(tower(), 2);
+        p.rotate(0, 90.0).unwrap();
+        p.rotate(2, 30.0).unwrap();
+        p.rotate(1, -45.0).unwrap();
+        let mut fresh = p.clone();
+        let soup = fresh.work.soup();
+        fresh.picker = (Bvh::build(&soup), soup);
+        fresh.picker_frame = RigidMove::IDENTITY;
+        let (lo, hi) = p.work.bounds().unwrap();
+        let centre = geom::scale(geom::add(lo, hi), 0.5);
+        for dir in [[0.0, 1.0, 0.0], [1.0, 0.2, -0.3], [-0.4, -1.0, 0.1], [0.0, 0.0, -1.0]] {
+            let origin = geom::sub(centre, geom::scale(geom::normalize(dir), 100.0));
+            let (a, b) = (p.pick(origin, dir).expect("hits"), fresh.pick(origin, dir).expect("hits"));
+            assert_eq!(a.tri, b.tri);
+            assert!((0..3).all(|i| (a.point[i] - b.point[i]).abs() < 1e-3 && (a.normal[i] - b.normal[i]).abs() < 1e-4));
+            let (_, painted) = p.paint(origin, dir, 2.0, 1).unwrap();
+            let (_, expected) = fresh.paint(origin, dir, 2.0, 1).unwrap();
+            assert_eq!(painted, expected);
+        }
     }
 
     #[test]

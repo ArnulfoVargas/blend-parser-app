@@ -571,24 +571,7 @@ pub async fn set_flush(app: AppHandle, from: Option<usize>, to: Option<usize>, m
 /// `u32 leaves, u32 tris | f32 positions[9 * leaves] | u32 offsets[tris + 1] | u8 labels[leaves] | u8 rgb[3 * leaves]`.
 #[tauri::command]
 pub async fn preview_mesh(app: AppHandle) -> CmdResult<Response> {
-    let bytes = with_doc(app, |d, _| {
-        let pv = d.project.preview();
-        let leaves = pv.labels.len();
-        let tris = pv.offsets.len() - 1;
-        let mut out = Vec::with_capacity(8 + leaves * (36 + 4) + tris * 4);
-        out.extend((leaves as u32).to_le_bytes());
-        out.extend((tris as u32).to_le_bytes());
-        for v in &pv.positions {
-            out.extend(v.to_le_bytes());
-        }
-        for o in &pv.offsets {
-            out.extend(o.to_le_bytes());
-        }
-        out.extend(&pv.labels);
-        out.extend(&pv.source_rgb);
-        Ok(out)
-    })
-    .await?;
+    let bytes = with_doc(app, |d, _| Ok(d.project.preview_bytes())).await?;
     Ok(Response::new(bytes))
 }
 
@@ -896,6 +879,92 @@ pub async fn export_3mf(
             .map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
     })
     .await
+}
+
+/// One STL per colour in a ZIP, its colour list in `lang`. Returns how many colour files were written.
+#[tauri::command]
+pub async fn export_color_shells_zip(
+    app: AppHandle,
+    path: String,
+    thickness_mm: f32,
+    main_solid: bool,
+    lang: String,
+) -> CmdResult<usize> {
+    in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
+    with_doc(app, move |d, _| {
+        let pieces = d.project.color_pieces(thickness_mm, main_solid);
+        let hexes: Vec<String> =
+            pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
+        let files: Vec<bp_3mf::ColorFile> = pieces
+            .iter()
+            .zip(&hexes)
+            .map(|(p, hex)| bp_3mf::ColorFile { hex, positions: &p.positions, tris: &p.tris, solid: p.solid })
+            .collect();
+        let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
+        bp_3mf::write_color_zip(std::io::BufWriter::new(file), &name, &files, bp_3mf::ZipText::for_lang(&lang))
+            .map_err(|e| AppError::with("error.zipWrite", json!({ "detail": e.to_string() })))?;
+        Ok(files.len())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn export_color_assembly(
+    app: AppHandle,
+    path: String,
+    thickness_mm: f32,
+    main_solid: bool,
+) -> CmdResult<usize> {
+    in_range(thickness_mm, 0.2..=20.0, "error.shellRange")?;
+    with_doc(app, move |d, prefs| {
+        let pieces = d.project.color_pieces(thickness_mm, main_solid);
+        let names: Vec<_> =
+            pieces.iter().map(|p| bp_core::color::to_hex(d.project.palette()[p.slot as usize])).collect();
+        let filaments: Vec<_> = pieces.iter().map(|p| p.slot).collect();
+        let parts = pieces
+            .iter()
+            .zip(&names)
+            .map(|(p, name)| bp_3mf::Part { name, positions: &p.positions, tris: &p.tris, paint: &[], object: 0 })
+            .collect();
+        write_color_assembly(d, prefs, &path, parts, &filaments)?;
+        Ok(pieces.len())
+    })
+    .await
+}
+
+fn write_color_assembly(
+    d: &Document,
+    prefs: &Prefs,
+    path: &str,
+    parts: Vec<bp_3mf::Part<'_>>,
+    part_filaments: &[u8],
+) -> CmdResult<()> {
+    let filaments = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
+    let slots = d.slot_filaments().iter().map(|f| f.map(|f| bp_3mf::filament::for_slot(&f.kind, &d.printer))).collect();
+    let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+    let (volumes_mm3, _) = dto::flush_matrix(d);
+    let model = bp_3mf::Model {
+        name: &name,
+        piece: bp_3mf::ZipText::ES.piece,
+        parts,
+        filaments,
+        slots,
+        thumbnail: None,
+        printer: d.printer.clone(),
+        flush: bp_3mf::Flush {
+            volumes_mm3,
+            multiplier: prefs.waste.flush_multiplier,
+            into_infill: prefs.waste.flush_reuse > 0.0,
+            prime_mm3: prefs.waste.prime_mm3,
+        },
+        layer_mm: prefs.waste.layer_mm,
+        offset_mm: d.offset_mm,
+    };
+    let file = std::fs::File::create(path).map_err(|e| AppError::file(path, e))?;
+    let out = std::io::BufWriter::new(file);
+    let result = bp_3mf::write_filament_parts(out, &model, part_filaments);
+    result.map_err(|e| AppError::with("error.3mfWrite", json!({ "detail": e.to_string() })))
 }
 
 fn printability_for_doc(

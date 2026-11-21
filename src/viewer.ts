@@ -143,13 +143,27 @@ export class Viewer {
   private pending = false;
   private painting = false;
   private frame = 0;
+  /** Pixel ratio of a still view: the screen's, up to 2. */
+  private fullDpr = Math.min(window.devicePixelRatio, 2);
+  /** Pixel ratio while the view moves; lowered when frames come too slowly, so a weak GPU keeps up. */
+  private movingDpr = this.fullDpr;
+  /** Smoothed time between frames while the view moves, in ms; 0 when the last frame was not drawn. */
+  private frameMs = 0;
+  private lastFrameAt = 0;
+  /** Frames in a row that came quickly; a second of them earns sharper frames again. */
+  private fastFrames = 0;
+  /** Frames since the view last moved; at rest it is drawn once more at full sharpness. */
+  private idleFrames = 0;
+  /** Whether the pointer was over the model when it was last picked, for grabbing it with the move tool. */
+  private overMesh = false;
   /** Brush radius in preview units (millimetres before the user's scale). */
   brushRadius = 3;
 
   constructor(private canvas: HTMLCanvasElement, private handlers: BrushHandlers) {
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    // On a laptop with two GPUs, the faster one.
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "high-performance" });
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(this.fullDpr);
     this.renderer.localClippingEnabled = true;
     this.camera.up.set(0, 0, 1);
     this.controls = new OrbitControls(this.camera, canvas);
@@ -354,18 +368,49 @@ export class Viewer {
       this.setHover(null);
     });
     this.setTool("orbit");
-    this.loop();
+    requestAnimationFrame(this.loop);
   }
 
-  private loop = () => {
+  private loop = (now: number) => {
     requestAnimationFrame(this.loop);
     // Damping needs a few frames after the user lets go.
     if (this.controls.update() || this.frame > 0) {
+      this.pace(now);
       this.renderer.render(this.scene, this.camera);
       this.placeOverlay();
       this.frame = Math.max(0, this.frame - 1);
+      this.idleFrames = 0;
+    } else {
+      this.lastFrameAt = 0;
+      // A quarter of a second still: one sharp frame. Sooner, a brush stroke's pauses would resize the canvas on every dab.
+      if (++this.idleFrames === 15 && this.renderer.getPixelRatio() !== this.fullDpr) {
+        this.renderer.setPixelRatio(this.fullDpr);
+        this.renderer.render(this.scene, this.camera);
+      }
     }
   };
+
+  /**
+   * Keeps a moving view smooth on a slow GPU: when frames come slower than
+   * 25 a second, fewer pixels are drawn (down to half the screen's); after a
+   * second of quick frames, more again. Only consecutive frames are timed.
+   */
+  private pace(now: number) {
+    if (this.lastFrameAt > 0) {
+      const dt = now - this.lastFrameAt;
+      this.frameMs = this.frameMs > 0 ? this.frameMs * 0.8 + dt * 0.2 : dt;
+      this.fastFrames = dt < 18 ? this.fastFrames + 1 : 0;
+      if (this.frameMs > 40 && this.movingDpr > 0.5) {
+        this.movingDpr = Math.max(0.5, this.movingDpr * 0.8);
+        this.frameMs = 0;
+      } else if (this.fastFrames >= 60 && this.movingDpr < this.fullDpr) {
+        this.movingDpr = Math.min(this.fullDpr, this.movingDpr * 1.15);
+        this.fastFrames = 0;
+      }
+    }
+    this.lastFrameAt = now;
+    if (Math.abs(this.renderer.getPixelRatio() - this.movingDpr) > 1e-3) this.renderer.setPixelRatio(this.movingDpr);
+  }
 
   requestRender() {
     this.frame = 2;
@@ -387,12 +432,16 @@ export class Viewer {
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
+      (this.mesh.material as THREE.Material).dispose();
+      ((this.mesh.children[0] as THREE.Mesh).material as THREE.Material).dispose();
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(data.positions, 3));
     this.colors = new Uint8Array(data.labels.length * 9);
     geo.setAttribute("color", new THREE.BufferAttribute(this.colors, 3, true));
-    geo.computeVertexNormals();
+    // No normals: flat shading takes each face's from the screen-space slope of
+    // its positions. On millions of triangles they would be as large as the
+    // positions themselves, to compute, upload and keep.
     geo.computeBoundingSphere();
     geo.computeBoundingBox();
     this.mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, flatShading: true }));
@@ -413,13 +462,16 @@ export class Viewer {
   moveMesh(matrix: number[][], shift: Vec3) {
     if (!this.mesh || !this.data) return;
     const p = this.data.positions;
+    const [[a, b, c], [d, e, f], [g, h, k]] = matrix;
+    const [sx, sy, sz] = shift;
     for (let i = 0; i < p.length; i += 3) {
-      const [x, y, z] = [p[i], p[i + 1], p[i + 2]];
-      for (let r = 0; r < 3; r++) p[i + r] = matrix[r][0] * x + matrix[r][1] * y + matrix[r][2] * z + shift[r];
+      const x = p[i], y = p[i + 1], z = p[i + 2];
+      p[i] = a * x + b * y + c * z + sx;
+      p[i + 1] = d * x + e * y + f * z + sy;
+      p[i + 2] = g * x + h * y + k * z + sz;
     }
     const geo = this.mesh.geometry;
     geo.getAttribute("position").needsUpdate = true;
-    geo.computeVertexNormals();
     geo.computeBoundingSphere();
     geo.computeBoundingBox();
     this.reshaped();
@@ -584,6 +636,7 @@ export class Viewer {
     }
     if (t !== "measure") this.setHover(null);
     if (t !== "bucket") this.setHighlight(null);
+    this.overMesh = false;
     this.sizeBox.visible = t === "size" && this.mesh !== null;
     this.grips.visible = this.sizeBox.visible;
     this.heightLine.visible = false;
@@ -618,9 +671,24 @@ export class Viewer {
     for (const t of tris) {
       for (let l = offsets[t]; l < offsets[t + 1]; l++) labels[l] = slot;
     }
-    if (this.view === "filament") {
-      for (const t of tris) this.colorLeaves(offsets[t], offsets[t + 1]);
-      this.mesh!.geometry.getAttribute("color").needsUpdate = true;
+    if (this.view === "filament" && tris.length) {
+      const attr = this.mesh!.geometry.getAttribute("color") as THREE.BufferAttribute;
+      // Only the bytes that changed go to the GPU, in runs: the whole buffer is
+      // tens of megabytes on a large model, a dab a few hundred bytes.
+      const sorted = Uint32Array.from(tris).sort();
+      let from = -1;
+      let to = -1;
+      for (const t of sorted) {
+        this.colorLeaves(offsets[t], offsets[t + 1]);
+        const [a, b] = [offsets[t] * 9, offsets[t + 1] * 9];
+        if (from >= 0 && a - to <= 4096) to = Math.max(to, b);
+        else {
+          if (from >= 0) attr.addUpdateRange(from, to - from);
+          [from, to] = [a, b];
+        }
+      }
+      attr.addUpdateRange(from, to - from);
+      attr.needsUpdate = true;
     }
     this.requestRender();
   }
@@ -645,24 +713,30 @@ export class Viewer {
         }
       }
     }
-    this.mesh!.geometry.getAttribute("color").needsUpdate = true;
+    const attr = this.mesh!.geometry.getAttribute("color") as THREE.BufferAttribute;
+    // All of it: ranges left from painting would upload only themselves.
+    attr.clearUpdateRanges();
+    attr.needsUpdate = true;
     this.requestRender();
   }
 
   private colorLeaves(from: number, to: number) {
     const { labels, sourceRgb } = this.data!;
     const c = this.colors!;
+    const texture = this.view === "texture";
+    const grey: [number, number, number] = [200, 200, 200];
     for (let l = from; l < to; l++) {
       let r: number, g: number, b: number;
-      if (this.view === "texture") {
+      if (texture) {
         r = sourceRgb[l * 3]; g = sourceRgb[l * 3 + 1]; b = sourceRgb[l * 3 + 2];
       } else {
-        [r, g, b] = this.palette[labels[l]] ?? [200, 200, 200];
+        const rgb = this.palette[labels[l]] ?? grey;
+        r = rgb[0]; g = rgb[1]; b = rgb[2];
       }
-      for (let k = 0; k < 3; k++) {
-        const i = l * 9 + k * 3;
-        c[i] = r; c[i + 1] = g; c[i + 2] = b;
-      }
+      const i = l * 9;
+      c[i] = c[i + 3] = c[i + 6] = r;
+      c[i + 1] = c[i + 4] = c[i + 7] = g;
+      c[i + 2] = c[i + 5] = c[i + 8] = b;
     }
   }
 
@@ -701,8 +775,10 @@ export class Viewer {
       let over = false;
       if (this.tool === "move") {
         const slide = this.slideAt();
-        over = slide !== null;
+        over = slide !== null || this.overMesh;
         if (slide !== this.hoverSlide) this.hoverSlide = slide;
+        if (slide === null) void this.hoverModel(e);
+        else this.overMesh = false;
       } else if (this.tool === "rotate") {
         const ring = this.ringAt();
         over = ring !== null;
@@ -913,9 +989,22 @@ export class Viewer {
     return o ? (o.userData.slide as Slide) : null;
   }
 
-  /** The last ray lands on what the cut keeps of the model. */
-  private overModel() {
-    return this.mesh !== null && this.ray.intersectObject(this.mesh, false).some((h) => this.kept(h.point));
+  /**
+   * Whether the pointer is over what the cut keeps of the model, asked of the
+   * backend's tree while the pointer moves. Three.js would test every triangle
+   * on the click itself, which on millions of them stalls the grab.
+   */
+  private async hoverModel(e: PointerEvent) {
+    if (!this.mesh || this.pending) return;
+    this.pending = true;
+    try {
+      const [o, d] = this.rayFrom(e);
+      const over = (await this.pick(o, d)) !== null;
+      if (over !== this.overMesh && !this.moveDrag) this.canvas.style.cursor = over ? "grab" : "";
+      this.overMesh = over;
+    } finally {
+      this.pending = false;
+    }
   }
 
   /** Where the last ray meets the handle's line or, for the square, the level plane through the base. */
@@ -929,7 +1018,7 @@ export class Viewer {
   /** On an arrow, along its axis; on the square or the model itself, anywhere on the plate. */
   private grabSlide(): boolean {
     const box = this.mesh?.geometry.boundingBox;
-    const slide = this.slideAt() ?? (this.overModel() ? "plane" : null);
+    const slide = this.slideAt() ?? (this.overMesh ? "plane" : null);
     if (slide === null || !box || !this.bedPlate) return false;
     const base = box.getCenter(new THREE.Vector3()).setZ(box.min.z);
     const from = this.slidePoint(slide, base);
