@@ -665,39 +665,104 @@ pub async fn undo(app: AppHandle) -> CmdResult<Summary> {
     .await
 }
 
-/// The model split into solid pieces per colour, laid out on single-colour
-/// plates, with STLs and an assembly guide, all in one ZIP.
+/// Set to stop the colour kit being exported.
+static KIT_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stops the colour kit export at its next picture or file; nothing is left behind.
+#[tauri::command]
+pub fn cancel_color_zip() {
+    KIT_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The model split into solid pieces per colour, laid out on plates, with
+/// STLs and an assembly guide in `lang`, all in one ZIP. It is written next to
+/// `path` and renamed into place only once complete; `kitProgress` events say
+/// how far it has got, and [`cancel_color_zip`] stops it.
 #[tauri::command]
 pub async fn export_color_zip(
     app: AppHandle,
     path: String,
-    voxel_mm: f32,
-    depth_mm: f32,
-    core_slot: Option<u8>,
-    min_piece_mm3: f32,
+    options: bp_3mf::project_file::KitSettings,
+    lang: String,
 ) -> CmdResult<dto::KitDto> {
+    let bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot, min_piece_mm3, mix, contents, pins } =
+        options;
+    let lang = bp_3mf::KitLang::from_code(&lang);
     in_range(voxel_mm, 0.2..=2.0, "error.kitDetailRange")?;
     in_range(depth_mm, 0.0..=50.0, "error.kitDepthRange")?;
+    if let Some(p) = pins {
+        in_range(p.diameter_mm, 2.0..=20.0, "error.kitPinDiameterRange")?;
+        in_range(p.depth_mm, 1.0..=20.0, "error.kitPinDepthRange")?;
+        in_range(p.clearance_mm, 0.0..=1.0, "error.kitPinClearanceRange")?;
+    }
+    if !contents.any() {
+        return Err(AppError::new("error.kitNothing"));
+    }
+    KIT_CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
     let handle = app.clone();
     with_doc(app, move |d, prefs| {
-        let emit = |key: &str| {
-            let _ = handle.emit("progress", ProgressDto { key: key.to_string(), name: String::new() });
+        let emit = |stage: &str, done: usize, total: usize| {
+            let _ = handle.emit("kitProgress", dto::KitProgressDto { stage: stage.to_string(), done, total });
         };
-        emit("kitSplit");
-        let params = bp_core::SplitParams { voxel_mm, depth_mm, core_slot, min_piece_mm3: min_piece_mm3.max(0.0) };
+        let cancelled = || KIT_CANCEL.load(std::sync::atomic::Ordering::Relaxed);
+        emit("split", 0, 0);
+        let params = bp_core::SplitParams {
+            voxel_mm,
+            depth_mm,
+            core_slot,
+            min_piece_mm3: min_piece_mm3.max(0.0),
+            pins: pins.map(|p| bp_core::PinParams {
+                diameter_mm: p.diameter_mm,
+                depth_mm: p.depth_mm,
+                clearance_mm: p.clearance_mm,
+                ..Default::default()
+            }),
+            exact_skin: true,
+        };
         d.kit = Some(bp_3mf::project_file::KitSettings {
             voxel_mm,
             depth_mm,
             core_slot,
             min_piece_mm3: params.min_piece_mm3,
+            mix,
+            contents,
+            pins,
         });
         let split = d.project.split_by_color(params);
         if split.pieces.is_empty() {
             return Err(AppError::new("error.kitEmpty"));
         }
-        emit("kitPlates");
-        let kit = bp_core::kit::kit(split, d.printer.bed_mm());
-        emit("kitGuide");
+        if cancelled() {
+            return Err(AppError::new("error.kitCancelled"));
+        }
+        emit("plates", 0, 0);
+        // The plate as the user keeps it: margin, gap and, where colours mix, the tower.
+        let waste = dto::waste_params(d, prefs);
+        let tallest = split
+            .pieces
+            .iter()
+            .map(|p| {
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for v in &p.positions {
+                    lo = std::array::from_fn(|a| lo[a].min(v[a]));
+                    hi = std::array::from_fn(|a| hi[a].max(v[a]));
+                }
+                // Lying on its broad face, a piece stands about its thinnest.
+                (0..3).map(|a| hi[a] - lo[a]).fold(f32::MAX, f32::min)
+            })
+            .fold(0.0, f32::max);
+        let side = prefs
+            .plate
+            .tower_depth_mm
+            .unwrap_or_else(|| bp_core::waste::tower_side(waste.prime_mm3, waste.layer_mm, tallest))
+            + 2.0 * dto::TOWER_BRIM_MM;
+        let reserve = bp_3mf::Reserve {
+            tower: prefs.plate.tower,
+            tower_mm: [side; 2],
+            tower_gap_mm: prefs.plate.tower_gap_mm,
+            margin_mm: prefs.plate.margin_mm,
+        };
+        let kit = bp_core::kit::kit(split, bp_3mf::kit_bed(&d.printer, &reserve, prefs.plate.tower_gap_mm, mix));
         // Each slot in the colour it prints, with its filament where one was picked.
         let palette: Vec<String> = d.slot_colors().iter().map(|c| bp_core::color::to_hex(*c)).collect();
         let slots: Vec<_> =
@@ -705,7 +770,12 @@ pub async fn export_color_zip(
         let filament_names: Vec<Option<String>> = d
             .slot_filaments()
             .iter()
-            .map(|f| f.map(|f| format!("{} {} {}", f.brand, f.kind, f.name_es).trim().to_string()))
+            .map(|f| {
+                f.map(|f| {
+                    let name = if lang == bp_3mf::KitLang::En { &f.name_en } else { &f.name_es };
+                    format!("{} {} {}", f.brand, f.kind, name).trim().to_string()
+                })
+            })
             .collect();
         let name = Path::new(&d.file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let info = bp_3mf::KitInfo {
@@ -714,18 +784,58 @@ pub async fn export_color_zip(
             slots: &slots,
             filament_names: &filament_names,
             printer: &d.printer,
-            params: d.kit.unwrap_or(bp_3mf::project_file::KitSettings { voxel_mm, depth_mm, core_slot, min_piece_mm3 }),
+            params: d.kit.unwrap_or(options),
             density_g_cm3: prefs.waste.density_g_cm3,
+            flush: bp_3mf::Flush {
+                volumes_mm3: dto::flush_matrix(d).0,
+                multiplier: prefs.waste.flush_multiplier,
+                into_infill: prefs.waste.flush_reuse > 0.0,
+                prime_mm3: prefs.waste.prime_mm3,
+            },
+            lang,
         };
-        let file = std::fs::File::create(&path).map_err(|e| AppError::file(&path, e))?;
-        let s = bp_3mf::write_kit_zip(std::io::BufWriter::new(file), &kit, &info)
-            .map_err(|e| AppError::with("error.zipWrite", json!({ "detail": e.to_string() })))?;
+        // Never a half-written ZIP at `path`: write beside it, then rename.
+        let part = format!("{path}.part");
+        let written = (|| {
+            let file = std::fs::File::create(&part).map_err(|e| AppError::file(&part, e))?;
+            let mut out = std::io::BufWriter::new(file);
+            let s = bp_3mf::write_kit_zip_with(&mut out, &kit, &info, &|stage, done, total| {
+                let stage = match stage {
+                    bp_3mf::KitStage::Pictures => "pictures",
+                    bp_3mf::KitStage::Files => "files",
+                };
+                emit(stage, done, total);
+                !cancelled()
+            })
+            .map_err(|e| {
+                if cancelled() {
+                    AppError::new("error.kitCancelled")
+                } else {
+                    AppError::with("error.zipWrite", json!({ "detail": e.to_string() }))
+                }
+            })?;
+            let file = out.into_inner().map_err(|e| AppError::file(&part, e.into_error()))?;
+            file.sync_all().map_err(|e| AppError::file(&part, e))?;
+            drop(file);
+            std::fs::rename(&part, &path).map_err(|e| AppError::file(&path, e))?;
+            Ok(s)
+        })();
+        let s = match written {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(e);
+            }
+        };
         Ok(dto::KitDto {
             pieces: s.pieces,
             plates: s.plates,
             oversize: s.oversize,
             review: s.review,
             dropped: s.dropped,
+            pins: s.pins,
+            unpinned: s.unpinned,
+            bytes: std::fs::metadata(&path).map_or(0, |m| m.len()),
         })
     })
     .await

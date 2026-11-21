@@ -8,4 +8,5 @@ license.workspace = true
 [dependencies]
 rayon.workspace = true
 meshopt = "0.7"
+manifold-rust = { version = "0.19", features = ["parallel"] }
 serde.workspace = true
