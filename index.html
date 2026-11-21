@@ -415,7 +415,7 @@
   <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>
-      <p class="help" data-i18n="zip.help">Un STL cerrado por color en un .zip, siguiendo los bordes pintados, para imprimir cada color como pieza aparte.</p>
+      <p class="help" data-i18n="zip.help">Guarda las piezas por color como STL en un ZIP o como un conjunto 3MF que conserva su posición y el filamento de cada pieza.</p>
       <div class="field">
         <label for="shell" data-i18n="zip.thickness">Grosor de cada color</label>
         <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2" aria-describedby="shell-help"><span>mm</span></div>
@@ -424,6 +424,7 @@
       <label class="check"><input type="checkbox" id="main-solid" checked> <span data-i18n="zip.mainSolid">Color principal como cuerpo con huecos donde encajan los demás</span></label>
       <div class="dialog__actions">
         <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn" type="button" id="export-color-assembly" data-i18n="zip.exportAssembly">Exportar conjunto 3MF</button>
         <button class="btn btn--primary" type="button" id="export-zip" data-i18n="zip.export">Exportar .zip</button>
       </div>
     </form>

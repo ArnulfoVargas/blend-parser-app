@@ -1008,7 +1008,7 @@ const zipDialog = $<HTMLDialogElement>("#zip-dialog");
 $("#open-zip").addEventListener("click", () => {
   if (app.dataset.state === "ready") zipDialog.showModal();
 });
-$("#export-zip").addEventListener("click", async () => {
+async function exportColourPieces(format: "zip" | "3mf") {
   if (!summary) return;
   const shell = $<HTMLInputElement>("#shell");
   const thickness = Number(shell.value);
@@ -1018,16 +1018,24 @@ $("#export-zip").addEventListener("click", async () => {
     shell.focus();
     return;
   }
+  const mainSolid = $<HTMLInputElement>("#main-solid").checked;
   zipDialog.close();
   if (!(await confirmOversize())) return;
-  const suffix = currentLang() === "en" ? "_colours.zip" : "_colores.zip";
-  const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, suffix), filters: [{ name: "ZIP", extensions: ["zip"] }] });
+  const suffix = currentLang() === "en" ? "_colours" : "_colores";
+  const path = await save({
+    defaultPath: summary.fileName.replace(MODEL_EXT, `${suffix}.${format}`),
+    filters: [{ name: format.toUpperCase(), extensions: [format] }],
+  });
   if (!path) return;
   await work(async () => {
-    const n = await api.exportColorZip(path, thickness, $<HTMLInputElement>("#main-solid").checked, currentLang());
+    const n = format === "3mf"
+      ? await api.exportColorAssembly(path, thickness, mainSolid)
+      : await api.exportColorZip(path, thickness, mainSolid, currentLang());
     toast(t("zip.saved", { count: n, n, path }));
   });
-});
+}
+$("#export-zip").addEventListener("click", () => void exportColourPieces("zip"));
+$("#export-color-assembly").addEventListener("click", () => void exportColourPieces("3mf"));
 
 // ---- settings ----------------------------------------------------------------------------
 
