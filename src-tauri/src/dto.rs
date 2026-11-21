@@ -2,20 +2,50 @@
 //! after each change, so the UI never has to keep its own copy in sync.
 
 use bp_core::{ColorOps, MeshOps, Project, Waste, WasteParams};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::prefs::{PlatePrefs, Prefs, WastePrefs};
 use crate::state::Document;
 
-/// Prime tower width and brim the 3MF asks Bambu Studio for.
-pub const TOWER_WIDTH_MM: f32 = 20.0;
+/// Prime tower brim the 3MF asks Bambu Studio for.
 pub const TOWER_BRIM_MM: f32 = 3.0;
+
+/// What the colour kit export produced.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitDto {
+    pub pieces: usize,
+    pub plates: usize,
+    /// Pieces larger than the plate.
+    pub oversize: usize,
+    /// Pieces to look at before printing them, and regions too thin to make a piece.
+    pub review: usize,
+    pub dropped: usize,
+    /// Pins keying pieces together, and joins with no room for one.
+    pub pins: usize,
+    pub unpinned: usize,
+    /// Size of the ZIP written.
+    pub bytes: u64,
+}
+
+/// How far the colour kit export has got: `split`, `plates`, `pictures` or
+/// `files`, with how many of `total` are done (0 of 0 when it cannot tell).
+#[derive(Clone, Serialize)]
+pub struct KitProgressDto {
+    pub stage: String,
+    pub done: usize,
+    pub total: usize,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartDto {
     pub name: String,
     pub triangles: usize,
+    pub object: u32,
+    pub plate: u32,
+    pub preview_start: usize,
+    pub preview_end: usize,
 }
 
 #[derive(Serialize)]
@@ -30,7 +60,13 @@ pub struct MaterialDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlotDto {
+    /// The colour it prints: its filament's, or the one found in the model.
     pub hex: String,
+    /// The colour found in the model, which decides what the slot paints.
+    pub detected_hex: String,
+    /// The filament picked for it, and its ΔE from the colour found.
+    pub filament: Option<bp_3mf::filament::Filament>,
+    pub filament_delta_e: Option<f32>,
     pub triangles: usize,
     /// Closest other slot (0-based) and the ΔE between them.
     pub nearest: Option<(usize, f32)>,
@@ -115,6 +151,24 @@ pub struct PlateDto {
     pub can_undo_cut: bool,
     /// Printed objects: the model and the pieces cut off it that were kept.
     pub objects: usize,
+    /// Their ids, which number their names in the 3MF (see `bp_3mf::object_name`).
+    pub object_ids: Vec<u32>,
+    /// Split across plates, each plate's check; empty on one plate (the fields above say it all).
+    pub plates: Vec<PlateGroupDto>,
+}
+
+/// One plate of a model split across several.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlateGroupDto {
+    pub objects: usize,
+    pub size_mm: [f32; 3],
+    /// Centre of what is on it, in preview coordinates: the plate's centre (with the offset) goes there.
+    pub centre: [f32; 3],
+    pub fits: bool,
+    pub fits_height: bool,
+    #[serde(flatten)]
+    pub check: bp_3mf::PlateCheck,
 }
 
 #[derive(Serialize)]
@@ -171,6 +225,8 @@ pub struct Summary {
     pub undo_label: Option<String>,
     /// Triangles painted by hand; a new colour detection discards them.
     pub painted_triangles: usize,
+    /// How the colour kit was last cut, to fill its dialog.
+    pub kit: Option<bp_3mf::project_file::KitSettings>,
 }
 
 /// A turn: the new summary and, when the preview could follow as it is,
@@ -189,62 +245,6 @@ pub struct RigidDto {
     pub shift: [f32; 3],
 }
 
-/// Connectors for a cut, as the UI sends them.
-#[derive(serde::Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct JointDto {
-    /// `plug` or `dowel`.
-    pub kind: String,
-    /// `circle`, `square` or `hexagon`.
-    pub shape: String,
-    pub size_mm: f32,
-    pub depth_mm: f32,
-    pub tolerance_mm: f32,
-    /// 0 places as many as fit the face.
-    pub count: u8,
-}
-
-impl JointDto {
-    pub fn into_core(self) -> bp_core::Joint {
-        use bp_core::{JointKind, JointShape};
-        let clamp = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
-        let d = bp_core::Joint::default();
-        bp_core::Joint {
-            kind: if self.kind == "dowel" { JointKind::Dowel } else { JointKind::Plug },
-            shape: match self.shape.as_str() {
-                "square" => JointShape::Square,
-                "hexagon" => JointShape::Hexagon,
-                _ => JointShape::Circle,
-            },
-            size_mm: clamp(self.size_mm, 1.0, 50.0, d.size_mm),
-            depth_mm: clamp(self.depth_mm, 0.5, 50.0, d.depth_mm),
-            tolerance_mm: clamp(self.tolerance_mm, 0.0, 1.0, d.tolerance_mm),
-            count: self.count.min(8),
-        }
-    }
-}
-
-/// A cut's result: the summary, and what its connectors came to.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CutDto {
-    pub summary: Summary,
-    pub connectors: usize,
-    pub pins: usize,
-    pub pieces: usize,
-    pub dowels_instead: bool,
-}
-
-pub fn cut(doc: &Document, prefs: &Prefs, r: bp_core::CutReport) -> CutDto {
-    CutDto {
-        summary: summary(doc, prefs),
-        connectors: r.connectors,
-        pins: r.pins,
-        pieces: r.pieces,
-        dowels_instead: r.dowels_instead,
-    }
-}
-
 pub fn turn(doc: &Document, prefs: &Prefs, rigid: Option<bp_core::project::RigidMove>) -> TurnDto {
     TurnDto { summary: summary(doc, prefs), rigid: rigid.map(|m| RigidDto { matrix: m.matrix, shift: m.shift }) }
 }
@@ -256,6 +256,36 @@ pub struct HitDto {
     pub normal: [f32; 3],
 }
 
+/// What the bucket would fill, to show before it does.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketPickDto {
+    /// The colour target it found, `#RRGGBB`; the clicked colour itself when it is added.
+    pub target_hex: String,
+    /// Whether that colour is a new target rather than one the palette has.
+    pub added: bool,
+    /// The slot that colour paints now; `None` for an added colour.
+    pub slot: Option<u8>,
+    /// The model's colour under the click and its ΔE to the target.
+    pub sample_hex: String,
+    pub delta_e: f32,
+    /// Global ids of the triangles it reaches.
+    pub tris: Vec<u32>,
+}
+
+impl From<bp_core::project::BucketPick> for BucketPickDto {
+    fn from(p: bp_core::project::BucketPick) -> Self {
+        Self {
+            target_hex: bp_core::color::to_hex(p.target_rgb),
+            added: p.target.is_none(),
+            slot: p.target.map(|_| p.slot),
+            sample_hex: bp_core::color::to_hex(p.sample),
+            delta_e: p.delta_e,
+            tris: p.tris,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaintDto {
@@ -263,6 +293,23 @@ pub struct PaintDto {
     pub normal: [f32; 3],
     /// Global ids of the triangles that changed.
     pub tris: Vec<u32>,
+}
+
+/// Every filament to pick from, the user's inventory, and whether colours come only from it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilamentsDto {
+    pub filaments: Vec<bp_3mf::filament::Filament>,
+    pub owned: Vec<String>,
+    pub inventory_only: bool,
+}
+
+pub fn filaments(store: &crate::filaments::FilamentStore) -> FilamentsDto {
+    FilamentsDto {
+        filaments: store.all(),
+        owned: store.owned.iter().cloned().collect(),
+        inventory_only: store.inventory_only,
+    }
 }
 
 /// Every printer to pick from, the current pick, and what a custom one can use.
@@ -294,14 +341,23 @@ pub fn layer_mm(printer: &bp_3mf::Printer, prefs: &WastePrefs) -> f32 {
 /// Flush per swap between every pair of slots, the user's values first.
 pub fn flush_matrix(doc: &Document) -> (Vec<f32>, Vec<bool>) {
     let pal = doc.project.palette();
+    // Typed flush follows the slots' colours; the estimate, the colours and
+    // materials they print, as Bambu Studio's flush table works it out.
+    let shown = doc.slot_colors();
+    let kinds: Vec<Option<&str>> = doc.slot_filaments().iter().map(|f| f.map(|f| f.kind.as_str())).collect();
+    let least = doc.printer.flush_min_mm3();
     let n = pal.len();
     let mut volumes = Vec::with_capacity(n * n);
     let mut set = Vec::with_capacity(n * n);
-    for &a in pal {
-        for &b in pal {
+    for ((&a, &sa), &ka) in pal.iter().zip(&shown).zip(&kinds) {
+        for ((&b, &sb), &kb) in pal.iter().zip(&shown).zip(&kinds) {
             let key = (bp_core::color::to_hex(a), bp_core::color::to_hex(b));
             let typed = doc.flush.get(&key).copied().filter(|_| a != b);
-            volumes.push(typed.unwrap_or_else(|| bp_core::waste::default_flush(a, b)));
+            let estimate = || match bp_core::waste::default_flush(sa, sb, least) {
+                0.0 => 0.0,
+                v => bp_3mf::filament::flush(ka, kb, v),
+            };
+            volumes.push(typed.unwrap_or_else(estimate));
             set.push(typed.is_some());
         }
     }
@@ -320,7 +376,6 @@ pub fn waste_params(doc: &Document, prefs: &Prefs) -> WasteParams {
         prime_mm3: w.prime_mm3,
         flush_reuse: w.flush_reuse,
         tower: doc.project.palette().len() > 1,
-        tower_width_mm: TOWER_WIDTH_MM,
         tower_depth_mm: prefs.plate.tower_depth_mm,
         tower_brim_mm: TOWER_BRIM_MM,
         purge_chute: doc.printer.purges_into_chute(),
@@ -339,11 +394,12 @@ pub fn waste_and_plate(
     let params = waste_params(doc, prefs);
     let waste = bp_core::waste::waste(swaps, &params, |a, b| matrix[a as usize * n + b as usize]);
     let needs_tower = params.tower;
-    // With no swap yet the tower still has to be planned: as deep as it is wide.
+    // Square, as Bambu Studio 2 prints it. With no swap yet it is still planned:
+    // as for one swap on the model's height.
     let tower_mm = match (prefs.plate.tower_depth_mm, waste.tower_footprint_mm) {
-        (Some(d), _) => [TOWER_WIDTH_MM + 2.0 * TOWER_BRIM_MM, d + 2.0 * TOWER_BRIM_MM],
+        (Some(d), _) => [d + 2.0 * TOWER_BRIM_MM; 2],
         (None, f) if f[1] > 0.0 => f,
-        _ => [TOWER_WIDTH_MM + 2.0 * TOWER_BRIM_MM; 2],
+        _ => [bp_core::waste::tower_side(params.prime_mm3, params.layer_mm, size[2]) + 2.0 * TOWER_BRIM_MM; 2],
     };
     let reserve = bp_3mf::Reserve {
         tower: prefs.plate.tower && needs_tower,
@@ -351,9 +407,44 @@ pub fn waste_and_plate(
         tower_gap_mm: prefs.plate.tower_gap_mm,
         margin_mm: prefs.plate.margin_mm,
     };
-    let check = bp_3mf::plate::check_at(&doc.printer, [size[0], size[1]], doc.offset_mm, &reserve);
+    // Split across plates, every plate is checked on its own and the tightest speaks for all.
+    let groups = doc.project.plate_groups();
+    let plates: Vec<PlateGroupDto> = if groups.len() > 1 {
+        groups
+            .iter()
+            .map(|g| {
+                let check = if g.objects == 0 {
+                    bp_3mf::plate::check_at(
+                        &doc.printer,
+                        [0.0; 2],
+                        [0.0; 2],
+                        &bp_3mf::Reserve { tower: false, ..reserve },
+                    )
+                } else {
+                    bp_3mf::plate::check_at(&doc.printer, [g.size_mm[0], g.size_mm[1]], doc.offset_mm, &reserve)
+                };
+                PlateGroupDto {
+                    objects: g.objects,
+                    size_mm: g.size_mm,
+                    centre: g.centre,
+                    fits: g.objects == 0 || check.fits(),
+                    fits_height: g.size_mm[2] <= doc.printer.max_height_mm(),
+                    check,
+                }
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    let check = plates
+        .iter()
+        .filter(|p| p.objects > 0)
+        .min_by(|a, b| a.check.fit_factor.total_cmp(&b.check.fit_factor))
+        .map(|p| p.check.clone())
+        .unwrap_or_else(|| bp_3mf::plate::check_at(&doc.printer, [size[0], size[1]], doc.offset_mm, &reserve));
     let plate = PlateDto {
-        fits: check.fits(),
+        fits: if plates.is_empty() { check.fits() } else { plates.iter().all(|p| p.fits) },
+        plates,
         check,
         prefs: prefs.plate,
         needs_tower,
@@ -363,13 +454,25 @@ pub fn waste_and_plate(
         rotated: doc.project.is_rotated(),
         can_undo_cut: doc.project.can_undo_cut(),
         objects: doc.project.object_count(),
+        object_ids: doc.project.object_ids(),
     };
     (waste, plate)
 }
 
+/// Width, depth and height to check against the printer: the model's, or split
+/// across plates, the largest of any plate's.
+pub fn printed_size(p: &Project, stats: &bp_core::Stats) -> [f32; 3] {
+    let groups = p.plate_groups();
+    if groups.len() < 2 {
+        return stats.size_mm;
+    }
+    groups.iter().fold([0.0; 3], |m, g| std::array::from_fn(|i| m[i].max(g.size_mm[i])))
+}
+
 pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
     let p: &Project = &doc.project;
-    let stats = p.stats();
+    let mut stats = p.stats();
+    stats.size_mm = printed_size(p, &stats);
     let MeshOps {
         keep_ratio,
         flatten_mm,
@@ -390,7 +493,20 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         file_name: doc.file_name.clone(),
         file_size: doc.file_size,
         import_warnings: doc.import_warnings.clone(),
-        parts: p.scene().parts.iter().map(|x| PartDto { name: x.name.clone(), triangles: x.tris.len() }).collect(),
+        parts: p
+            .scene()
+            .parts
+            .iter()
+            .zip(p.preview_part_ranges())
+            .map(|(x, (start, end))| PartDto {
+                name: x.name.clone(),
+                triangles: x.tris.len(),
+                object: x.object,
+                plate: x.plate,
+                preview_start: start,
+                preview_end: end,
+            })
+            .collect(),
         materials: p
             .scene()
             .materials
@@ -405,9 +521,18 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         slots: p
             .palette()
             .iter()
+            .zip(doc.slot_colors())
+            .zip(doc.slot_filaments())
             .zip(&stats.per_slot)
             .zip(&stats.nearest)
-            .map(|((c, &n), &nearest)| SlotDto { hex: bp_core::color::to_hex(*c), triangles: n, nearest })
+            .map(|((((c, shown), f), &n), &nearest)| SlotDto {
+                hex: bp_core::color::to_hex(shown),
+                detected_hex: bp_core::color::to_hex(*c),
+                filament: f.cloned(),
+                filament_delta_e: f.map(|_| bp_core::palette::delta_e(*c, shown)),
+                triangles: n,
+                nearest,
+            })
             .collect(),
         source_triangles: stats.source_triangles,
         triangles: stats.triangles,
@@ -479,6 +604,149 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         can_undo: p.can_undo(),
         undo_label: p.undo_label().map(str::to_string),
         painted_triangles: p.painted_count(),
+        kit: doc.kit,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PieceDto {
+    pub part: usize,
+    pub part_name: String,
+    pub object: u32,
+    pub triangles: usize,
+    pub size_mm: [f32; 3],
+    /// Box centre in preview coordinates.
+    pub centre: [f32; 3],
+    pub closed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiecesDto {
+    pub pieces: Vec<PieceDto>,
+    /// For each preview triangle, the index of its piece (`u32::MAX` for none).
+    pub tri_piece: Vec<u32>,
+}
+
+pub fn pieces(p: &Project, weld_mm: f32) -> PiecesDto {
+    let (found, tri_piece) = p.detect_pieces(weld_mm);
+    let parts = &p.scene().parts;
+    PiecesDto {
+        pieces: found
+            .into_iter()
+            .map(|x| PieceDto {
+                part_name: parts[x.part].name.clone(),
+                object: parts[x.part].object,
+                part: x.part,
+                triangles: x.triangles,
+                size_mm: x.size_mm,
+                centre: x.centre,
+                closed: x.closed,
+            })
+            .collect(),
+        tri_piece,
+    }
+}
+
+/// Why a cut is proposed, in final millimetres.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum SignalDto {
+    Neck { area_mm2: f32, before_mm2: f32, after_mm2: f32 },
+    Colour { from: u8, to: u8 },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposalDto {
+    pub part: usize,
+    pub axis: usize,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub signal: SignalDto,
+}
+
+pub fn proposal(p: bp_core::CutProposal) -> ProposalDto {
+    ProposalDto {
+        part: p.part,
+        axis: p.axis,
+        point: p.point,
+        normal: p.normal,
+        signal: match p.signal {
+            bp_core::separate::Signal::Neck { area, before, after } => {
+                SignalDto::Neck { area_mm2: area, before_mm2: before, after_mm2: after }
+            }
+            bp_core::separate::Signal::Colour { from, to } => SignalDto::Colour { from, to },
+        },
+    }
+}
+
+/// A dry run of a cut with connectors.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectReviewDto {
+    /// Per connector: "outside", "overlap", "thinWall", "tooDeep", or null when fine.
+    pub issues: Vec<Option<&'static str>>,
+    /// Objects after the cut, when every connector is fine and the cut closes.
+    pub objects: Option<usize>,
+}
+
+/// Cuts that make every piece fit, and what they were worked out for.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitProposalDto {
+    /// Positions along X, Y and Z in preview coordinates.
+    pub cuts: [Vec<f32>; 3],
+    /// Room on each plate for pieces: width and depth.
+    pub room_mm: [f32; 2],
+    pub height_mm: f32,
+    /// The model as it prints now.
+    pub size_mm: [f32; 3],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitPieceDto {
+    pub name: String,
+    pub size_mm: [f32; 3],
+    /// 0-based; null when it fits no plate.
+    pub plate: Option<usize>,
+    pub laid: bool,
+    pub small: bool,
+    pub dowel: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitReportDto {
+    pub pieces: Vec<SplitPieceDto>,
+    pub plates: usize,
+    pub cuts: usize,
+    pub joints: usize,
+    pub joints_missing: usize,
+    pub fits: bool,
+}
+
+pub fn split_report(r: bp_core::SplitReport) -> SplitReportDto {
+    SplitReportDto {
+        fits: r.fits(),
+        plates: r.plates,
+        cuts: r.cuts,
+        joints: r.joints,
+        joints_missing: r.joints_missing,
+        pieces: r
+            .pieces
+            .into_iter()
+            .map(|p| SplitPieceDto {
+                name: p.name,
+                size_mm: p.size_mm,
+                plate: p.plate,
+                laid: p.laid,
+                small: p.small,
+                dowel: p.dowel,
+            })
+            .collect(),
     }
 }
 
@@ -506,4 +774,119 @@ pub fn prefs(p: &Prefs) -> PrefsDto {
 pub struct ProgressDto {
     pub key: String,
     pub name: String,
+}
+
+/// The region selection: its triangles (global preview ids) and how many separate regions they make.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionDto {
+    pub tris: Vec<u32>,
+    pub count: usize,
+    pub regions: usize,
+}
+
+pub fn selection(p: &Project) -> SelectionDto {
+    let (count, regions) = p.selection_regions();
+    SelectionDto { tris: p.selection(), count, regions }
+}
+
+/// A brush stroke of the region selection: where it landed and the triangles that changed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectStrokeDto {
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub tris: Vec<u32>,
+}
+
+/// How a cut region is closed: a shell `mm` thick (the piece `clearance_mm`
+/// smaller than its pocket), or a cap `mm` deep.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ClosureDto {
+    Shell {
+        mm: f32,
+        #[serde(default)]
+        clearance_mm: f32,
+    },
+    Cap {
+        mm: f32,
+    },
+}
+
+/// What happens to the region: it goes, or it becomes objects of its own.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum RegionActionDto {
+    Remove,
+    Extract {
+        lay_flat: bool,
+        #[serde(default)]
+        group: bool,
+    },
+}
+
+impl From<ClosureDto> for bp_core::region::Closure {
+    fn from(c: ClosureDto) -> Self {
+        match c {
+            ClosureDto::Shell { mm, clearance_mm } => Self::Shell { thickness: mm, clearance: clearance_mm },
+            ClosureDto::Cap { mm } => Self::Cap { depth: mm },
+        }
+    }
+}
+
+impl From<RegionActionDto> for bp_core::RegionAction {
+    fn from(a: RegionActionDto) -> Self {
+        match a {
+            RegionActionDto::Remove => Self::Remove,
+            RegionActionDto::Extract { lay_flat, group } => Self::Extract { lay_flat, group },
+        }
+    }
+}
+
+/// What cutting the region out would make, in preview coordinates: the
+/// closing faces and each piece's surface as flat xyz triangles (9 floats each).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionPreviewDto {
+    pub closure: Vec<f32>,
+    pub pieces: Vec<Vec<f32>>,
+    pub directions: Vec<[f32; 3]>,
+    pub piece_mm3: Vec<f32>,
+    pub rest_mm3: f32,
+    pub closed: bool,
+    /// Pieces narrower than two nozzle widths.
+    pub small: usize,
+}
+
+pub fn region_preview(p: bp_core::RegionPreview) -> RegionPreviewDto {
+    let flat = |tris: &[[[f32; 3]; 3]]| tris.iter().flatten().flatten().copied().collect();
+    RegionPreviewDto {
+        closure: flat(&p.closure),
+        pieces: p.pieces.iter().map(|t| flat(t)).collect(),
+        directions: p.directions,
+        piece_mm3: p.piece_mm3,
+        rest_mm3: p.rest_mm3,
+        closed: p.closed,
+        small: p.small,
+    }
+}
+
+/// What makes faces the same colour when selecting by colour.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ColourMatchDto {
+    Material,
+    Filament,
+    Similar { delta_e: f32 },
+}
+
+impl From<ColourMatchDto> for bp_core::ColourMatch {
+    fn from(c: ColourMatchDto) -> Self {
+        match c {
+            ColourMatchDto::Material => Self::Material,
+            ColourMatchDto::Filament => Self::Filament,
+            ColourMatchDto::Similar { delta_e } => Self::Similar { delta_e },
+        }
+    }
 }

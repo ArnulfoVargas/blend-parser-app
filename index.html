@@ -18,7 +18,11 @@
         <button class="menubar__top" type="button" aria-haspopup="menu" aria-expanded="false" data-i18n="menu.file"></button>
         <ul class="menu" role="menu" hidden>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="open"><span data-i18n="menu.open"></span> <kbd>Ctrl+O</kbd></button></li>
-          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+S</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="save"><span data-i18n="menu.save"></span> <kbd>Ctrl+S</kbd></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="saveAs"><span data-i18n="menu.saveAs"></span> <kbd>Ctrl+⇧+S</kbd></button></li>
+          <li role="separator" class="menu__sep"></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="export"><span data-i18n="menu.export"></span> <kbd>Ctrl+E</kbd></button></li>
+          <li role="separator" class="menu__sep" id="recent-sep" hidden></li>
         </ul>
       </li>
       <li>
@@ -28,6 +32,7 @@
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="undoSize"><span data-i18n="menu.undoSize"></span></button></li>
           <li role="separator" class="menu__sep"></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="printers"><span data-i18n="menu.printers"></span></button></li>
+          <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="filaments"><span data-i18n="menu.filaments"></span></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="waste"><span data-i18n="menu.waste"></span></button></li>
           <li role="none"><button class="menu__item" type="button" role="menuitem" data-cmd="prefs"><span data-i18n="menu.prefs"></span> <kbd>Ctrl+,</kbd></button></li>
         </ul>
@@ -49,7 +54,7 @@
         <option value="0.4">0,4 mm</option>
       </select>
       <!-- Oculto hasta que la exportación por piezas sólidas esté completa (PR #1). -->
-      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" hidden data-i18n="bar.byColour">Por color (.zip)</button>
+      <button class="btn btn--quiet" type="button" id="open-zip" aria-disabled="true" data-i18n="bar.byColour">Por color (.zip)</button>
       <button class="btn btn--primary" type="button" id="export" aria-disabled="true"><span class="btn__warn" aria-hidden="true"></span><span data-bind="exportLabel">Exportar .3mf</span></button>
     </div>
   </header>
@@ -138,6 +143,35 @@
         <details class="group" id="plate-group">
           <summary><h2 data-i18n="plate.title">Placa y torre</h2><span class="group__sum" data-bind="plateSum"></span></summary>
           <div class="group__body">
+            <div class="field">
+              <label for="project-plate" data-i18n="plates.current">Placa</label>
+              <select class="select" id="project-plate"></select>
+            </div>
+            <div class="row-actions">
+              <button type="button" id="plate-add" class="btn btn--sm" data-i18n="plates.add">Añadir placa</button>
+              <button type="button" id="plate-clear" class="btn btn--quiet btn--sm" data-i18n="plates.clear">Vaciar placa</button>
+            </div>
+            <div class="field">
+              <label for="plate-object" data-i18n="plates.object">Objeto de la placa</label>
+              <select class="select" id="plate-object"></select>
+            </div>
+            <div class="field">
+              <label for="plate-destination" data-i18n="plates.destination">Placa de destino</label>
+              <select class="select" id="plate-destination"></select>
+            </div>
+            <div class="row-actions">
+              <button type="button" id="plate-move" class="btn btn--sm" data-i18n="plates.move">Mover objeto</button>
+              <button type="button" id="plate-clone" class="btn btn--sm" data-i18n="plates.clone">Clonar objeto</button>
+            </div>
+            <label class="check">
+              <input type="checkbox" id="plate-arrange-clones" checked>
+              <span data-i18n="plates.arrangeClones">Acomodar las placas al clonar</span>
+            </label>
+            <div class="field">
+              <label for="plate-arrange-gap" data-i18n="plates.gap">Separación entre objetos</label>
+              <div class="field__unit"><input class="input" id="plate-arrange-gap" type="number" min="0" max="50" step="0.5" value="5"><span>mm</span></div>
+            </div>
+            <button type="button" id="plate-arrange" class="btn btn--sm" data-i18n="plates.arrange">Acomodar todas las placas</button>
             <svg class="plate" id="plate-view" role="img" aria-labelledby="plate-desc" preserveAspectRatio="xMidYMid meet"></svg>
             <p class="visually-hidden" id="plate-desc" data-bind="plateDesc"></p>
             <ul class="plate__legend" aria-hidden="true">
@@ -170,7 +204,7 @@
           <summary><h2 data-i18n="colour.title">Color</h2><span class="group__sum" data-bind="colorSum"></span></summary>
           <div class="group__body">
             <fieldset class="keys" id="count">
-              <legend data-i18n="colour.redetect">Detectar de nuevo con</legend>
+              <legend data-i18n="colour.redetect">Detectar de nuevo con hasta</legend>
               <input type="radio" name="count" id="c2" value="2"><label for="c2">2</label>
               <input type="radio" name="count" id="c3" value="3"><label for="c3">3</label>
               <input type="radio" name="count" id="c4" value="4" checked><label for="c4">4</label>
@@ -262,17 +296,28 @@
         <div class="toolbar" id="toolbar" role="toolbar" aria-orientation="vertical" data-i18n-attr="aria-label:stage.tool" data-expanded="false">
           <button class="toolbar__btn" type="button" data-tool="orbit" aria-pressed="true" data-i18n-attr="title:stage.orbitTitle;aria-label:stage.orbitTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9.5a8 8 0 0 1 13.8-3.2"/><path d="M19.5 14.5a8 8 0 0 1-13.8 3.2"/><path d="M18.6 2.8v3.7h-3.7"/><path d="M5.4 21.2v-3.7h3.7"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg><span class="toolbar__label" data-i18n="stage.orbit"></span><kbd>O</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="brush" aria-pressed="false" data-i18n-attr="title:stage.brushTitle;aria-label:stage.brushTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4.5 19.5 9.5 11 18l-5-5z"/><path d="M6 13c-2 0-3 1.5-3 3.5S2 20 2 20s2.5.5 4.5-.5S10 17 10 15.5"/></svg><span class="toolbar__label" data-i18n="stage.brush"></span><kbd>B</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="bucket" aria-pressed="false" data-i18n-attr="title:stage.bucketTitle;aria-label:stage.bucketTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11.5 11.5 5l7 7-6.5 6.5a2 2 0 0 1-2.8 0L5 14.3a2 2 0 0 1 0-2.8z"/><path d="M8.5 8 6 5.5"/><path d="M5 12.5h13.5"/><path d="M20.5 15.5s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0c0-1 1.5-3 1.5-3z" class="fill"/></svg><span class="toolbar__label" data-i18n="stage.bucket"></span><kbd>U</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="measure" aria-pressed="false" data-i18n-attr="title:stage.measureTitle;aria-label:stage.measureTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5 15.5 3l5.5 5.5L8.5 21z"/><path d="M7.5 11l2 2M10.5 8l1.5 1.5M13.5 5l2 2M5 14l1.5 1.5"/></svg><span class="toolbar__label" data-i18n="stage.measure"></span><kbd>M</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="size" aria-pressed="false" data-i18n-attr="title:stage.sizeTitle;aria-label:stage.sizeTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 15v5h-5"/><path d="M4 4l6 6M20 20l-6-6"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg><span class="toolbar__label" data-i18n="stage.size"></span><kbd>S</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="move" aria-pressed="false" data-i18n-attr="title:stage.moveTitle;aria-label:stage.moveTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5 12 3l2.5 2.5M9.5 18.5 12 21l2.5-2.5M5.5 9.5 3 12l2.5 2.5M18.5 9.5 21 12l-2.5 2.5"/></svg><span class="toolbar__label" data-i18n="stage.move"></span><kbd>G</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="rotate" aria-pressed="false" data-i18n-attr="title:stage.rotateTitle;aria-label:stage.rotateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.8 3.5v4h-4"/><ellipse cx="12" cy="12" rx="7.5" ry="2.6"/></svg><span class="toolbar__label" data-i18n="stage.rotate"></span><kbd>R</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="section" aria-pressed="false" data-on="false" data-i18n-attr="title:stage.sectionTitle;aria-label:stage.sectionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M2.5 12.5 12 7.5l9.5 5-9.5 5z" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.section"></span><kbd>C</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="connect" aria-pressed="false" data-i18n-attr="title:stage.connectTitle;aria-label:stage.connectTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15.5h18V20H3z"/><path d="M3 4h18v4.5H3z" class="cut"/><path d="M8.5 8.5v5.5M15.5 8.5v5.5"/></svg><span class="toolbar__label" data-i18n="stage.connect"></span><kbd>J</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="separate" aria-pressed="false" data-i18n-attr="title:stage.separateTitle;aria-label:stage.separateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 11 6.5 9l4 2v5l-4 2-4-2z"/><path d="M13.5 8 17.5 6l4 2v5l-4 2-4-2z" class="cut"/><path d="M10 6.5 12.5 4M11.5 18.5 14 16"/></svg><span class="toolbar__label" data-i18n="stage.separate"></span><kbd>D</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="split" aria-pressed="false" data-i18n-attr="title:stage.splitTitle;aria-label:stage.splitTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5h18v10H3z" class="cut"/><path d="M9 3.5v14M15 3.5v14" stroke-dasharray="2 2.2"/><path d="M2 20.5h8M14 20.5h8"/></svg><span class="toolbar__label" data-i18n="stage.split"></span><kbd>K</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="region" aria-pressed="false" data-i18n-attr="title:stage.regionTitle;aria-label:stage.regionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5 12 3.5l8 4v9l-8 4-8-4z"/><path d="M8.5 9.5c1.5-1.6 4.6-1.4 5.6.4 1 1.9-.6 3.1.6 4.6" class="cut"/><circle cx="16.5" cy="15.5" r="1.6" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.region"></span><kbd>X</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn toolbar__expand" type="button" id="toolbar-expand" aria-expanded="false"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg><span class="toolbar__label" data-bind="toolbarExpand"></span></button>
         </div>
         <label class="turn-step" data-i18n-attr="title:place.stepTitle"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7M20 3v5h-5"/></svg><span data-i18n="place.step">Paso</span><select id="turn-step"><option value="1">1&deg;</option><option value="5">5&deg;</option><option value="15" selected>15&deg;</option><option value="45">45&deg;</option></select></label>
+        <div class="cut-guides" role="group" data-i18n-attr="aria-label:cut.handles">
+          <span class="cut-guide-key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18m-12-6 3-3 3 3m-6 12 3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3"/></svg><span data-i18n="cut.move">Move plane</span></span>
+          <span class="cut-guide-key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7M20 3v5h-5"/></svg><span data-i18n="cut.rotate">Rotate plane</span></span>
+          <label class="cut-guide-snap"><span data-i18n="cut.snap">Snap</span><select id="cut-snap" data-i18n-attr="aria-label:cut.snap"><option value="1">1&deg;</option><option value="5">5&deg;</option><option value="15" selected>15&deg;</option><option value="45">45&deg;</option></select></label>
+        </div>
+        <div class="cut-kept"><span id="cut-side"></span><button type="button" id="cut-flip" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16m-4-4 4 4-4 4M20 16H4m4-4-4 4 4 4"/></svg><span data-i18n="cut.flip">Flip</span></button><button type="button" id="cut-both" aria-pressed="false" data-i18n="cut.bothChoice">Both</button></div>
         <div class="banner" id="fit-banner" hidden>
           <p data-bind="fitBanner"></p>
           <button class="btn btn--quiet btn--sm" type="button" id="fit" data-i18n="size.fit">Ajustar a la placa</button>
@@ -293,6 +338,16 @@
           <input class="range" id="radius" type="range" min="0.5" max="20" step="0.5" value="3">
           <output for="radius" class="num" data-bind="radiusOut">3&nbsp;mm</output>
         </div>
+        <div class="place" data-for="bucket">
+          <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:bucket.mode">
+            <button type="button" data-bucket-mode="region" aria-pressed="true" data-i18n="bucket.region">Solo esta zona</button>
+            <button type="button" data-bucket-mode="all" aria-pressed="false" data-i18n="bucket.all">Todo el modelo</button>
+          </div>
+          <label class="check" data-i18n-attr="title:bucket.addHelp"><input type="checkbox" id="bucket-add"> <span data-i18n="bucket.add">Como color nuevo</span></label>
+          <p class="bucket__pick" data-bind="bucketPick" aria-live="polite"></p>
+          <button class="btn btn--primary btn--sm" type="button" id="bucket-apply" disabled data-i18n="bucket.apply">Aplicar</button>
+          <button class="btn btn--quiet btn--sm" type="button" id="bucket-cancel" disabled data-i18n="common.cancel">Cancelar</button>
+        </div>
         <div class="place" data-for="move">
           <span class="num" data-bind="placeOffset"></span>
           <button class="btn btn--quiet btn--sm" type="button" id="place-centre" data-i18n="place.centre">Centrar en la placa</button>
@@ -304,57 +359,163 @@
           <button class="btn btn--quiet btn--sm" type="button" data-turn="2">Z</button>
           <button class="btn btn--quiet btn--sm" type="button" id="rotate-reset" data-i18n="place.resetRotation">Orientación original</button>
         </div>
-        <div class="place" data-for="section">
-          <div class="place__group">
-            <div class="seg seg--sm" role="group" aria-label="Eje del corte" data-i18n-attr="aria-label:cut.axis">
-              <button type="button" data-cut-axis="0" aria-pressed="false">X</button>
-              <button type="button" data-cut-axis="1" aria-pressed="false">Y</button>
-              <button type="button" data-cut-axis="2" aria-pressed="true">Z</button>
+        <div class="cut-controls" id="cut-controls" aria-label="Cut plane" data-i18n-attr="aria-label:cut.title">
+          <div class="cut-controls__top">
+            <div class="cut-presets"><span data-i18n="cut.axis">Plane</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:cut.axis"><button type="button" data-cut-axis="0" aria-pressed="false">X</button><button type="button" data-cut-axis="1" aria-pressed="false">Y</button><button type="button" data-cut-axis="2" aria-pressed="true">Z</button><button type="button" data-cut-axis="3" aria-pressed="false">45&deg;</button></div></div>
+            <div class="cut-depth"><label class="visually-hidden" for="cut-pos" data-i18n="cut.position">Position</label><input class="range" id="cut-pos" type="range" min="0" max="100" step="0.1" value="50"><output id="cut-depth-value" for="cut-pos">0 mm</output></div>
+            <button class="cut-action" type="button" id="cut-reset" data-i18n-attr="title:cut.reset;aria-label:cut.reset"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 8M4 4v6h6"/></svg></button>
+            <button class="cut-action" type="button" id="cut-undo" disabled data-i18n-attr="title:cut.undo;aria-label:cut.undo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h10a6 6 0 0 1 0 12M4 9l5-5m-5 5 5 5"/></svg></button>
+          </div>
+          <div class="cut-controls__values"><fieldset class="cut-values"><legend data-i18n="cut.point">point</legend><div><label class="cut-value" data-axis="x"><span>X</span><input id="cut-x" type="number" step="0.1" value="0" aria-label="X (mm)"></label><label class="cut-value" data-axis="y"><span>Y</span><input id="cut-y" type="number" step="0.1" value="0" aria-label="Y (mm)"></label><label class="cut-value" data-axis="z"><span>Z</span><input id="cut-z" type="number" step="0.1" value="0" aria-label="Z (mm)"></label></div></fieldset><fieldset class="cut-values"><legend data-i18n="cut.rotation">rotation</legend><div><label class="cut-value" data-axis="x"><span>X</span><input id="cut-rx" type="number" step="0.1" value="0" aria-label="X (&deg;)"></label><label class="cut-value" data-axis="y"><span>Y</span><input id="cut-ry" type="number" step="0.1" value="0" aria-label="Y (&deg;)"></label><label class="cut-value" data-axis="z"><span>Z</span><input id="cut-rz" type="number" step="0.1" value="0" aria-label="Z (&deg;)"></label></div></fieldset></div>
+          <div class="cut-controls__foot">
+            <div class="cut-controls__options">
+              <button class="link" type="button" id="cut-pick-part" aria-pressed="false" data-i18n="cut.pickPart" data-i18n-attr="title:cut.scope">Select in viewport</button>
+              <label class="check" data-i18n-attr="title:cut.keepOtherHelp"><input type="checkbox" id="cut-keep-other"><span data-i18n="cut.keepOther">Both halves</span></label>
+              <label class="check" data-i18n-attr="title:cut.layHelp"><input type="checkbox" id="cut-lay"><span data-i18n="cut.lay">Lay on cut</span></label>
+              <details class="cut-parts" id="cut-parts"><summary data-i18n-attr="title:cut.selectHelp"><span data-i18n="cut.target">Parts</span><span id="cut-target-count"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></summary><div class="cut-parts__menu"><label for="cut-target" data-i18n="cut.target">Parts</label><select id="cut-target" multiple size="4" data-i18n-attr="aria-label:cut.target"></select><p data-i18n="cut.selectHelp">Hold Ctrl to select several parts.</p></div></details>
             </div>
-            <input class="range" id="cut-pos" type="range" min="0" max="100" step="0.5" value="50" aria-label="Posición del corte" data-i18n-attr="aria-label:cut.position">
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-flip" aria-pressed="false" data-i18n="cut.flip">Invertir</button>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Apply cut</button></div>
           </div>
-          <div class="place__group">
-            <label class="check" data-i18n-attr="title:cut.keepOtherHelp"><input type="checkbox" id="cut-keep-other"> <span data-i18n="cut.keepOther">Conservar la otra parte</span></label>
-            <button class="btn btn--primary btn--sm" type="button" id="cut-apply" data-i18n="cut.apply">Cortar aquí</button>
+          <p class="cut-review"><span id="cut-extents"></span><span id="cut-status" role="status" aria-live="polite"></span></p>
+        </div>
+        <div class="spl-controls" id="spl-controls" aria-labelledby="spl-title">
+          <div class="spl-head">
+            <h3 class="spl-title" id="spl-title" data-i18n="spl.title">Split for the printer</h3>
+            <span class="spl-room" id="spl-room"></span>
+            <button class="link" type="button" id="spl-scale" data-i18n="spl.scaleInstead" data-i18n-attr="title:spl.scaleHelp">Shrink to fit instead</button>
           </div>
-          <div class="place__group">
-            <label class="joint-kind" data-i18n-attr="title:joint.help"><span data-i18n="joint.label">Conectores</span>
-              <select class="select select--sm" id="joint-kind">
-                <option value="none" data-i18n="joint.none">Ninguno</option>
-                <option value="plug" selected data-i18n="joint.plug">Espiga y agujero</option>
-                <option value="dowel" data-i18n="joint.dowel">Pasadores</option>
-              </select>
-            </label>
-            <details class="joint" id="joint-details">
-              <summary class="btn btn--quiet btn--sm" data-i18n="joint.settings">Ajustes</summary>
-              <div class="joint__panel">
-                <label class="field"><span data-i18n="joint.shape">Forma</span>
-                  <select class="select" id="joint-shape">
-                    <option value="circle" data-i18n="joint.circle">Redonda</option>
-                    <option value="square" data-i18n="joint.square">Cuadrada</option>
-                    <option value="hexagon" data-i18n="joint.hexagon">Hexagonal</option>
-                  </select>
-                </label>
-                <label class="field"><span data-i18n="joint.size">Ancho</span><span class="field__unit"><input class="input" id="joint-size" type="number" min="1" max="50" step="0.5" value="6"><span>mm</span></span></label>
-                <label class="field"><span data-i18n="joint.depth">Profundidad</span><span class="field__unit"><input class="input" id="joint-depth" type="number" min="0.5" max="50" step="0.5" value="5"><span>mm</span></span></label>
-                <label class="field" data-i18n-attr="title:joint.toleranceHelp"><span data-i18n="joint.tolerance">Holgura por lado</span><span class="field__unit"><input class="input" id="joint-tolerance" type="number" min="0" max="1" step="0.05" value="0.15"><span>mm</span></span></label>
-                <label class="field"><span data-i18n="joint.count">Por cara</span>
-                  <select class="select" id="joint-count">
-                    <option value="0" selected data-i18n="joint.auto">Automático</option>
-                    <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
-                  </select>
-                </label>
-                <p class="help" data-i18n="joint.note">La espiga sale de la pieza que se ve y entra en la otra. Los pasadores salen como objetos aparte.</p>
+          <div class="spl-axes" role="group" data-i18n-attr="aria-label:spl.cuts">
+            <div class="spl-axis" data-axis="0"><span class="spl-axis__name">X</span><button class="cut-action" type="button" data-spl-less="0" data-i18n-attr="title:spl.less;aria-label:spl.less">&minus;</button><output class="spl-axis__count" data-spl-count="0">0</output><button class="cut-action" type="button" data-spl-more="0" data-i18n-attr="title:spl.more;aria-label:spl.more">+</button><div class="spl-axis__at" data-spl-at="0"></div></div>
+            <div class="spl-axis" data-axis="1"><span class="spl-axis__name">Y</span><button class="cut-action" type="button" data-spl-less="1" data-i18n-attr="title:spl.less;aria-label:spl.less">&minus;</button><output class="spl-axis__count" data-spl-count="1">0</output><button class="cut-action" type="button" data-spl-more="1" data-i18n-attr="title:spl.more;aria-label:spl.more">+</button><div class="spl-axis__at" data-spl-at="1"></div></div>
+            <div class="spl-axis" data-axis="2"><span class="spl-axis__name">Z</span><button class="cut-action" type="button" data-spl-less="2" data-i18n-attr="title:spl.less;aria-label:spl.less">&minus;</button><output class="spl-axis__count" data-spl-count="2">0</output><button class="cut-action" type="button" data-spl-more="2" data-i18n-attr="title:spl.more;aria-label:spl.more">+</button><div class="spl-axis__at" data-spl-at="2"></div></div>
+          </div>
+          <div class="spl-options">
+            <div class="spl-option"><span data-i18n="spl.orientation">Pieces</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:spl.orientation"><button type="button" id="spl-keep" aria-pressed="true" data-i18n="spl.keep" data-i18n-attr="title:spl.keepHelp">As the model stands</button><button type="button" id="spl-lay" aria-pressed="false" data-i18n="spl.lay" data-i18n-attr="title:spl.layHelp">On a cut face</button></div></div>
+            <label class="cut-value spl-value" data-i18n-attr="title:spl.gapHelp"><span data-i18n="spl.gap">Gap</span><input id="spl-gap" type="number" inputmode="decimal" min="0" max="50" step="1" value="5"><i aria-hidden="true">mm</i></label>
+            <label class="check" data-i18n-attr="title:spl.dowelsHelp"><input type="checkbox" id="spl-dowels"><span data-i18n="spl.dowels">Dowels at joints</span></label>
+            <span class="spl-dowel" id="spl-dowel-fields" hidden><label class="cut-value spl-value"><span>&Oslash;</span><input id="spl-dsize" type="number" inputmode="decimal" min="1" max="50" step="0.5" value="5" data-i18n-attr="aria-label:con.diameter"><i aria-hidden="true">mm</i></label><label class="cut-value spl-value"><span data-i18n="con.depth">Depth</span><input id="spl-ddepth" type="number" inputmode="decimal" min="1" max="100" step="0.5" value="6"><i aria-hidden="true">mm</i></label><label class="cut-value spl-value" data-i18n-attr="title:con.clearanceHelp"><span data-i18n="con.clearance">Clearance</span><input id="spl-dclear" type="number" inputmode="decimal" min="0" max="2" step="0.05" value="0.2"><i aria-hidden="true">mm</i></label></span>
+          </div>
+          <div class="spl-result">
+            <p class="spl-summary" id="spl-summary" role="status" aria-live="polite"></p>
+            <div class="spl-table" id="spl-table" role="region" data-i18n-attr="aria-label:spl.pieces" tabindex="-1"><table class="spl-list"><thead><tr><th scope="col" data-i18n="spl.piece">Piece</th><th scope="col" data-i18n="sep.size">Size</th><th scope="col" data-i18n="spl.plate">Plate</th><th scope="col" data-i18n="spl.notes">Notes</th></tr></thead><tbody id="spl-rows"></tbody></table></div>
+          </div>
+          <div class="spl-foot">
+            <button class="btn btn--quiet btn--sm" type="button" id="spl-reset" data-i18n="spl.reset" data-i18n-attr="title:spl.resetHelp">Propose again</button>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="spl-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="spl-apply" disabled data-i18n="spl.apply">Split</button></div>
+          </div>
+        </div>
+        <div class="con-controls" id="con-controls" aria-labelledby="con-title">
+          <div class="con-head">
+            <h3 class="con-title" id="con-title" data-i18n="con.title">Connectors</h3>
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:con.kind"><button type="button" data-con-kind="pin" aria-pressed="true" data-i18n="con.pin" data-i18n-attr="title:con.pinHelp">Pin and socket</button><button type="button" data-con-kind="dowel" aria-pressed="false" data-i18n="con.dowel" data-i18n-attr="title:con.dowelHelp">Loose dowel</button></div>
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:con.shape"><button type="button" data-con-shape="round" aria-pressed="true" data-i18n="con.round">Round</button><button type="button" data-con-shape="square" aria-pressed="false" data-i18n="con.square">Square</button><button type="button" data-con-shape="hexagon" aria-pressed="false" data-i18n="con.hexagon">Hexagonal</button></div>
+            <div class="con-pins" id="con-pins"><span data-i18n="con.pinsOn">Pins on</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:con.pinsOn"><button type="button" data-con-pins="a" aria-pressed="true">A</button><button type="button" data-con-pins="b" aria-pressed="false">B</button></div></div>
+          </div>
+          <div class="con-values">
+            <label class="cut-value con-value"><span id="con-size-label" data-i18n="con.diameter">Diameter</span><input id="con-size" type="number" inputmode="decimal" min="1" max="50" step="0.1" value="5"><i aria-hidden="true">mm</i></label>
+            <label class="cut-value con-value" data-i18n-attr="title:con.depthHelp"><span data-i18n="con.depth">Depth</span><input id="con-depth" type="number" inputmode="decimal" min="1" max="100" step="0.5" value="6"><i aria-hidden="true">mm</i></label>
+            <label class="cut-value con-value" data-i18n-attr="title:con.clearanceHelp"><span data-i18n="con.clearance">Clearance</span><input id="con-clearance" type="number" inputmode="decimal" min="0" max="2" step="0.05" value="0.2"><i aria-hidden="true">mm</i></label>
+            <label class="cut-value con-value" id="con-angle-field" hidden><span data-i18n="con.angle">Turn</span><input id="con-angle" type="number" inputmode="decimal" min="-360" max="360" step="5" value="0"><i aria-hidden="true">&deg;</i></label>
+            <p class="con-socket" id="con-socket"></p>
+          </div>
+          <div class="con-foot">
+            <div class="con-placed"><span class="con-count" id="con-count"></span><div class="con-list" id="con-list" role="group" data-i18n-attr="aria-label:con.placed"></div><button class="btn btn--quiet btn--sm" type="button" id="con-auto" data-i18n="con.auto" data-i18n-attr="title:con.autoHelp">Place automatically</button><button class="link" type="button" id="con-clear" data-i18n="con.clear">Remove all</button></div>
+            <label class="check" id="con-lay-field" hidden data-i18n-attr="title:con.layHelp"><input type="checkbox" id="con-lay"><span data-i18n="cut.lay">Lay on cut</span></label>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="con-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="con-apply" disabled data-i18n="con.apply">Cut with connectors</button></div>
+          </div>
+          <p class="con-status" id="con-status" role="status" aria-live="polite"></p>
+        </div>
+        <div class="sep-controls" id="sep-controls" aria-labelledby="sep-title">
+          <div class="sep-head">
+            <h3 class="sep-title" id="sep-title" data-i18n="sep.title">Pieces</h3>
+            <span class="sep-count" id="sep-count" role="status"></span>
+            <div class="sep-place"><span data-i18n="sep.place">New objects</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:sep.place"><button type="button" id="sep-assembled" aria-pressed="true" data-i18n="sep.assembled">Where they are</button><button type="button" id="sep-flat" aria-pressed="false" data-i18n="sep.flat">On the plate</button></div></div>
+            <label class="sep-weld" data-i18n-attr="title:sep.weldHelp"><span data-i18n="sep.weld">Join corners closer than</span><span class="unit-input"><input class="input" id="sep-weld" type="number" inputmode="decimal" min="0" max="5" step="0.01" value="0.01"><span aria-hidden="true">mm</span></span></label>
+            <button class="cut-action" type="button" id="sep-detect" data-i18n-attr="title:sep.detect;aria-label:sep.detect"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 8M4 4v6h6"/></svg></button>
+          </div>
+          <div class="sep-table" role="region" aria-labelledby="sep-title" tabindex="-1"><table class="sep-list"><thead><tr><th scope="col"><input type="checkbox" id="sep-all" data-i18n-attr="aria-label:sep.selectAll"></th><th scope="col" data-i18n="sep.piece">Piece</th><th scope="col" data-i18n="sep.size">Size</th><th scope="col" data-i18n="sep.surface">Surface</th><th scope="col" data-i18n="sep.goes">Becomes</th></tr></thead><tbody id="sep-rows"></tbody></table></div>
+          <div class="sep-foot">
+            <div class="sep-batch" role="group" data-i18n-attr="aria-label:sep.batch">
+              <span class="sep-batch__label" id="sep-picked"></span>
+              <button class="btn btn--quiet btn--sm" type="button" id="sep-group" data-i18n="sep.group">Join into one object</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="sep-split" data-i18n="sep.each">One object each</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="sep-keep" data-i18n="sep.keep">Leave in the model</button>
+            </div>
+            <details class="sep-proposals" id="sep-proposals">
+              <summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16M12 4v3m0 10v3"/><path d="M7 7.5 4 12l3 4.5M17 7.5l3 4.5-3 4.5"/></svg><span data-i18n="sep.proposals">Cut proposals</span><svg class="sep-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 14 4-4 4 4"/></svg></summary>
+              <div class="sep-proposals__menu">
+                <p class="sep-note" data-i18n="sep.proposalsHelp">Suggestions to review, read from where the model narrows and where its colour changes. Nothing is cut until you confirm it in the Section tool.</p>
+                <div class="sep-proposals__run"><button class="btn btn--quiet btn--sm" type="button" id="sep-propose" data-i18n="sep.propose">Find proposals</button><span id="sep-propose-status" role="status"></span></div>
+                <ol class="sep-proposal-list" id="sep-proposal-list"></ol>
               </div>
             </details>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="sep-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="sep-apply" data-i18n="sep.apply" data-i18n-attr="title:sep.applyHelp">Separate</button></div>
           </div>
-          <div class="place__group">
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-fit" data-i18n="fit.apply" data-i18n-attr="title:fit.help">Dividir para que quepa</button>
+          <p class="sep-status" id="sep-status" role="status" aria-live="polite"></p>
+        </div>
+        <div class="reg-controls" id="reg-controls" aria-labelledby="reg-title">
+          <h3 class="visually-hidden" id="reg-title" data-i18n="reg.title">Region</h3>
+          <section class="reg-row" aria-labelledby="reg-step1">
+            <h4 class="reg-label" id="reg-step1"><span class="reg-step__n" aria-hidden="true">1</span><span data-i18n="reg.step1">Select the area</span></h4>
+            <span class="reg-chip" id="reg-count" role="status"></span>
+            <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.pickWith">
+              <button type="button" id="reg-by-brush" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20c2.5 0 4-1.5 4-4 0-1.4 1-2.5 2.4-2.5S13 14.6 13 16c0 2.8-3 4-9 4z"/><path d="m12 13 8-8"/></svg><span data-i18n="reg.byBrush">Brush</span></button>
+              <button type="button" id="reg-by-colour" aria-pressed="false" data-i18n-attr="title:reg.byColourHelp"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5c3.5 4 6 7 6 10a6 6 0 0 1-12 0c0-3 2.5-6 6-10z"/></svg><span data-i18n="reg.byColour">By colour</span></button>
+            </div>
+            <div class="reg-opts" data-reg-brush>
+              <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.mode"><button type="button" id="reg-add" aria-pressed="true" data-i18n="reg.add">Select</button><button type="button" id="reg-erase" aria-pressed="false" data-i18n="reg.erase" data-i18n-attr="title:reg.eraseHelp">Erase</button></div>
+              <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.reach"><button type="button" id="reg-visible" aria-pressed="true" data-i18n="reg.visible" data-i18n-attr="title:reg.visibleHelp">Visible faces</button><button type="button" id="reg-through" aria-pressed="false" data-i18n="reg.through" data-i18n-attr="title:reg.throughHelp">Through</button></div>
+              <label class="reg-field reg-range"><span data-i18n="stage.radius">Radius</span><input class="range" id="reg-radius" type="range" min="0.5" max="20" step="0.5" value="3"><output class="num" id="reg-radius-out" for="reg-radius">3 mm</output></label>
+            </div>
+            <div class="reg-opts" data-reg-colour hidden>
+              <label class="reg-field"><span data-i18n="reg.match">Same</span><select class="sep-goes" id="reg-match"><option value="filament" data-i18n="reg.matchFilament">filament</option><option value="material" data-i18n="reg.matchMaterial">original material</option><option value="similar" data-i18n="reg.matchSimilar">similar colour</option></select></label>
+              <label class="reg-field reg-range" id="reg-tolerance-row" hidden><span data-i18n="reg.tolerance" data-i18n-attr="title:reg.toleranceHelp">Tolerance ΔE</span><input class="range" id="reg-tolerance" type="range" min="1" max="60" step="1" value="10"><output class="num" id="reg-tolerance-out" for="reg-tolerance">10</output></label>
+              <label class="check"><input type="checkbox" id="reg-contiguous"><span data-i18n="reg.contiguous" data-i18n-attr="title:reg.contiguousHelp">Only joined</span></label>
+              <button class="reg-flag" type="button" id="reg-refine" hidden data-i18n-attr="title:reg.refineHelp"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20 20 4M4 12l8-8M12 20l8-8"/></svg><span id="reg-refine-note"></span></button>
+            </div>
+            <div class="reg-tools" role="group" data-i18n-attr="aria-label:reg.tools">
+              <button class="reg-tool" type="button" data-reg-op="grow" data-i18n-attr="title:reg.growHelp;aria-label:reg.grow"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="8" height="8" rx="1"/><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+              <button class="reg-tool" type="button" data-reg-op="smooth" data-i18n-attr="title:reg.smoothHelp;aria-label:reg.smooth"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c3-6 6 2 9-3s6 1 9-3"/></svg></button>
+              <button class="reg-tool" type="button" data-reg-op="connected" data-i18n-attr="title:reg.connectedHelp;aria-label:reg.connected"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8 12 4l8 4v8l-8 4-8-4z"/><path d="m4 8 8 4 8-4M12 12v8"/></svg></button>
+              <button class="reg-tool" type="button" data-reg-op="invert" data-i18n-attr="title:reg.invertHelp;aria-label:reg.invert"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" class="fill"/></svg></button>
+              <button class="reg-tool" type="button" data-reg-op="clear" data-i18n-attr="title:reg.clearHelp;aria-label:reg.clear"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg></button>
+            </div>
+          </section>
+          <div class="reg-row">
+            <fieldset class="reg-group" id="reg-step2" disabled>
+              <legend class="reg-label"><span class="reg-step__n" aria-hidden="true">2</span><span data-i18n="reg.step2">What to do</span></legend>
+              <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.action">
+                <button type="button" id="reg-extract" aria-pressed="true" data-i18n-attr="title:reg.extractDesc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18v-7h-6v-2H9v2H3z"/><path d="M12 9V3m-3 3 3-3 3 3" class="accent"/></svg><span data-i18n="reg.extract">Extract</span></button>
+                <button type="button" id="reg-remove" aria-pressed="false" data-i18n-attr="title:reg.removeDesc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18v-7h-6v-2H9v2H3z"/><path d="m9 3 6 6m0-6-6 6" class="accent"/></svg><span data-i18n="reg.remove">Remove</span></button>
+              </div>
+            </fieldset>
+            <fieldset class="reg-group" id="reg-step3" disabled>
+              <legend class="reg-label"><span class="reg-step__n" aria-hidden="true">3</span><span data-i18n="reg.step3">Close with</span></legend>
+              <div class="seg seg--sm" role="group" data-i18n-attr="aria-label:reg.closure">
+                <button type="button" id="reg-shell" aria-pressed="true" data-i18n-attr="title:reg.shellDesc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v14H3z"/><path d="M8 6v4h8V6" class="fill"/><path d="M8 10h8" class="accent"/></svg><span data-i18n="reg.shellTitle">Shell</span></button>
+                <button type="button" id="reg-cap" aria-pressed="false" data-i18n-attr="title:reg.capDesc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v14H3z"/><path d="m8 6 4 6 4-6" class="fill"/><path d="m8 6 4 6 4-6" class="accent"/></svg><span data-i18n="reg.capTitle">Cap</span></button>
+              </div>
+              <label class="reg-field reg-range"><span id="reg-mm-label"></span><input class="range" id="reg-mm-range" type="range" min="0.4" max="10" step="0.1" value="2" aria-hidden="true" tabindex="-1"><span class="unit-input"><input class="input" id="reg-mm" type="number" inputmode="decimal" min="0.1" max="50" step="0.1" value="2"><span aria-hidden="true">mm</span></span></label>
+              <details class="reg-more" id="reg-more">
+                <summary data-i18n-attr="title:reg.more"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg><span data-i18n="reg.more">More</span></summary>
+                <div class="reg-more__menu">
+                  <label class="reg-field" id="reg-clearance-row"><span data-i18n="reg.clearance">Clearance</span><span class="unit-input"><input class="input" id="reg-clearance" type="number" inputmode="decimal" min="0" max="5" step="0.05" value="0"><span aria-hidden="true">mm</span></span></label>
+                  <p class="reg-note" id="reg-clearance-note" data-i18n="reg.clearanceHelp"></p>
+                  <div class="reg-field" id="reg-place"><span data-i18n="sep.place">New objects</span><div class="seg seg--sm" role="group" data-i18n-attr="aria-label:sep.place"><button type="button" id="reg-assembled" aria-pressed="true" data-i18n="sep.assembled">Where they are</button><button type="button" id="reg-flat" aria-pressed="false" data-i18n="reg.flat" data-i18n-attr="title:reg.flatHelp">On the plate</button></div></div>
+                  <label class="check" id="reg-group-row"><input type="checkbox" id="reg-group"><span data-i18n="reg.group">One object</span></label>
+                  <p class="reg-note" id="reg-group-note" data-i18n="reg.groupHelp"></p>
+                </div>
+              </details>
+            </fieldset>
           </div>
-          <div class="place__group">
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-undo" disabled data-i18n="cut.undo">Deshacer corte</button>
-            <button class="btn btn--quiet btn--sm" type="button" id="cut-off" data-i18n="cut.off">Quitar corte</button>
+          <div class="reg-row reg-foot">
+            <div class="reg-result">
+              <div class="reg-summary" id="reg-summary"></div>
+              <p class="sep-status" id="reg-status" role="status" aria-live="polite"></p>
+              <div class="reg-fixes" id="reg-fixes"></div>
+            </div>
+            <div class="seg seg--sm" role="group" id="reg-view" data-i18n-attr="aria-label:reg.view"><button type="button" id="reg-together" aria-pressed="true" data-i18n="reg.together">Together</button><button type="button" id="reg-apart" aria-pressed="false" data-i18n="reg.apart" data-i18n-attr="title:reg.apartHelp">Apart</button></div>
+            <div class="cut-controls__actions"><button class="btn btn--quiet btn--sm" type="button" id="reg-off" data-i18n="cut.cancel">Cancel</button><button class="btn btn--primary btn--sm" type="button" id="reg-apply" data-i18n-attr="title:reg.applyHelp">Apply</button></div>
           </div>
         </div>
         <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
@@ -406,6 +567,15 @@
         <select class="select" id="lang" aria-describedby="lang-help"></select>
         <p class="help" id="lang-help" data-i18n="prefs.langHelp">Se aplica al momento y se recuerda la próxima vez que abras BlendParser.</p>
       </div>
+      <div class="field">
+        <label for="thumb-angle" data-i18n="prefs.thumb">Miniatura del 3MF</label>
+        <select class="select" id="thumb-angle" aria-describedby="thumb-help">
+          <option value="iso" data-i18n="prefs.thumbIso">Tres cuartos</option>
+          <option value="front" data-i18n="prefs.thumbFront">De frente</option>
+          <option value="current" data-i18n="prefs.thumbCurrent">Como se ve ahora</option>
+        </select>
+        <p class="help" id="thumb-help" data-i18n="prefs.thumbHelp"></p>
+      </div>
       <div class="dialog__actions">
         <button class="btn btn--primary" type="submit" value="close" data-i18n="common.close">Cerrar</button>
       </div>
@@ -446,19 +616,118 @@
     </form>
   </dialog>
 
-  <dialog class="dialog" id="zip-dialog" aria-labelledby="h-zip">
+  <dialog class="dialog dialog--wide" id="zip-dialog" aria-labelledby="h-zip">
     <form method="dialog" class="dialog__body">
       <h2 id="h-zip" data-i18n="zip.title">Exportar por color</h2>
-      <p class="help" data-i18n="zip.help">Un STL cerrado por color en un .zip, para imprimir cada color como pieza aparte.</p>
+      <p class="help" data-i18n="zip.help"></p>
+      <div class="field">
+        <label for="voxel" data-i18n="zip.detail">Detalle de las uniones</label>
+        <select class="select" id="voxel">
+          <option value="0.3" data-i18n="zip.detailFine">Fino, 0,3 mm (más lento)</option>
+          <option value="0.5" selected data-i18n="zip.detailNormal">Normal, 0,5 mm</option>
+          <option value="0.8" data-i18n="zip.detailFast">Rápido, 0,8 mm</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="depth" data-i18n="zip.depth">Profundidad de cada color</label>
+        <div class="field__unit"><input class="input" id="depth" type="number" inputmode="decimal" min="0" max="50" step="0.5" value="0" aria-describedby="depth-help"><span>mm</span></div>
+        <p class="help" id="depth-help" data-i18n="zip.depthHelp"></p>
+      </div>
+      <div class="field" id="core-field">
+        <label for="core" data-i18n="zip.core">Color del núcleo</label>
+        <select class="select" id="core"></select>
+      </div>
+      <div class="field">
+        <label for="min-piece" data-i18n="zip.minPiece">Unir piezas menores de</label>
+        <div class="field__unit"><input class="input" id="min-piece" type="number" inputmode="decimal" min="0" max="10000" step="5" value="30" aria-describedby="min-piece-help"><span>mm³</span></div>
+        <p class="help" id="min-piece-help" data-i18n="zip.minPieceHelp"></p>
+      </div>
+      <div class="zip-mix">
+        <label class="check"><input type="checkbox" id="zip-pins" aria-describedby="zip-pins-help"> <span data-i18n="zip.pins">Espigas para encajar las piezas</span></label>
+        <p class="help" id="zip-pins-help" data-i18n="zip.pinsHelp"></p>
+        <div class="zip-pins" id="pin-sizes" hidden>
+          <div class="field">
+            <label for="pin-diameter" data-i18n="zip.pinDiameter">Diámetro</label>
+            <div class="field__unit"><input class="input" id="pin-diameter" type="number" inputmode="decimal" min="2" max="20" step="0.5" value="5"><span>mm</span></div>
+          </div>
+          <div class="field">
+            <label for="pin-depth" data-i18n="zip.pinDepth">Alto</label>
+            <div class="field__unit"><input class="input" id="pin-depth" type="number" inputmode="decimal" min="1" max="20" step="0.5" value="4"><span>mm</span></div>
+          </div>
+          <div class="field">
+            <label for="pin-clearance" data-i18n="zip.pinClearance">Holgura</label>
+            <div class="field__unit"><input class="input" id="pin-clearance" type="number" inputmode="decimal" min="0" max="1" step="0.05" value="0.15"><span>mm</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="zip-mix">
+        <label class="check"><input type="checkbox" id="zip-mix" aria-describedby="zip-mix-help"> <span data-i18n="zip.mix">Mezclar colores en una placa</span></label>
+        <p class="help" id="zip-mix-help" data-i18n="zip.mixHelp"></p>
+      </div>
+      <fieldset class="zip-contents" aria-describedby="zip-error">
+        <legend data-i18n="zip.contents">Qué incluir</legend>
+        <label class="check"><input type="checkbox" id="zip-3mf" checked> <span data-i18n="zip.threeMf">3MF con las piezas en sus placas</span></label>
+        <label class="check"><input type="checkbox" id="zip-guide" checked> <span data-i18n="zip.guide">Guía de armado con imágenes (HTML)</span></label>
+        <label class="check"><input type="checkbox" id="zip-text" checked> <span data-i18n="zip.text">Pasos en texto (TXT)</span></label>
+        <div class="field">
+          <label for="zip-stl" data-i18n="zip.stl">Archivos STL</label>
+          <select class="select" id="zip-stl">
+            <option value="piece" data-i18n="zip.stlPiece">Uno por pieza</option>
+            <option value="colour" data-i18n="zip.stlColour">Uno por color, con sus piezas armadas</option>
+            <option value="none" data-i18n="zip.stlNone">Ninguno</option>
+          </select>
+        </div>
+      </fieldset>
+      <div class="field" id="zip-quality-field">
+        <label for="zip-quality" data-i18n="zip.quality">Calidad de las imágenes</label>
+        <select class="select" id="zip-quality" aria-describedby="zip-estimate">
+          <option value="low" data-i18n="zip.qualityLow">Baja: más ligera</option>
+          <option value="medium" selected data-i18n="zip.qualityMedium">Media</option>
+          <option value="high" data-i18n="zip.qualityHigh">Alta: más nítida</option>
+        </select>
+        <p class="help" id="zip-estimate" aria-live="polite"></p>
+      </div>
+      <p class="form-error" id="zip-error" role="alert" hidden data-i18n="zip.nothing"></p>
+      <details>
+        <summary data-i18n="zip.shells">Cáscaras por color</summary>
       <div class="field">
         <label for="shell" data-i18n="zip.thickness">Grosor de cada color</label>
-        <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2" aria-describedby="shell-help"><span>mm</span></div>
-        <p class="help" id="shell-help" data-bind="shellHelp"></p>
+        <div class="field__unit"><input class="input" id="shell" type="number" inputmode="decimal" min="0.2" max="20" step="0.2" value="1.2"><span>mm</span></div>
       </div>
-      <label class="check"><input type="checkbox" id="main-solid" checked> <span data-i18n="zip.mainSolid">Color principal como sólido completo</span></label>
+      <label class="check"><input type="checkbox" id="main-solid" checked> <span data-i18n="zip.mainSolid">Color principal como cuerpo con huecos donde encajan los demás</span></label>
+        <div class="dialog__actions">
+          <button class="btn" type="button" id="export-color-shells" data-i18n="zip.exportShells">Exportar cáscaras en ZIP</button>
+          <button class="btn" type="button" id="export-color-assembly" data-i18n="zip.exportAssembly">Exportar conjunto 3MF</button>
+        </div>
+      </details>
       <div class="dialog__actions">
         <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
         <button class="btn btn--primary" type="button" id="export-zip" data-i18n="zip.export">Exportar .zip</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="kit-progress" aria-labelledby="h-kit-progress">
+    <div class="dialog__body">
+      <h2 id="h-kit-progress" data-i18n="zip.progressTitle">Exportando por color</h2>
+      <p id="kit-stage" aria-live="polite"></p>
+      <div class="meter" role="progressbar" aria-labelledby="kit-stage" aria-valuemin="0" aria-valuemax="100" id="kit-meter"><span></span></div>
+      <p class="help" data-i18n="zip.progressHelp"></p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="button" id="kit-cancel" data-i18n="zip.cancel">Cancelar exportación</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="pieces-dialog" aria-labelledby="h-pieces">
+    <form method="dialog" class="dialog__body">
+      <h2 id="h-pieces" data-i18n="export.piecesTitle">Piezas a exportar</h2>
+      <p class="help" data-i18n="export.piecesHelp"></p>
+      <fieldset class="pieces" id="pieces-list" aria-labelledby="h-pieces"></fieldset>
+      <p class="form-error" id="pieces-error" role="alert" hidden data-i18n="export.piecesNone"></p>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="submit" value="cancel" data-i18n="common.cancel">Cancelar</button>
+        <button class="btn btn--primary" type="button" id="export-pieces" data-i18n="export.label">Exportar .3mf</button>
       </div>
     </form>
   </dialog>
@@ -541,6 +810,48 @@
         <button class="btn btn--primary" type="submit" id="waste-save" data-i18n="wasteForm.save"></button>
       </footer>
     </form>
+  </dialog>
+
+  <dialog class="dialog dialog--wide dialog--sheet" id="filaments-dialog" aria-labelledby="h-filaments">
+    <div class="sheet">
+      <header class="sheet__head">
+        <h2 id="h-filaments" data-i18n="filaments.title">Mis filamentos</h2>
+        <p class="help" data-i18n="filaments.help"></p>
+        <label class="check"><input type="checkbox" id="inventory-only"> <span data-i18n="filaments.inventoryOnly"></span></label>
+        <input class="input" id="filament-search" type="search" autocomplete="off" spellcheck="false" data-i18n-attr="placeholder:filaments.search;aria-label:filaments.search">
+      </header>
+      <div class="sheet__body">
+        <div class="filaments" id="filament-list"></div>
+        <form class="sheet__section filament-form" id="filament-form" novalidate>
+          <h3 data-i18n="filaments.addTitle">Añadir uno propio</h3>
+          <div class="filament-form__grid">
+            <div class="field"><label for="ff-brand" data-i18n="filaments.brand">Marca</label><input class="input" id="ff-brand" maxlength="40" autocomplete="off"></div>
+            <div class="field"><label for="ff-kind" data-i18n="filaments.kind">Línea</label><input class="input" id="ff-kind" maxlength="40" autocomplete="off" list="ff-kinds" placeholder="PLA Matte"><datalist id="ff-kinds"></datalist></div>
+            <div class="field"><label for="ff-name" data-i18n="filaments.name">Color</label><input class="input" id="ff-name" maxlength="60" autocomplete="off"></div>
+            <div class="field"><label for="ff-hex" data-i18n="filaments.hex">Muestra</label><input class="input filament-form__hex" id="ff-hex" type="color" value="#808080"></div>
+          </div>
+          <p class="form-error" id="filament-error" role="alert" hidden></p>
+          <div><button class="btn btn--quiet btn--sm" type="submit" data-i18n="filaments.add">Añadir a mis filamentos</button></div>
+        </form>
+      </div>
+      <footer class="sheet__foot">
+        <span class="help" data-bind="ownedCount"></span>
+        <span class="sheet__spacer"></span>
+        <button class="btn btn--primary" type="button" id="filaments-close" data-i18n="common.close">Cerrar</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="slot-filament-dialog" aria-labelledby="h-slot-filament">
+    <div class="dialog__body">
+      <h2 id="h-slot-filament" data-bind="slotFilamentTitle"></h2>
+      <p class="help" data-bind="slotFilamentHelp"></p>
+      <div class="picker--block" id="slot-filament-picker"></div>
+      <div class="dialog__actions">
+        <button class="btn btn--quiet" type="button" id="slot-filament-clear" data-i18n="filaments.clear">Quitar filamento</button>
+        <button class="btn btn--primary" type="button" id="slot-filament-close" data-i18n="common.close">Cerrar</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog class="dialog dialog--wide" id="printer-dialog" aria-labelledby="h-printers">
