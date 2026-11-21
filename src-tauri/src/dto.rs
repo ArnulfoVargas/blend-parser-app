@@ -10,6 +10,33 @@ use crate::state::Document;
 /// Prime tower brim the 3MF asks Bambu Studio for.
 pub const TOWER_BRIM_MM: f32 = 3.0;
 
+/// What the colour kit export produced.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitDto {
+    pub pieces: usize,
+    pub plates: usize,
+    /// Pieces larger than the plate.
+    pub oversize: usize,
+    /// Pieces to look at before printing them, and regions too thin to make a piece.
+    pub review: usize,
+    pub dropped: usize,
+    /// Pins keying pieces together, and joins with no room for one.
+    pub pins: usize,
+    pub unpinned: usize,
+    /// Size of the ZIP written.
+    pub bytes: u64,
+}
+
+/// How far the colour kit export has got: `split`, `plates`, `pictures` or
+/// `files`, with how many of `total` are done (0 of 0 when it cannot tell).
+#[derive(Clone, Serialize)]
+pub struct KitProgressDto {
+    pub stage: String,
+    pub done: usize,
+    pub total: usize,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartDto {
@@ -178,6 +205,8 @@ pub struct Summary {
     pub undo_label: Option<String>,
     /// Triangles painted by hand; a new colour detection discards them.
     pub painted_triangles: usize,
+    /// How the colour kit was last cut, to fill its dialog.
+    pub kit: Option<bp_3mf::project_file::KitSettings>,
 }
 
 /// A turn: the new summary and, when the preview could follow as it is,
@@ -496,6 +525,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         can_undo: p.can_undo(),
         undo_label: p.undo_label().map(str::to_string),
         painted_triangles: p.painted_count(),
+        kit: doc.kit,
     }
 }
 

@@ -58,8 +58,24 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
 - Miniatura en el 3MF: el modelo con sus colores de filamento, dibujado por el visor
   (tres cuartos, de frente o como se ve; en Preferencias), para Bambu Studio, Bambu Handy y
   el explorador de archivos. Si el visor no puede dibujarla, el 3MF sale sin ella.
-- Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
-  dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
+- Exportar por color: divide el modelo en piezas **sólidas** (no cáscaras) que encajan entre sí.
+  Cada voxel interior toma el color de la superficie pintada más cercana, o solo hasta una
+  profundidad dada sobre un núcleo de un color; las migas se unen a su vecina. Las superficies se
+  pulen igual a ambos lados de cada unión: el borde de color queda sobre la superficie del modelo
+  (sin ranura), la piel sigue al modelo sin escalones y cada unión se simplifica una sola vez y se
+  usa volteada por la otra pieza, así que encajan exactas y siguen cerradas. Por fuera, cada
+  pieza lleva la superficie exacta del modelo (aristas vivas incluidas): se hace un poco más grande
+  y se recorta contra el modelo con una booleana exacta ([manifold-rust](https://github.com/larsbrubaker/manifold-rust),
+  Rust puro). Si el modelo no está cerrado, esa pieza conserva la superficie aproximada y el resumen
+  lo dice. Opcionalmente,
+  **espigas** como de bloque de juguete: en cada unión con sitio, una espiga redonda (diámetro,
+  alto y holgura a elegir) sale de una pieza y entra en un alojamiento de la otra, con pared
+  alrededor; la superficie de ambas se coloca exacta sobre su cilindro, así que la holgura se
+  respeta aunque sea menor que el vóxel. La guía avisa de qué uniones llevan espiga y de las que
+  entrarían desde direcciones cruzadas. El `.zip` trae un
+  3MF con las piezas giradas sobre su cara más plana y acomodadas en placas de un solo color, un
+  STL por pieza y una guía de armado (`guia-de-armado.html` con imágenes de cada paso, e
+  `instrucciones.txt`).
 
 ## Perfiles de impresora en el 3MF
 
@@ -322,12 +338,16 @@ crates/
     optimize    Limpieza de islas de color por adyacencia
     estimate    Cambios de filamento por capa, con su sentido
     waste       Desperdicio: purga por par de colores, purga inicial y torre
-    split       Una pieza cerrada por color (cáscara o sólido completo)
+    split       Piezas sólidas por color: vóxeles, Voronoi de la superficie, tetraedros marchantes,
+                pulido compartido entre piezas, espigas con holgura (split/pins.rs) y piel
+                exacta del modelo por booleanas (split/skin.rs)
+    kit         Orientación de cada pieza, acomodo en placas por color y orden de armado
+    render      Renderizador por software para las imágenes de la guía
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario
-  bp-3mf/     Escritor del 3MF de Bambu, STL binario y ZIP por color; plate: espacio en la placa;
-              project_file: el contenedor .bpproj
+  bp-3mf/     Escritor del 3MF de Bambu (pintado o por placas), STL binario y ZIP con guía de armado;
+              plate: espacio en la placa; project_file: el contenedor .bpproj
   bp-cli/     blendparser-cli: conversión por lotes sin interfaz
 src-tauri/    Capa de aplicación: comandos, estado, malla en binario hacia la UI
 src/          Interfaz (TypeScript + three.js), diseño Dose

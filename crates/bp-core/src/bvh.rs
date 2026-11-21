@@ -160,6 +160,34 @@ impl Bvh {
         best
     }
 
+    /// Every crossing of the ray, unsorted: its distance and +1 when the ray
+    /// enters the surface (against the triangle normal) or -1 when it leaves.
+    pub fn ray_crossings(&self, soup: &TriSoup, o: Vec3, d: Vec3, out: &mut Vec<(f32, i8)>) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
+        let mut stack = vec![0usize];
+        while let Some(ni) = stack.pop() {
+            let node = self.nodes[ni];
+            if node.bounds.ray(o, inv, f32::MAX).is_none() {
+                continue;
+            }
+            if node.count == 0 {
+                stack.push(node.start as usize);
+                stack.push(node.start as usize + 1);
+                continue;
+            }
+            for &t in &self.order[node.start as usize..(node.start + node.count) as usize] {
+                let c = &soup.corners[t as usize];
+                if let Some((dist, _)) = geom::ray_triangle(o, d, c) {
+                    let n = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+                    out.push((dist, if geom::dot(n, d) < 0.0 { 1 } else { -1 }));
+                }
+            }
+        }
+    }
+
     /// Triangles with any corner or their centroid inside the sphere.
     pub fn sphere(&self, soup: &TriSoup, center: Vec3, r: f32, out: &mut Vec<u32>) {
         if self.nodes.is_empty() {
@@ -193,10 +221,17 @@ impl Bvh {
 
     /// Nearest triangle to `q` and the barycentrics of the closest point on it.
     pub fn nearest(&self, soup: &TriSoup, q: Vec3) -> Option<(u32, Bary)> {
+        self.nearest_within(soup, q, f32::MAX)
+    }
+
+    /// [`Bvh::nearest`] among the triangles closer than `r`; much quicker when
+    /// `r` is small.
+    pub fn nearest_within(&self, soup: &TriSoup, q: Vec3, r: f32) -> Option<(u32, Bary)> {
         if self.nodes.is_empty() {
             return None;
         }
-        let mut best = (f32::MAX, 0u32, [1.0, 0.0, 0.0]);
+        let bound = if r < f32::MAX.sqrt() { r * r } else { f32::MAX };
+        let mut best = (bound, 0u32, [1.0, 0.0, 0.0]);
         let mut stack = vec![(0usize, 0.0f32)];
         while let Some((ni, d)) = stack.pop() {
             if d >= best.0 {
@@ -226,7 +261,7 @@ impl Bvh {
                 }
             }
         }
-        (best.0 < f32::MAX).then_some((best.1, best.2))
+        (best.0 < bound).then_some((best.1, best.2))
     }
 }
 

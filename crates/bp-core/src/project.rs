@@ -13,7 +13,7 @@ use crate::optimize;
 use crate::paint::{self, Node, PaintParams};
 use crate::palette;
 use crate::scene::{Part, Scene};
-use crate::split::{self, ColorPiece};
+use crate::split::{self, Split, SplitParams};
 
 /// Colour settings, in final millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1288,19 +1288,18 @@ impl Project {
             .sum()
     }
 
-    /// One closed piece per colour in final millimetres: shells `thickness_mm`
-    /// deep, or with `main_solid` the colour with most triangles as the whole part.
-    pub fn color_pieces(&self, thickness_mm: f32, main_solid: bool) -> Vec<ColorPiece> {
-        let labels: Vec<Vec<u8>> = self.trees.iter().map(|n| n.iter().map(Node::dominant).collect()).collect();
-        let per = self.stats_per_slot();
-        let main = main_solid.then(|| (0..per.len()).max_by_key(|&i| per[i]).unwrap_or(0) as u8);
-        let mut pieces = split::color_pieces(&self.work, &labels, self.palette.len(), thickness_mm / self.scale, main);
-        for p in &mut pieces {
-            for v in &mut p.positions {
-                *v = geom::scale(*v, self.scale);
-            }
+    /// The model as solid pieces per colour, in final millimetres, that fit
+    /// back together into the whole part.
+    pub fn split_by_color(&self, params: SplitParams) -> Split {
+        let mut soup = self.work.soup();
+        for c in soup.corners.iter_mut().flatten() {
+            *c = geom::scale(*c, self.scale);
         }
-        pieces
+        let label = |t: u32, b: geom::Bary| {
+            let (part, tri) = soup.owner[t as usize];
+            self.trees[part as usize][tri as usize].label_at(b)
+        };
+        split::split(&soup, label, params)
     }
 
     // ---- saving -------------------------------------------------------------
@@ -1787,11 +1786,24 @@ mod tests {
     }
 
     #[test]
-    fn colour_pieces_cover_every_slot() {
-        let p = Project::new(scene(), 2);
-        let pieces = p.color_pieces(0.5, false);
-        assert_eq!(pieces.len(), 2);
-        assert!(pieces.iter().all(|x| !x.solid && !x.tris.is_empty()));
+    fn split_by_color_scales_to_millimetres() {
+        let (positions, tris) = crate::split::tests::cuboid([0.0; 3], [10.0, 10.0, 20.0]);
+        let part = Part {
+            name: "b".into(),
+            tri_loops: (0..12).map(|i| [3 * i, 3 * i + 1, 3 * i + 2]).collect(),
+            tri_source: vec![0; 12],
+            positions,
+            tris,
+            sources: vec![ColorSource::Flat([0.9, 0.1, 0.1])],
+            uv_layers: vec![],
+            color_layers: vec![],
+            object: 0,
+        };
+        let mut p = Project::new(Scene { parts: vec![part], ..Default::default() }, 1);
+        p.set_height_mm(40.0);
+        let s = p.split_by_color(SplitParams { voxel_mm: 1.0, ..Default::default() });
+        assert_eq!(s.pieces.len(), 1);
+        assert!((s.pieces[0].volume_mm3 - 20.0 * 20.0 * 40.0).abs() < 1600.0, "{}", s.pieces[0].volume_mm3);
     }
 
     #[test]

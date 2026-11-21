@@ -26,6 +26,8 @@ pub struct Document {
     /// The filament picked for a slot, by the slot's colour (`#RRGGBB`), so it
     /// follows the colour when slots move.
     pub filaments: HashMap<String, bp_3mf::filament::Filament>,
+    /// How the colour kit was last cut, to offer the same next time.
+    pub kit: Option<bp_3mf::project_file::KitSettings>,
 }
 
 impl Document {
@@ -105,6 +107,7 @@ mod tests {
             flush: HashMap::new(),
             offset_mm: [0.0; 2],
             filaments: HashMap::new(),
+            kit: None,
         };
         let catalog = bp_3mf::filament::catalog();
         let owned: Vec<_> = catalog.iter().filter(|f| f.kind == "PLA Basic").cloned().collect();
