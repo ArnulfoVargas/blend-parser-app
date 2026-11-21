@@ -6,6 +6,8 @@
 // to e2e/out. A scenario whose control is missing on this branch is skipped, not failed,
 // so the same run compares branches.
 import path from "node:path";
+import { readFileSync } from "node:fs";
+import { inflateRawSync } from "node:zlib";
 import {
   HERE, OUT, services, stop, session, waitState, settle, shot, report, times, probe,
   click, exists, visible, text, setValue, key, sleep,
@@ -16,6 +18,37 @@ const MODEL = process.env.BP_MODEL ?? path.join(HERE, "e2e/fixtures/out/figure.b
 const HEAD = path.join(HERE, "e2e/fixtures/out/head.blend");
 /** A closed cylinder, 44 × 45 mm (`fixtures/simple.py`). */
 const CYLINDER = path.join(HERE, "e2e/fixtures/out/cylinder.blend");
+/** A 20 mm block with a 0.5 mm fin and a 0.6 mm pin on it (`fixtures/simple.py`). */
+const THIN = path.join(HERE, "e2e/fixtures/out/thin.blend");
+/** The `3D/Objects/*.model` files of a 3MF, as text. */
+function objectModels(file) {
+  const buf = readFileSync(file);
+  const end = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  let at = buf.readUInt32LE(end + 16);
+  const out = [];
+  for (let n = buf.readUInt16LE(end + 10); n > 0; n--) {
+    const [method, size, nameLen, extra, comment, local] = [buf.readUInt16LE(at + 10), buf.readUInt32LE(at + 20), buf.readUInt16LE(at + 28), buf.readUInt16LE(at + 30), buf.readUInt16LE(at + 32), buf.readUInt32LE(at + 42)];
+    const name = buf.toString("utf8", at + 46, at + 46 + nameLen);
+    if (/^3D\/Objects\/.*\.model$/.test(name)) {
+      const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+      const data = buf.subarray(start, start + size);
+      out.push((method === 8 ? inflateRawSync(data) : data).toString("utf8"));
+    }
+    at += 46 + nameLen + extra + comment;
+  }
+  return out;
+}
+/** Every triangle of a 3MF by its corners (to the micrometre), with its paint. */
+function paintedTriangles(file) {
+  const tris = new Map();
+  for (const xml of objectModels(file)) {
+    const v = [...xml.matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)].map((m) => [m[1], m[2], m[3]].map((x) => Number(x).toFixed(3)).join(","));
+    for (const m of xml.matchAll(/<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"(?: paint_color="([^"]*)")?/g)) {
+      tris.set([v[m[1]], v[m[2]], v[m[3]]].sort().join("|"), m[4] ?? "");
+    }
+  }
+  return tris;
+}
 const invoke = (b, cmd, args = {}) => b.executeAsync((c, a, done) => window.__TAURI_INTERNALS__.invoke(c, a).then((v) => done({ v }), (e) => done({ e: JSON.stringify(e) })), cmd, args);
 const only = process.argv.slice(2);
 const results = [];
@@ -180,7 +213,8 @@ const scenarios = {
     check("tabs", "Malla hides the AMS and widens the view", !vm.ams && vm.canvas > (l0.canvas ?? 0), `${l0.canvas} → ${vm.canvas} px`);
     check("tabs", "Malla holds repair, simplify, base and printability", await b.execute(() => ["#repair", "#keep", "#flatten", "#printability-run"].every((s) => document.querySelector(s)?.closest("#panel-mesh"))));
     const tools = () => b.execute(() => [...document.querySelectorAll(".toolbar__btn[data-tool]")].filter((el) => el.offsetParent).map((el) => el.dataset.tool).join(","));
-    check("tabs", "Malla's view offers orbit, measure, move and turn", (await tools()) === "orbit,measure,move,rotate", await tools());
+    const meshTools = (await exists(b, '.toolbar__btn[data-tool="clip"]')) ? "orbit,measure,move,rotate,clip,thickness" : "orbit,measure,move,rotate";
+    check("tabs", "Malla's view offers orbit, measure, move and turn", (await tools()) === meshTools, await tools());
     await shot(b, "10-tab-mesh");
     await key(b, "c");
     check("tabs", "Cortes' view offers orbit, measure and the cut", (await tools()) === "orbit,measure,section", await tools());
@@ -343,6 +377,192 @@ const scenarios = {
     await shot(b, "18-analysis-thickness");
   },
 
+  // Simplify at 50 % with the colour borders kept: no more filament changes than before, and the deviation shown.
+  async simplify(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#protect-colors"))) return check("simplify", "protect switches", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    const swaps = () => b.execute(() => Number(document.querySelector("[data-bind=swaps]").textContent.replace(/\D/g, "")));
+    const full = await swaps();
+    await setValue(b, "#keep", 50);
+    await settle(b);
+    const plain = await swaps();
+    const plainLine = await text(b, "[data-bind=triangles]");
+    await click(b, "#protect-colors");
+    await settle(b);
+    const kept = await swaps();
+    const line = await text(b, "[data-bind=triangles]");
+    check("simplify", "with Proteger bordes de color the filament changes do not go up", kept <= full, `100 %: ${full}, 50 %: ${plain}, 50 % protegido: ${kept}`);
+    check("simplify", "the maximum deviation is shown beside the triangles", /desviación máx\. [\d,]+ mm/.test(line ?? ""), `${plainLine} | ${line}`);
+    await click(b, "#protect-detail");
+    await settle(b);
+    check("simplify", "Proteger detalle applies too", await b.execute(() => document.querySelector("#protect-detail").checked), await text(b, "[data-bind=triangles]"));
+    await shot(b, "20-simplify-protected");
+  },
+
+  // Malla → Suavizar on the 48-sided cylinder: the count said first, 2 levels, the paint kept, Ctrl+Z.
+  async smooth(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#smooth-apply"))) return check("smooth", "smooth section", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    await b.execute(() => (document.querySelector("#smooth-group").open = true));
+    const summary = async () => (await invoke(b, "end_stroke")).v;
+    const before = await summary();
+    await click(b, "#subdiv-2");
+    const estimate = await text(b, "[data-bind=smoothEstimate]");
+    check("smooth", "the resulting triangles are said before applying", estimate?.includes(new Intl.NumberFormat("es").format(before.triangles * 16)) ?? false, estimate ?? "");
+    await setValue(b, "#tri-cap", 1000);
+    const over = await b.execute(() => ({ off: document.querySelector("#smooth-apply").disabled, text: document.querySelector("[data-bind=smoothEstimate]").textContent }));
+    check("smooth", "over the cap it cannot be applied", over.off && /tope/.test(over.text), over.text);
+    const refused = await invoke(b, "smooth_mesh", { subdivide: 2, smooth: 0, creaseDeg: 30, maxTriangles: 1000 });
+    check("smooth", "the backend refuses it too", /subdivideCap/.test(refused.e ?? ""), refused.e ?? "accepted");
+    await setValue(b, "#tri-cap", 2000000);
+    await setValue(b, "#smooth-passes", 2);
+    await click(b, "#smooth-apply");
+    await settle(b);
+    const after = await summary();
+    check("smooth", "2 levels make every triangle sixteen", after.triangles === before.triangles * 16, `${before.triangles} → ${after.triangles}`);
+    await shot(b, "21-smooth-cylinder");
+    await b.execute(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true })));
+    await settle(b);
+    const back = await summary();
+    check("smooth", "Ctrl+Z gives the original mesh back", back.triangles === before.triangles && back.settings.subdivide === 0, `${back.triangles}`);
+  },
+
+  // Suavizar on the painted figure: one level, each colour keeps its share of the surface.
+  async smoothPaint(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#smooth-apply"))) return check("smoothPaint", "smooth section", null);
+    const summary = async () => (await invoke(b, "end_stroke")).v;
+    const before = await summary();
+    const r = await invoke(b, "smooth_mesh", { subdivide: 1, smooth: 2, creaseDeg: 30, maxTriangles: 2000000 });
+    const after = r.v;
+    const share = (s) => s.slots.map((x) => x.triangles / s.triangles);
+    const drift = Math.max(...share(before).map((v, i) => Math.abs(v - share(after)[i])));
+    check("smoothPaint", "each colour keeps its share after subdividing", !!after && drift < 0.01, `${share(before).map((v) => v.toFixed(3))} → ${after && share(after).map((v) => v.toFixed(3))}`);
+    check("smoothPaint", "filament changes do not go up", !!after && after.estimate.swaps <= before.estimate.swaps, `${before.estimate.swaps} → ${after?.estimate.swaps}`);
+  },
+
+  // Malla → Vaciar on the closed two-colour cylinder: the saving, the drains, the paint outside kept, thin walls flagged.
+  async hollow(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#hollow-apply"))) return check("hollow", "hollow section", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    await b.execute(() => (document.querySelector("#hollow-group").open = true));
+    const solidFile = path.join(OUT, "hollow-solid.3mf");
+    await invoke(b, "export_3mf", { path: solidFile });
+    await setValue(b, "#hollow-wall", 0.5);
+    check("hollow", "a wall under two nozzle lines cannot be asked for", await b.execute(() => document.querySelector("#hollow-apply").disabled && document.querySelector("#hollow-wall").getAttribute("aria-invalid") === "true"), await text(b, "[data-bind=hollowWallHelp]"));
+    await setValue(b, "#hollow-wall", 2);
+    await click(b, "#hollow-apply");
+    await settle(b);
+    const result = await text(b, "[data-bind=hollowResult]");
+    check("hollow", "says what it saves", /−\d+ % de volumen, −[\d,]+ g/.test(result ?? ""), result ?? "");
+    const issues = (await invoke(b, "mesh_issues")).v;
+    check("hollow", "the hollow model is still closed", issues?.after.openEdges === 0 && issues?.after.flippedTriangles === 0, JSON.stringify(issues?.after));
+    const hollowFile = path.join(OUT, "hollow-2mm.3mf");
+    await invoke(b, "export_3mf", { path: hollowFile });
+    const [a, h] = [paintedTriangles(solidFile), paintedTriangles(hollowFile)];
+    const kept = [...a].filter(([k, paint]) => h.get(k) === paint).length;
+    check("hollow", "the 3MF keeps the outside and its paint as it was", kept === a.size && h.size > a.size, `${kept} of ${a.size} outer triangles unchanged; ${h.size} in all`);
+    await shot(b, "22-hollow");
+    // Two drains through the base, then a wall the printability check flags as thin.
+    await click(b, "#drains-2");
+    await click(b, "#hollow-apply");
+    await settle(b);
+    const drained = await text(b, "[data-bind=hollowResult]");
+    const after = (await invoke(b, "mesh_issues")).v;
+    check("hollow", "two drains through the base, still closed", /2 de 2 agujeros/.test(drained ?? "") && after?.after.openEdges === 0, drained ?? "");
+    await setValue(b, "#hollow-wall", 0.8);
+    await click(b, "#hollow-apply");
+    await settle(b);
+    const params = { extrusionMm: 0.44, perimeters: 2, wallMm: 0.88, detailMm: 0.44, componentMm: 2, overhangDeg: 45, contactMm2: 4, toleranceMm: 0.001, samples: 512 };
+    const report = (await invoke(b, "analyze_printability", { params })).v;
+    const thin = report?.checks.find((c) => c.code === "thinWalls");
+    check("hollow", "printability flags the 0,8 mm wall as too thin", thin?.evidence === "estimated" && thin.count > 0, `${thin?.count} thin of ${report?.thickness.length}, min ${thin?.measurement?.toFixed(2)} mm`);
+    await click(b, "#hollow-off");
+    await settle(b);
+    check("hollow", "Rellenar gives the solid back", await b.execute(() => document.querySelector("[data-bind=hollowResult]").textContent === ""));
+  },
+
+  // Engrosar from the thin-walls card: the fin and the pin reach the minimum, the block does not move.
+  async thicken(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#thicken-apply"))) return check("thicken", "thicken section", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    // The block's points (under the fin and pin), to see that they stay where they are.
+    const block = () => b.executeAsync((done) => window.__TAURI_INTERNALS__.invoke("preview_mesh", {}).then((buf) => {
+      const leaves = new DataView(buf, 0, 8).getUint32(0, true);
+      const p = new Float32Array(buf, 8, leaves * 9);
+      const out = new Set();
+      for (let i = 0; i < p.length; i += 3) if (p[i + 2] < 19) out.add(`${p[i].toFixed(4)},${p[i + 1].toFixed(4)},${p[i + 2].toFixed(4)}`);
+      done([...out].sort().join(";"));
+    }));
+    const before = await block();
+    await click(b, "#thicken-show");
+    await b.waitUntil(async () => (await b.execute(() => document.querySelector("button[data-analysis][aria-pressed=true]")?.dataset.analysis)) === "thickness", { timeout: 120000, interval: 200 }).catch(() => {});
+    check("thicken", "Ver zonas finas shows them in the thickness view", await b.execute(() => document.querySelector("button[data-analysis][aria-pressed=true]")?.dataset.analysis === "thickness"));
+    await shot(b, "23-thicken-before");
+    const button = await b.execute(() => {
+      const card = [...document.querySelectorAll(".pa-check")].find((c) => /Espesor de pared/.test(c.textContent));
+      const btn = card?.querySelector('[data-fix="thicken"]');
+      return btn ? btn.textContent : null;
+    });
+    check("thicken", "the thin-walls card offers Engrosar", button === "Engrosar", button ?? "no button");
+    await b.execute(() => document.querySelector('.pa-check [data-fix="thicken"]')?.click());
+    await b.waitUntil(async () => (await b.execute(() => [...document.querySelectorAll(".pa-check")].some((c) => /Espesor de pared/.test(c.textContent) && c.dataset.severity === "fixed"))), { timeout: 120000, interval: 300 }).catch(() => {});
+    const card = await b.execute(() => [...document.querySelectorAll(".pa-check")].find((c) => /Espesor de pared/.test(c.textContent))?.dataset.severity ?? "gone");
+    check("thicken", "printability no longer flags thin walls", card === "fixed" || card === "gone", card);
+    const result = await text(b, "[data-bind=thickenResult]");
+    check("thicken", "says how much it moved and where", /Engrosó [\d,]+ cm² .*hasta [\d,]+ mm hacia fuera/.test(result ?? ""), result ?? "");
+    check("thicken", "the block does not move at all", (await block()) === before);
+    const issues = (await invoke(b, "mesh_issues")).v;
+    check("thicken", "the mesh stays closed", issues?.after.openEdges === 0, JSON.stringify(issues?.after));
+    await shot(b, "24-thicken-after");
+    await click(b, "#thicken-off");
+    await settle(b);
+    check("thicken", "Quitar puts the details back", (await b.execute(() => document.querySelector("[data-bind=thickenResult]").textContent)) === "");
+  },
+
+  // Malla's view helpers on the hollowed cylinder: wireframe, a section that cuts nothing, the wall measured.
+  async meshView(b) {
+    await waitState(b, "ready");
+    if (!(await exists(b, "#toggle-wire"))) return check("meshView", "mesh view helpers", null);
+    await click(b, "[role=tab][data-tab=mesh]");
+    await b.execute(() => (document.querySelector("#hollow-group").open = true));
+    await setValue(b, "#hollow-wall", 2);
+    await click(b, "#hollow-apply");
+    await settle(b);
+    await key(b, "z");
+    await settle(b);
+    const wire = await b.executeAsync((done) => window.__TAURI_INTERNALS__.invoke("wire_mesh", {}).then((buf) => done(new DataView(buf, 0, 8).getUint32(4, true))));
+    check("meshView", "Z shows the wireframe", (await b.execute(() => document.querySelector("#toggle-wire").getAttribute("aria-pressed"))) === "true" && wire > 0, `${wire} edges`);
+    await shot(b, "25-mesh-wire");
+    await key(b, "z");
+    const plain = path.join(OUT, "view-plain.3mf");
+    await invoke(b, "export_3mf", { path: plain });
+    await key(b, "k");
+    await settle(b);
+    check("meshView", "K turns the section on in Malla", await b.execute(() => document.querySelector("[data-app]").dataset.tool === "clip" && document.querySelector('button[data-tool="clip"]').dataset.on === "true"));
+    await shot(b, "26-mesh-section");
+    const cut = path.join(OUT, "view-section.3mf");
+    await invoke(b, "export_3mf", { path: cut });
+    check("meshView", "the section does not change the exported 3MF", objectModels(plain).join() === objectModels(cut).join());
+    // The wall through the section: the hollow's 2 mm, give or take a voxel.
+    await key(b, "t");
+    const canvas = await b.$("#viewport");
+    await b.action("pointer").move({ origin: canvas, x: 0, y: 40 }).down().up().perform().catch(() => {});
+    await b.waitUntil(async () => /mm/.test((await text(b, "[data-bind=thicknessOut]")) ?? ""), { timeout: 30000, interval: 200 }).catch(() => {});
+    const reading = (await text(b, "[data-bind=thicknessOut]")) ?? "";
+    const mm = Number((reading.match(/([\d,]+) mm/)?.[1] ?? "").replace(",", "."));
+    check("meshView", "the thickness tool reads the hollow's wall through the section", Math.abs(mm - 2) < 0.7, reading);
+    await shot(b, "27-mesh-thickness");
+    check("meshView", "the section stays on while measuring", await b.execute(() => document.querySelector('button[data-tool="clip"]').dataset.on === "true"));
+    await click(b, "[role=tab][data-tab=model]");
+    const off = await b.execute(() => ({ clip: document.querySelector('button[data-tool="clip"]').dataset.on, wire: document.querySelector("#toggle-wire").getAttribute("aria-pressed"), reading: document.querySelector("[data-bind=thicknessOut]").textContent }));
+    check("meshView", "leaving Malla turns all three off", off.clip === "false" && off.wire === "false" && off.reading === "", JSON.stringify(off));
+  },
+
   async english(b) {
     await waitState(b, "ready");
     const missing = await b.execute(() => [...document.querySelectorAll("[data-i18n]")].filter((el) => el.offsetParent && !el.textContent.trim()).map((el) => el.dataset.i18n));
@@ -352,7 +572,7 @@ const scenarios = {
 };
 
 const plan = [
-  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["english", { lang: "en" }],
+  ["open", {}], ["size", {}], ["cut", {}], ["mesh", {}], ["printability", {}], ["brush", {}], ["exportFile", {}], ["a11y", {}], ["tabs", {}], ["repairs", { model: HEAD }], ["orient", {}], ["analysis", {}], ["thickness", { model: CYLINDER }], ["simplify", {}], ["smooth", { model: CYLINDER }], ["smoothPaint", {}], ["hollow", { model: CYLINDER }], ["thicken", { model: THIN }], ["meshView", { model: CYLINDER }], ["english", { lang: "en" }],
 ];
 
 const metrics = {};

@@ -78,6 +78,14 @@ pub struct Stats {
     /// For each slot, the closest other slot and their ΔE.
     pub nearest: Vec<Option<(usize, f32)>>,
     pub repair: RepairReport,
+    /// How far the simplified surface strays from the one before, in final mm.
+    pub deviation_mm: f32,
+    /// Volume of the model, in final mm³.
+    pub volume_mm3: f32,
+    /// What hollowing did, with volumes in final mm³ and the voxel in mm.
+    pub hollow: Option<crate::mesh::HollowReport>,
+    /// What thickening moved, in final mm and mm².
+    pub thicken: Option<crate::mesh::ThickenReport>,
 }
 
 #[derive(Clone)]
@@ -915,12 +923,23 @@ impl Project {
             || ops.orient != self.mesh_ops.orient
             || ops.fill_holes != self.mesh_ops.fill_holes
             || ops.split_vertices != self.mesh_ops.split_vertices
-            || ops.deep_clean != self.mesh_ops.deep_clean;
+            || ops.deep_clean != self.mesh_ops.deep_clean
+            || ops.protect_colors != self.mesh_ops.protect_colors
+            || ops.protect_detail != self.mesh_ops.protect_detail
+            || ops.subdivide != self.mesh_ops.subdivide
+            || ops.hollow_mm != self.mesh_ops.hollow_mm
+            || ops.drains != self.mesh_ops.drains
+            || ops.drain_mm != self.mesh_ops.drain_mm;
         self.mesh_ops = ops;
         if topology_changes {
             self.rebuild_geometry();
         } else {
+            let before: Vec<usize> = self.work.parts.iter().map(|p| p.tris.len()).collect();
             self.rebuild_geometry_keep_paint();
+            // Hand painting is per triangle: it only survives when the triangles do.
+            if self.work.parts.iter().map(|p| p.tris.len()).ne(before) {
+                self.painted = self.work.parts.iter().map(|p| vec![NO_LABEL; p.tris.len()]).collect();
+            }
         }
         self.rebuild_paint();
     }
@@ -946,7 +965,7 @@ impl Project {
     }
 
     fn rebuild_geometry_keep_paint(&mut self) {
-        let (shape, work) = Mesh::build(&self.scene, self.mesh_ops, self.scale);
+        let (shape, work) = Mesh::build_with(&self.scene, self.mesh_ops, self.scale, &|m| self.triangle_labels(m));
         self.shape = shape;
         self.work = work;
         self.adjacency = self.work.parts.iter().map(optimize::adjacency).collect();
@@ -963,6 +982,23 @@ impl Project {
                 o
             })
             .collect();
+    }
+
+    /// The slot each triangle of `mesh` takes from the model's colour at its
+    /// centre; empty before there is a palette.
+    fn triangle_labels(&self, mesh: &Mesh) -> Vec<Vec<u8>> {
+        if self.targets.is_empty() {
+            return vec![];
+        }
+        let field = ColorField::new(&self.scene, mesh);
+        let cls = Classifier::with_slots(&self.targets);
+        mesh.parts
+            .iter()
+            .enumerate()
+            .map(|(pi, p)| {
+                (0..p.tris.len()).map(|ti| cls.nearest(field.sample(mesh, pi, ti, [1.0 / 3.0; 3]).lab())).collect()
+            })
+            .collect()
     }
 
     // ---- painting from the model -----------------------------------------
@@ -998,6 +1034,39 @@ impl Project {
     /// Ray in model space (millimetres before scaling, as the preview shows it).
     pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<RayHit> {
         self.picker.0.raycast(&self.picker.1, origin, geom::normalize(dir))
+    }
+
+    /// The wall where the ray lands, measured as the thickness check measures
+    /// it: inward along the face's normal, with `tolerance_mm` (final mm).
+    /// Returns the point, the point across (preview units) and the thickness in
+    /// final mm, None when nothing is across (an open surface).
+    pub fn wall_at(&self, origin: Vec3, dir: Vec3, tolerance_mm: f32) -> Option<(Vec3, Vec3, Option<f32>)> {
+        let hit = self.pick(origin, dir)?;
+        let c = self.picker.1.corners[hit.tri as usize];
+        let inward = crate::printability::inward(&c);
+        let wall =
+            crate::printability::wall_at(&self.picker.0, &self.picker.1, hit.point, inward, tolerance_mm / self.scale);
+        let across = geom::add(hit.point, geom::scale(inward, wall.unwrap_or(0.0)));
+        Some((hit.point, across, wall.map(|w| w * self.scale)))
+    }
+
+    /// Edges of the working mesh, each once, over its vertices (preview units).
+    pub fn wire(&self) -> (Vec<Vec3>, Vec<[u32; 2]>) {
+        let mut positions = vec![];
+        let mut edges = vec![];
+        for part in &self.work.parts {
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&part.positions);
+            let mut own: Vec<[u32; 2]> = part
+                .tris
+                .iter()
+                .flat_map(|t| (0..3).map(move |k| [t[k].min(t[(k + 1) % 3]), t[k].max(t[(k + 1) % 3])]))
+                .collect();
+            own.sort_unstable();
+            own.dedup();
+            edges.extend(own.into_iter().map(|e| e.map(|v| v + base)));
+        }
+        (positions, edges)
     }
 
     /// Paints every triangle within `radius_mm` (final size) of where the ray
@@ -1119,6 +1188,19 @@ impl Project {
             ),
             nearest: palette::nearest_others(&self.palette),
             repair: self.work.repair,
+            deviation_mm: self.work.deviation * self.scale,
+            volume_mm3: self.work.volume() * self.scale.powi(3),
+            hollow: self.work.hollow.map(|h| crate::mesh::HollowReport {
+                solid_volume: h.solid_volume * self.scale.powi(3),
+                volume: h.volume * self.scale.powi(3),
+                cell: h.cell * self.scale,
+                ..h
+            }),
+            thicken: self.work.thicken.map(|t| crate::mesh::ThickenReport {
+                max_offset: t.max_offset * self.scale,
+                area: t.area * self.scale * self.scale,
+                ..t
+            }),
         }
     }
 
@@ -1261,6 +1343,75 @@ mod tests {
         assert!(p.undo());
         assert!(!p.mesh_ops().fill_holes);
         assert_eq!(p.mesh_issues().1.holes, 1);
+    }
+
+    #[test]
+    fn subdividing_is_one_undo_step_and_keeps_the_colours() {
+        let mut p = Project::new(scene(), 2);
+        let tris = p.stats().triangles;
+        let per_slot = p.stats().per_slot;
+        p.fix_mesh(MeshOps { subdivide: 2, smooth: 3, ..p.mesh_ops() });
+        assert_eq!(p.stats().triangles, tris * 16);
+        // Each child keeps its parent's spot in the source: the same colours, sixteen times over.
+        assert_eq!(p.stats().per_slot, per_slot.iter().map(|n| n * 16).collect::<Vec<_>>());
+        assert!(p.undo());
+        assert_eq!(p.stats().triangles, tris);
+        assert_eq!(p.mesh_ops().subdivide, 0);
+    }
+
+    #[test]
+    fn the_measured_wall_is_the_one_the_thickness_check_reads() {
+        // A closed 20 × 10 × 6 box, scaled to twice its size.
+        let positions = vec![
+            [0., 0., 0.],
+            [20., 0., 0.],
+            [20., 10., 0.],
+            [0., 10., 0.],
+            [0., 0., 6.],
+            [20., 0., 6.],
+            [20., 10., 6.],
+            [0., 10., 6.],
+        ];
+        let tris = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let part = Part {
+            name: "box".into(),
+            tri_loops: tris.clone(),
+            tri_source: vec![0; tris.len()],
+            sources: vec![ColorSource::Flat([0.8; 3])],
+            positions,
+            tris,
+            ..Default::default()
+        };
+        let mut p = Project::new(Scene { parts: vec![part], ..Default::default() }, 1);
+        p.set_size_mm([40.0, 20.0, 12.0]);
+        let params = crate::printability::Params { samples: 16, ..crate::printability::Params::for_nozzle(0.4) };
+        let report = p.printability(params);
+        assert!(!report.thickness.is_empty());
+        for s in &report.thickness {
+            // Aim at the sample from outside, along its face's normal (preview units are source units here).
+            let at = geom::scale(s.point, 1.0 / p.scale());
+            let face = (0..p.work.parts[0].tris.len())
+                .map(|t| p.work.parts[0].corners(t))
+                .find(|c| geom::len(geom::sub(geom::at(c, [1.0 / 3.0; 3]), at)) < 1e-4)
+                .unwrap();
+            let out = geom::scale(crate::printability::inward(&face), -1.0);
+            let (_, _, mm) =
+                p.wall_at(geom::add(at, geom::scale(out, 5.0)), geom::scale(out, -1.0), params.tolerance_mm).unwrap();
+            assert!((mm.unwrap() - s.mm.unwrap()).abs() < 1e-3, "{:?} vs {:?}", mm, s.mm);
+        }
     }
 
     #[test]

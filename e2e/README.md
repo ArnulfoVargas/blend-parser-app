@@ -22,7 +22,7 @@ problemas de geometría no cerrada.
 
 | Comando | Qué hace |
 |---|---|
-| `node run.mjs [escenario…]` | Flujo normal: abrir, tamaño, corte, malla, viabilidad, pincel, exportar, accesibilidad, modos, reparaciones (con la cabeza abierta de `simple.py`), inglés. |
+| `node run.mjs [escenario…]` | Flujo normal: abrir, tamaño, corte, malla, viabilidad, pincel, exportar, accesibilidad, modos, inglés, y las herramientas de Malla: reparaciones, orientación, vistas de viabilidad, grosor, simplificar protegido, suavizar, vaciar, engrosar y las ayudas del visor (con `cylinder.blend`, `head.blend` y `thin.blend` de `simple.py`). |
 | `node break.mjs [ataque…]` | Intenta romper la app: argumentos hostiles a cada comando, ráfagas concurrentes, deshacer en bucle, cortar todo, basura en cada campo numérico, clics repetidos. Tras cada ataque comprueba que el documento sigue respondiendo (un *panic* con el documento bloqueado lo deja inservible) y que la ventana no registró errores. |
 | `node probe-cut.mjs <modelo>` / `probe-axis.mjs` | Dónde se rechaza un corte plano / por eje, del 5 % al 95 %. |
 

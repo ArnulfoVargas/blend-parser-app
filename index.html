@@ -242,6 +242,82 @@
               <label for="keep"><span data-i18n="mesh.simplify">Simplificar</span> <output for="keep" data-bind="keepOut"></output></label>
               <input class="range" id="keep" name="keep" type="range" min="5" max="100" step="5" value="100">
               <p class="help" data-bind="triangles"></p>
+              <label class="check" data-i18n-attr="title:mesh.protectColorsHelp"><input type="checkbox" id="protect-colors"> <span data-i18n="mesh.protectColors">Proteger bordes de color</span></label>
+              <label class="check" data-i18n-attr="title:mesh.protectDetailHelp"><input type="checkbox" id="protect-detail"> <span data-i18n="mesh.protectDetail">Proteger detalle</span></label>
+              <p class="help" data-i18n="mesh.protectHelp">Bordes de color: no mueve los vértices donde cambia el filamento. Detalle: reduce menos donde la superficie se curva.</p>
+            </div>
+          </div>
+        </details>
+        <details class="group" id="smooth-group">
+          <summary><h2 data-i18n="smooth.title">Suavizar</h2><span class="group__sum" data-bind="smoothSum"></span></summary>
+          <div class="group__body">
+            <fieldset class="keys" id="subdivide-levels">
+              <legend data-i18n="smooth.subdivide">Subdividir (niveles)</legend>
+              <input type="radio" name="subdivide" id="subdiv-0" value="0" checked><label for="subdiv-0">0</label>
+              <input type="radio" name="subdivide" id="subdiv-1" value="1"><label for="subdiv-1">1</label>
+              <input type="radio" name="subdivide" id="subdiv-2" value="2"><label for="subdiv-2">2</label>
+            </fieldset>
+            <div class="field">
+              <label for="smooth-passes" data-i18n="smooth.passes">Pasadas de suavizado</label>
+              <div class="field__unit"><input class="input" id="smooth-passes" type="number" inputmode="numeric" min="0" max="20" step="1" value="0" aria-describedby="smooth-passes-help"></div>
+              <p class="help" id="smooth-passes-help" data-i18n="smooth.passesHelp">Taubin: redondea sin encoger el modelo.</p>
+            </div>
+            <div class="field">
+              <label for="crease-deg" data-i18n="smooth.crease">Arista viva desde</label>
+              <div class="field__unit"><input class="input" id="crease-deg" type="number" inputmode="decimal" min="0" max="180" step="1" value="30" aria-describedby="crease-help"><span>°</span></div>
+              <p class="help" id="crease-help" data-i18n="smooth.creaseHelp">Las caras que se juntan con más ángulo y los bordes de color no se redondean.</p>
+            </div>
+            <div class="field">
+              <label for="tri-cap" data-i18n="smooth.cap">Tope de triángulos</label>
+              <div class="field__unit"><input class="input" id="tri-cap" type="number" inputmode="numeric" min="1000" max="8000000" step="100000" value="2000000"></div>
+            </div>
+            <p class="help smooth__estimate" data-bind="smoothEstimate" aria-live="polite"></p>
+            <div class="row-actions">
+              <button class="btn btn--primary btn--sm" type="button" id="smooth-apply" data-i18n="smooth.apply" disabled>Aplicar</button>
+            </div>
+          </div>
+        </details>
+        <details class="group" id="thicken-group">
+          <summary><h2 data-i18n="thicken.title">Engrosar</h2><span class="group__sum" data-bind="thickenSum"></span></summary>
+          <div class="group__body">
+            <div class="field">
+              <label for="thicken-mm" data-i18n="thicken.min">Grosor mínimo</label>
+              <div class="field__unit"><input class="input" id="thicken-mm" type="number" inputmode="decimal" min="0.1" max="10" step="0.05" aria-describedby="thicken-help"><span>mm</span></div>
+              <p class="help" id="thicken-help" data-i18n="thicken.help">Empuja hacia fuera, por su normal, solo las paredes y detalles más finos que esto (dedos, orejas, antenas). Lo demás no se mueve.</p>
+            </div>
+            <p class="help thicken__result" data-bind="thickenResult" aria-live="polite"></p>
+            <div class="row-actions">
+              <button class="btn btn--primary btn--sm" type="button" id="thicken-apply" data-i18n="thicken.apply" disabled>Engrosar</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="thicken-show" data-i18n="thicken.show">Ver zonas finas</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="thicken-off" data-i18n="thicken.off" disabled>Quitar</button>
+            </div>
+          </div>
+        </details>
+        <details class="group" id="hollow-group">
+          <summary><h2 data-i18n="hollow.title">Vaciar</h2><span class="group__sum" data-bind="hollowSum"></span></summary>
+          <div class="group__body">
+            <div class="field">
+              <label for="hollow-wall" data-i18n="hollow.wall">Grosor de pared</label>
+              <div class="field__unit"><input class="input" id="hollow-wall" type="number" inputmode="decimal" min="0.2" max="50" step="0.2" value="2" aria-describedby="hollow-wall-help"><span>mm</span></div>
+              <p class="help" id="hollow-wall-help" data-bind="hollowWallHelp"></p>
+            </div>
+            <fieldset class="keys" id="hollow-drains">
+              <legend data-i18n="hollow.drains">Agujeros de drenaje en la base</legend>
+              <input type="radio" name="drains" id="drains-0" value="0" checked><label for="drains-0">0</label>
+              <input type="radio" name="drains" id="drains-1" value="1"><label for="drains-1">1</label>
+              <input type="radio" name="drains" id="drains-2" value="2"><label for="drains-2">2</label>
+              <input type="radio" name="drains" id="drains-3" value="3"><label for="drains-3">3</label>
+              <input type="radio" name="drains" id="drains-4" value="4"><label for="drains-4">4</label>
+            </fieldset>
+            <div class="field">
+              <label for="drain-mm" data-i18n="hollow.drainSize">Diámetro de los agujeros</label>
+              <div class="field__unit"><input class="input" id="drain-mm" type="number" inputmode="decimal" min="1" max="20" step="0.5" value="3"><span>mm</span></div>
+            </div>
+            <p class="help" data-i18n="hollow.colourHelp">La pared interior toma el color de la cara exterior más cercana; la pintura de fuera no cambia.</p>
+            <p class="help hollow__result" data-bind="hollowResult" aria-live="polite"></p>
+            <div class="row-actions">
+              <button class="btn btn--primary btn--sm" type="button" id="hollow-apply" data-i18n="hollow.apply" disabled>Vaciar</button>
+              <button class="btn btn--quiet btn--sm" type="button" id="hollow-off" data-i18n="hollow.off" disabled>Rellenar</button>
             </div>
           </div>
         </details>
@@ -358,6 +434,10 @@
           <button class="toolbar__btn" type="button" data-tool="move" data-modes="model mesh" aria-pressed="false" data-i18n-attr="title:stage.moveTitle;aria-label:stage.moveTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5 12 3l2.5 2.5M9.5 18.5 12 21l2.5-2.5M5.5 9.5 3 12l2.5 2.5M18.5 9.5 21 12l-2.5 2.5"/></svg><span class="toolbar__label" data-i18n="stage.move"></span><kbd>G</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="rotate" data-modes="model mesh" aria-pressed="false" data-i18n-attr="title:stage.rotateTitle;aria-label:stage.rotateTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.8 3.5v4h-4"/><ellipse cx="12" cy="12" rx="7.5" ry="2.6"/></svg><span class="toolbar__label" data-i18n="stage.rotate"></span><kbd>R</kbd></button>
           <button class="toolbar__btn" type="button" data-tool="section" data-modes="cut" aria-pressed="false" data-on="false" data-i18n-attr="title:stage.sectionTitle;aria-label:stage.sectionTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M2.5 12.5 12 7.5l9.5 5-9.5 5z" class="cut"/></svg><span class="toolbar__label" data-i18n="stage.section"></span><kbd>C</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="clip" data-modes="mesh" aria-pressed="false" data-on="false" data-i18n-attr="title:stage.clipTitle;aria-label:stage.clipTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z" stroke-dasharray="2 2"/><path d="M4 12.5 12 8l8 4.5-8 4.5z" class="cut"/><path d="M12 8v4.5"/></svg><span class="toolbar__label" data-i18n="stage.clip"></span><kbd>K</kbd></button>
+          <button class="toolbar__btn" type="button" data-tool="thickness" data-modes="mesh" aria-pressed="false" data-i18n-attr="title:stage.thicknessTitle;aria-label:stage.thicknessTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4v16M19 4v16"/><path d="M8 12h8M10 10l-2 2 2 2M14 10l2 2-2 2"/></svg><span class="toolbar__label" data-i18n="stage.thickness"></span><kbd>T</kbd></button>
+          <span class="toolbar__sep" aria-hidden="true"></span>
+          <button class="toolbar__btn" type="button" id="toggle-wire" data-modes="mesh" aria-pressed="false" data-i18n-attr="title:stage.wireTitle;aria-label:stage.wireTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 12 4l8 14z"/><path d="M8 11h8M12 18 8 11M12 18l4-7M4 18h16"/></svg><span class="toolbar__label" data-i18n="stage.wire"></span><kbd>Z</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
           <button class="toolbar__btn" type="button" id="toggle-bed" aria-pressed="true" data-i18n-attr="title:stage.bedTitle;aria-label:stage.bedTitle"><svg class="toolbar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 16 7 8h10l4.5 8z"/><path d="M9.5 8 8 16M14.5 8 16 16M4.8 12h14.4"/></svg><span class="toolbar__label" data-i18n="stage.bed"></span><kbd>P</kbd></button>
           <span class="toolbar__sep" aria-hidden="true"></span>
@@ -399,6 +479,16 @@
           <button class="btn btn--quiet btn--sm" type="button" data-turn="2">Z</button>
           <button class="btn btn--quiet btn--sm" type="button" id="rotate-reset" data-i18n="place.resetRotation">Orientación original</button>
         </div>
+        <div class="place" data-for="clip">
+          <span data-i18n="clip.axis">Sección:</span>
+          <button class="btn btn--quiet btn--sm" type="button" data-clip-axis="0">X</button>
+          <button class="btn btn--quiet btn--sm" type="button" data-clip-axis="1">Y</button>
+          <button class="btn btn--quiet btn--sm" type="button" data-clip-axis="2">Z</button>
+          <button class="btn btn--quiet btn--sm" type="button" id="clip-flip" aria-pressed="false" data-i18n="cut.flip">Invertir</button>
+          <button class="btn btn--quiet btn--sm" type="button" id="clip-off" data-i18n="clip.off">Quitar sección</button>
+          <span class="help" data-i18n="clip.help">Solo oculta lo de delante: el modelo no cambia.</span>
+        </div>
+        <p class="measure thick-out" id="thickness-out" aria-live="polite"><span data-bind="thicknessOut"></span></p>
         <p class="measure" id="measure-out" aria-live="polite"><span data-bind="measure"></span> <button class="link" type="button" id="measure-clear" hidden data-i18n="measure.clear">Borrar medida</button></p>
         <p class="stage__hint" data-bind="hint"></p>
       </div>
