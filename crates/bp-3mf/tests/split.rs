@@ -34,6 +34,7 @@ fn a_split_model_exports_one_plate_per_group_with_every_piece_on_its_plate() {
     assert!(report.plates >= 2, "{report:?}");
     let pieces = project.export_parts();
     let model = bp_3mf::Model {
+        plate_count: 1,
         name: "bar",
         parts: pieces
             .iter()

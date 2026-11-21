@@ -440,6 +440,15 @@ export class Viewer {
         if (materials) for (const m of [materials].flat()) m.dispose();
       });
     }
+    if (data.positions.length === 0) {
+      this.mesh = null;
+      this.cutPreview.invalidate();
+      this.cancelPlace();
+      this.buildBed();
+      this.showHandles();
+      this.requestRender();
+      return;
+    }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(data.positions, 3));
     this.colors = new Uint8Array(data.labels.length * 9);
@@ -1443,7 +1452,7 @@ export class Viewer {
     const { plate, scale } = this.bedPlate!;
     // Each plate's pieces have their centre on the plate's centre, as the 3MF places them.
     const groups = plate.plates.length
-      ? plate.plates.map((g) => ({ check: g, c: new THREE.Vector3(...g.centre) }))
+      ? plate.plates.filter((g) => g.objects > 0).map((g) => ({ check: g, c: new THREE.Vector3(...g.centre) }))
       : [{ check: plate as Plate | Plate["plates"][number], c: box.getCenter(new THREE.Vector3()) }];
     const z = box.min.z - 0.02 / scale;
     for (const { check, c } of groups) this.buildPlate(check, c, z, scale, plate.prefs.towerGapMm);

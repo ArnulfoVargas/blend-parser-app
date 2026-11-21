@@ -27,6 +27,8 @@ pub struct Part<'a> {
 pub struct Model<'a> {
     pub name: &'a str,
     pub parts: Vec<Part<'a>>,
+    /// Includes empty plates after the last occupied plate.
+    pub plate_count: usize,
     /// Filament colours as `#RRGGBB`, slot 1 first.
     pub filaments: Vec<String>,
     pub printer: Printer,
@@ -124,9 +126,9 @@ fn object_plate(model: &Model, parts: &[usize]) -> u32 {
     parts.first().map_or(0, |&i| model.parts[i].plate)
 }
 
-/// Plates used: one more than the highest plate any part goes on.
+/// Counts both declared empty plates and any plate a part occupies.
 pub fn plate_count(model: &Model) -> usize {
-    model.parts.iter().map(|p| p.plate as usize + 1).max().unwrap_or(1)
+    model.parts.iter().map(|p| p.plate as usize + 1).max().unwrap_or(1).max(model.plate_count)
 }
 
 /// Where Bambu Studio lays plate `index` out from the first one, in
@@ -386,6 +388,7 @@ mod tests {
         let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
         let paint = vec!["4".to_string(), "8".into(), "0C".into(), "40C0C0C30C0C0C30C0C0C3".into()];
         let model = Model {
+            plate_count: 1,
             name: "test & co",
             parts: vec![Part { name: "tet", positions: &positions, tris: &tris, paint: &paint, object: 0, plate: 0 }],
             filaments: vec!["#4d2720".into(), "#222222".into(), "#E8A461".into()],
@@ -431,6 +434,7 @@ mod tests {
         let paint = vec!["4".to_string(); 4];
         let part = |name, object| Part { name, positions: &positions, tris: &tris, paint: &paint, object, plate: 0 };
         let model = Model {
+            plate_count: 1,
             name: "m",
             parts: vec![part("a", 0), part("b (2)", 1), part("c", 0)],
             filaments: vec!["#FFFFFF".into()],
@@ -458,6 +462,7 @@ mod tests {
         let part =
             |name, object, plate| Part { name, positions: &positions, tris: &tris, paint: &paint, object, plate };
         let model = Model {
+            plate_count: 1,
             name: "m",
             parts: vec![part("a", 0, 0), part("b", 1, 1), part("c", 2, 2), part("d", 3, 0)],
             filaments: vec!["#FFFFFF".into(), "#000000".into()],
@@ -480,10 +485,18 @@ mod tests {
         assert_eq!(first.matches("<model_instance>").count(), 2);
         let v: serde_json::Value = serde_json::from_str(&project_json(&model)).unwrap();
         assert_eq!(v["wipe_tower_x"].as_array().unwrap().len(), 3);
+        let model = Model { plate_count: 4, ..model };
+        let cfg = settings_xml(&model);
+        assert_eq!(cfg.matches("<plate>").count(), 4);
+        assert_eq!(cfg.matches("<model_instance>").count(), 4);
+        let empty = cfg.rsplit_once("<plate>").unwrap().1;
+        assert!(empty.contains("key=\"plater_id\" value=\"4\""));
+        assert!(!empty.contains("<model_instance>"));
     }
 
     fn config(printer: Printer) -> serde_json::Value {
         let model = Model {
+            plate_count: 1,
             name: "t",
             parts: vec![],
             filaments: vec!["#FFFFFF".into()],

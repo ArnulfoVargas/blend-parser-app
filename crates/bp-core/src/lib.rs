@@ -23,8 +23,8 @@ pub mod waste;
 
 pub use mesh::{MeshOps, RepairReport};
 pub use project::{
-    ColorOps, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, PlateGroup, Preview, PrintOps, Project,
-    SeparateError, SplitError, SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
+    ColorOps, ConnectError, CutProposal, DetectedPiece, ExportPart, Mat3, PlateEditError, PlateGroup, Preview,
+    PrintOps, Project, SeparateError, SplitError, SplitPiece, SplitPlan, SplitReport, Stats, IDENTITY,
 };
 pub use scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 pub use split::ColorPiece;

@@ -664,6 +664,7 @@ function render(s: Summary) {
   undoBtn.disabled = !s.canUndo;
   undoBtn.title = s.undoLabel ? t("undo.title", { what: t(`undo.${s.undoLabel}`) }) : t("undo.nothing");
   bind("exportLabel", t("export.label"));
+  for (const id of ["#export", "#open-zip"]) $(id).setAttribute("aria-disabled", String(s.parts.length === 0));
   viewer.setPalette(s.slots.map((x) => x.hex));
   syncBrush();
   if (wasteDialog.open) fillFlushTable(s);
@@ -787,9 +788,92 @@ $("#size-undo").addEventListener("click", () => void apply(() => api.undoSize())
 // ---- plate and tower --------------------------------------------------------------------
 
 const plateSvg = $<SVGSVGElement & HTMLElement>("#plate-view");
+const projectPlate = $<HTMLSelectElement>("#project-plate");
+const plateObject = $<HTMLSelectElement>("#plate-object");
+const plateDestination = $<HTMLSelectElement>("#plate-destination");
+let activePlate = 0;
+
+const plateName = (index: number) => t("plates.name", { n: nf(index + 1) });
+
+function setOptions(select: HTMLSelectElement, values: [number, string][], preferred = select.value) {
+  select.replaceChildren(...values.map(([id, label]) => new Option(label, String(id))));
+  if (values.some(([id]) => String(id) === preferred)) select.value = preferred;
+  select.disabled = values.length === 0;
+}
+
+function renderPlateControls(s: Summary) {
+  const count = Math.max(1, s.plate.plates.length);
+  activePlate = Math.min(activePlate, count - 1);
+  const plates: [number, string][] = Array.from({ length: count }, (_, i) => [i, plateName(i)]);
+  setOptions(projectPlate, plates, String(activePlate));
+
+  const objects = new Map<number, string>();
+  for (const part of s.parts) {
+    if (part.plate === activePlate && !objects.has(part.object)) objects.set(part.object, part.name);
+  }
+  const options: [number, string][] = [...objects].map(([id, name], index) => [
+    id, name ? t("plates.namedObject", { n: nf(index + 1), name }) : t("plates.unnamedObject", { n: nf(index + 1) }),
+  ]);
+  setOptions(plateObject, options);
+  setOptions(plateDestination, plates.filter(([i]) => i !== activePlate));
+  $<HTMLButtonElement>("#plate-move").disabled = plateObject.disabled || plateDestination.disabled;
+  $<HTMLButtonElement>("#plate-clear").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-clone").disabled = plateObject.disabled;
+  $<HTMLButtonElement>("#plate-arrange").disabled = s.parts.length === 0;
+}
+
+projectPlate.addEventListener("change", () => {
+  activePlate = Number(projectPlate.value);
+  if (summary) renderPlate(summary);
+});
+$("#plate-add").addEventListener("click", () => {
+  void apply(async () => {
+    const s = await api.addPlate();
+    activePlate = Math.max(0, s.plate.plates.length - 1);
+    return s;
+  });
+});
+$("#plate-move").addEventListener("click", () => {
+  const object = Number(plateObject.value);
+  const destination = Number(plateDestination.value);
+  void apply(async () => {
+    const s = await api.moveToPlate(object, destination);
+    activePlate = destination;
+    return s;
+  });
+});
+function readPlateGap(): number | null {
+  const input = $<HTMLInputElement>("#plate-arrange-gap");
+  const n = input.valueAsNumber;
+  const valid = n >= 0 && n <= 50;
+  input.setAttribute("aria-invalid", String(!valid));
+  if (valid) return n;
+  input.focus();
+  toast(t("error.splitGap", { min: nf(0), max: nf(50) }), "error");
+  return null;
+}
+
+$("#plate-clone").addEventListener("click", () => {
+  const object = Number(plateObject.value);
+  const gap = $<HTMLInputElement>("#plate-arrange-clones").checked ? readPlateGap() : undefined;
+  if (gap === null) return;
+  void apply(() => api.cloneObject(object, t("plates.copy"), gap), () => viewer.frameAll());
+});
+$("#plate-arrange").addEventListener("click", () => {
+  const gap = readPlateGap();
+  if (gap === null) return;
+  void apply(() => api.arrangePlates(gap), () => viewer.frameAll());
+});
+$("#plate-clear").addEventListener("click", async () => {
+  const plate = activePlate;
+  if (await ask(t("plates.confirmClear", { plate: plateName(plate) }), { title: t("plates.clear"), kind: "warning" })) {
+    await apply(() => api.clearPlate(plate));
+  }
+});
 
 function renderPlate(s: Summary) {
-  const p = s.plate;
+  renderPlateControls(s);
+  const p = { ...s.plate, ...s.plate.plates[activePlate] };
   const a = p.area;
   const pad = Math.max(a.x1 - a.x0, a.y1 - a.y0) * 0.03;
   const [w, h] = [a.x1 - a.x0, a.y1 - a.y0];
@@ -1194,7 +1278,7 @@ async function confirmOversize(): Promise<boolean> {
 
 $("#export").addEventListener("click", async () => {
   const btn = $<HTMLButtonElement>("#export");
-  if (app.dataset.state !== "ready" || !summary || btn.getAttribute("aria-busy") === "true") return;
+  if (app.dataset.state !== "ready" || !summary?.parts.length || btn.getAttribute("aria-busy") === "true") return;
   if (!(await confirmOversize())) return;
   const path = await save({ defaultPath: summary.fileName.replace(MODEL_EXT, ".3mf"), filters: [{ name: "3MF", extensions: ["3mf"] }] });
   if (!path) return;
@@ -1215,7 +1299,7 @@ $("#export").addEventListener("click", async () => {
 
 const zipDialog = $<HTMLDialogElement>("#zip-dialog");
 $("#open-zip").addEventListener("click", () => {
-  if (app.dataset.state === "ready") zipDialog.showModal();
+  if (app.dataset.state === "ready" && summary?.parts.length) zipDialog.showModal();
 });
 $("#export-zip").addEventListener("click", async () => {
   if (!summary) return;

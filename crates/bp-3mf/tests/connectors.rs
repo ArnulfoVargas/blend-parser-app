@@ -40,6 +40,7 @@ fn a_cut_with_dowels_exports_halves_and_dowels_as_named_objects() {
     let names: Vec<&str> = pieces.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["box A", "box B", "box dowel 1", "box dowel 2"]);
     let model = bp_3mf::Model {
+        plate_count: 1,
         name: "dowels",
         parts: pieces
             .iter()
