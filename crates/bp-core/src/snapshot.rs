@@ -12,7 +12,7 @@ use crate::project::{ColorOps, PrintOps};
 use crate::scene::{ColorSource, Image, MaterialInfo, Part, Scene};
 
 const MAGIC: &[u8; 4] = b"BPPJ";
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -260,6 +260,7 @@ pub(crate) fn write_mesh_ops(w: &mut Writer, o: &MeshOps) {
     w.u8(o.drains);
     w.f32(o.drain_mm);
     w.f32(o.thicken_mm);
+    w.bool(o.remove_hidden);
 }
 
 pub(crate) fn read_mesh_ops(r: &mut Reader) -> R<MeshOps> {
@@ -273,6 +274,7 @@ pub(crate) fn read_mesh_ops(r: &mut Reader) -> R<MeshOps> {
         split_vertices: r.bool()?,
         drop_floating: r.bool()?,
         deep_clean: r.bool()?,
+        remove_hidden: false,
         ..MeshOps::default()
     };
     if r.version >= 4 {
@@ -285,6 +287,9 @@ pub(crate) fn read_mesh_ops(r: &mut Reader) -> R<MeshOps> {
         ops.drains = r.u8()?;
         ops.drain_mm = r.f32()?;
         ops.thicken_mm = r.f32()?;
+    }
+    if r.version >= 5 {
+        ops.remove_hidden = r.bool()?;
     }
     Ok(ops)
 }
@@ -310,6 +315,19 @@ pub(crate) fn write_rgb(w: &mut Writer, c: &Rgb) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loading_legacy_mesh_options_keeps_enclosed_parts() {
+        let ops = MeshOps { remove_hidden: true, ..MeshOps::default() };
+        let mut writer = Writer::new();
+        write_mesh_ops(&mut writer, &ops);
+        assert!(read_mesh_ops(&mut Reader::new(&writer.0).unwrap()).unwrap().remove_hidden);
+
+        // Version four stored the same fields through thicken_mm.
+        writer.0[4..8].copy_from_slice(&4u32.to_le_bytes());
+        writer.0.pop();
+        assert!(!read_mesh_ops(&mut Reader::new(&writer.0).unwrap()).unwrap().remove_hidden);
+    }
 
     #[test]
     fn reads_legacy_scene_without_plate_and_roundtrips_multiple_plates() {

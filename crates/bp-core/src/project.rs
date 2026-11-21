@@ -774,6 +774,7 @@ impl Project {
             self.rotation = rotation;
             self.placement = geom::add(mat_vec(turn, self.placement), shift);
             self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
+            self.cut_cache = Default::default();
             self.measure_source();
             let moved = RigidMove { matrix: turn, shift };
             self.picker_frame = moved.after(self.picker_frame);
@@ -2240,6 +2241,7 @@ impl Project {
     }
 
     fn apply_size(&mut self, size: Vec3) {
+        self.cut_cache = Default::default();
         self.size_mm = size;
         self.scale = (size[2] / self.source_height).max(1e-6);
         let stretch: Vec3 = std::array::from_fn(|i| size[i] / (self.source_size[i] * self.scale));
@@ -2319,6 +2321,7 @@ impl Project {
     }
 
     fn rebuild_geometry_keep_paint(&mut self) {
+        self.cut_cache = Default::default();
         let (shape, work) = Mesh::build_with(&self.scene, self.mesh_ops, self.scale, &|m| self.triangle_labels(m));
         self.shape = shape;
         self.work = work;
@@ -3001,6 +3004,7 @@ impl Project {
             tri_offsets: vec![],
             stroke: vec![],
             undo: vec![],
+            cut_cache: Default::default(),
         };
         p.rebuild_geometry();
         let counts: Vec<usize> = p.work.parts.iter().map(|w| w.tris.len()).collect();

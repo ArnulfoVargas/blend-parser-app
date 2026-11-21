@@ -1110,7 +1110,7 @@ function plateObjects(s: Summary): Map<number, number>[] {
   s.parts.forEach((p) => out[p.plate]?.set(p.object, (out[p.plate].get(p.object) ?? 0) + 1));
   return out;
 }
-const objectName = (s: Summary, object: number) => s.parts.find((p) => p.object === object)?.name ?? t("plates.unnamedObject", { n: nf(object + 1) });
+const plateObjectName = (s: Summary, object: number) => s.parts.find((p) => p.object === object)?.name ?? t("plates.unnamedObject", { n: nf(object + 1) });
 
 /** The plate the side panel shows and the view frames brighter. */
 function setActivePlate(plate: number) {
@@ -1156,7 +1156,7 @@ function openContextMenu(at: { x: number; y: number }, object: number | null, pl
     item.title = kind === "move" && object !== null && count < 2 ? t("ctx.moveOnlyOne") : "";
   }
   ctxMenu.querySelector<HTMLElement>(".ctx__sep")!.hidden = object === null;
-  $("#ctx-title").textContent = object !== null ? `${objectName(s, object)} · ${plateName(on)}` : plateName(on);
+  $("#ctx-title").textContent = object !== null ? `${plateObjectName(s, object)} · ${plateName(on)}` : plateName(on);
   ctxMenu.showPopover();
   // Inside the window, beside the pointer.
   const r = ctxMenu.getBoundingClientRect();
@@ -1230,7 +1230,7 @@ async function cloneDialog(object: number) {
   const d = $<HTMLDialogElement>("#clone-dialog");
   const count = $<HTMLInputElement>("#clone-count");
   const gap = $<HTMLInputElement>("#clone-gap");
-  bind("cloneWhat", t("clone.what", { name: objectName(s, object), plate: plateName(s.parts.find((p) => p.object === object)?.plate ?? 0) }));
+  bind("cloneWhat", t("clone.what", { name: plateObjectName(s, object), plate: plateName(s.parts.find((p) => p.object === object)?.plate ?? 0) }));
   count.value = "1";
   requestAnimationFrame(() => count.select());
   if ((await dialogResult(d)) !== "ok") return;
@@ -1263,7 +1263,7 @@ async function moveDialog(object: number, from: number) {
   const box = $<HTMLFieldSetElement>("#move-plates");
   const objects = plateObjects(s);
   const count = plateCount(s);
-  bind("moveWhat", t("move.what", { name: objectName(s, object), plate: plateName(from) }));
+  bind("moveWhat", t("move.what", { name: plateObjectName(s, object), plate: plateName(from) }));
   box.querySelectorAll("label").forEach((l) => l.remove());
   const choices = [...Array.from({ length: count }, (_, i) => i).filter((i) => i !== from), count];
   choices.forEach((i, k) => {

@@ -2,10 +2,10 @@
 //! a cut needs already applied, so open seams, repeated or collapsed faces and
 //! stray fins in the file do not stop a cut, a split or connectors.
 
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 
 use super::Project;
+use crate::geom;
 use crate::mesh::{Mesh, MeshOps, MeshPart};
 use crate::scene::{Part, Scene};
 
@@ -17,9 +17,9 @@ pub(crate) struct CutSource {
     pub from: Vec<u32>,
 }
 
-/// Shared between a project and the copies the previews make: the key says
-/// whether the stored parts are still the project's.
-pub(crate) type CutSourceCache = Arc<Mutex<Option<(u64, Arc<Vec<CutSource>>)>>>;
+/// Shared by copies of the same geometry. A geometry change replaces the
+/// cache so earlier preview and undo snapshots keep their own baked parts.
+pub(crate) type CutSourceCache = Arc<OnceLock<Arc<Vec<CutSource>>>>;
 
 impl Project {
     /// Clean-up a cut needs: welded seams, no collapsed or repeated faces,
@@ -38,53 +38,53 @@ impl Project {
         }
     }
 
-    fn cut_source_key(&self, ops: &MeshOps) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        format!("{ops:?}").hash(&mut h);
-        self.scale.to_bits().hash(&mut h);
-        for (part, src) in self.scene.parts.iter().zip(&self.source_positions) {
-            (part.tris.len(), src.len(), part.object, part.plate).hash(&mut h);
-            // A turn, a move or a cut changes these.
-            for i in [0, src.len() / 3, src.len() / 2, src.len().saturating_sub(1)] {
-                if let Some(v) = src.get(i) {
-                    v.map(f32::to_bits).hash(&mut h);
-                }
-            }
-        }
-        h.finish()
-    }
-
     /// Every source part ready to be cut. Cached while the scene stays the same.
     pub(crate) fn cut_sources(&self) -> Arc<Vec<CutSource>> {
-        let ops = self.cut_ops();
-        let key = self.cut_source_key(&ops);
-        if let Ok(guard) = self.cut_cache.lock() {
-            if let Some((k, v)) = guard.as_ref() {
-                if *k == key {
-                    return v.clone();
-                }
-            }
-        }
-        let scene = Scene {
-            parts: self
-                .scene
-                .parts
-                .iter()
-                .zip(&self.source_positions)
-                .map(|(p, src)| Part { positions: src.clone(), ..p.clone() })
-                .collect(),
-            images: vec![],
-            materials: vec![],
-        };
-        let (shape, _) = Mesh::build(&scene, ops, self.scale);
-        let baked: Vec<CutSource> =
-            scene.parts.iter().zip(&shape.parts).map(|(source, cleaned)| bake_part(source, cleaned)).collect();
-        let baked = Arc::new(baked);
-        if let Ok(mut guard) = self.cut_cache.lock() {
-            *guard = Some((key, baked.clone()));
-        }
-        baked
+        self.cut_cache
+            .get_or_init(|| {
+                let scene = Scene {
+                    parts: self
+                        .scene
+                        .parts
+                        .iter()
+                        .zip(&self.source_positions)
+                        .map(|(p, src)| Part { positions: src.clone(), ..p.clone() })
+                        .collect(),
+                    images: vec![],
+                    materials: vec![],
+                };
+                let ops = self.cut_ops();
+                let (shape, _) = Mesh::build(&scene, ops, self.scale);
+                Arc::new(
+                    scene
+                        .parts
+                        .iter()
+                        .zip(&shape.parts)
+                        .map(|(source, cleaned)| {
+                            // Capping a flat sheet would double the surface without enclosing volume.
+                            if shape.repair.filled_holes > 0 && is_planar(source, 1e-5 / self.scale) {
+                                let flat = Scene { parts: vec![source.clone()], ..Default::default() };
+                                let (open, _) = Mesh::build(&flat, MeshOps { fill_holes: false, ..ops }, self.scale);
+                                return bake_part(source, &open.parts[0]);
+                            }
+                            bake_part(source, cleaned)
+                        })
+                        .collect(),
+                )
+            })
+            .clone()
     }
+}
+
+fn is_planar(part: &Part, eps: f32) -> bool {
+    let plane = (0..part.tris.len()).find_map(|i| {
+        let [a, b, c] = part.corners(i);
+        let normal = geom::cross(geom::sub(b, a), geom::sub(c, a));
+        (geom::len(normal) > eps * eps).then(|| (a, geom::normalize(normal)))
+    });
+    plane.is_none_or(|(point, normal)| {
+        part.positions.iter().all(|&v| geom::dot(geom::sub(v, point), normal).abs() <= eps)
+    })
 }
 
 /// `cleaned` (from [`Mesh::build`] on `source`) as a part of its own: each

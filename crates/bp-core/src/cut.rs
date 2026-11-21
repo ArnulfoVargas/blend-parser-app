@@ -675,8 +675,14 @@ pub(crate) fn valid_section(source: &Part, sides: &[(Part, Vec<Option<u32>>); 2]
     if pieces.clone().all(|part| valid_solid(part, eps)) {
         return true;
     }
-    surface_is_closed(source, eps) != Some(true)
-        && pieces.all(|part| part.positions.iter().flatten().all(|v| v.is_finite()))
+    match surface_is_closed(source, eps) {
+        Some(true) => false,
+        Some(false) => pieces.all(|part| surface_is_closed(part, eps).is_some()),
+        None => pieces.all(|part| {
+            part.positions.iter().flatten().all(|v| v.is_finite())
+                && part.tris.iter().flatten().all(|&index| (index as usize) < part.positions.len())
+        }),
+    }
 }
 
 /// None for degenerate, nonfinite, or inconsistently wound or shared edges.

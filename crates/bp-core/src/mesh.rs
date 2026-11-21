@@ -801,7 +801,7 @@ impl Mesh {
         let comps: Vec<Vec<u32>> = self.parts.iter().map(MeshPart::components).collect();
         let mut pieces: Vec<(usize, u32, Vec<usize>)> = vec![];
         for (pi, comp) in comps.iter().enumerate() {
-            let mut index: HashMap<u32, usize> = HashMap::new();
+            let mut index: HashMap<u32, usize> = HashMap::default();
             for (ti, &c) in comp.iter().enumerate() {
                 let at = *index.entry(c).or_insert_with(|| {
                     pieces.push((pi, c, vec![]));
