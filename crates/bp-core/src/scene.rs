@@ -42,6 +42,7 @@ pub struct MaterialInfo {
     pub name: String,
     /// `flat`, `image` or `vertex`.
     pub kind: String,
+    /// What the UI words by kind: `WxH` pixels, the colour layer's name, or `#RRGGBB`.
     pub detail: String,
     pub faces: u32,
 }
@@ -61,6 +62,8 @@ pub struct Part {
     pub uv_layers: Vec<Vec<[f32; 2]>>,
     /// Colour attributes, one sRGB colour per loop.
     pub color_layers: Vec<Vec<Rgb>>,
+    /// The printed object the part belongs to: 0 for the model, more for pieces cut off it.
+    pub object: u32,
 }
 
 impl Part {
@@ -112,15 +115,16 @@ impl Scene {
         }))
     }
 
-    /// Moves the scene so XY is centred on the origin and the lowest point sits on Z = 0.
-    pub fn place_on_plate(&mut self) {
-        if let Some((lo, hi)) = self.bounds() {
-            let shift = [-(lo[0] + hi[0]) * 0.5, -(lo[1] + hi[1]) * 0.5, -lo[2]];
-            for p in &mut self.parts {
-                for v in &mut p.positions {
-                    *v = geom::add(*v, shift);
-                }
+    /// Moves the scene so XY is centred on the origin and the lowest point sits
+    /// on Z = 0. Returns how far it moved.
+    pub fn place_on_plate(&mut self) -> Vec3 {
+        let Some((lo, hi)) = self.bounds() else { return [0.0; 3] };
+        let shift = [-(lo[0] + hi[0]) * 0.5, -(lo[1] + hi[1]) * 0.5, -lo[2]];
+        for p in &mut self.parts {
+            for v in &mut p.positions {
+                *v = geom::add(*v, shift);
             }
         }
+        shift
     }
 }

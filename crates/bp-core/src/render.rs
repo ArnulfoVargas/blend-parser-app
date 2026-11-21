@@ -10,6 +10,9 @@ pub enum Style {
     Normal,
     /// The piece being added: full colour and a heavy outline.
     Focus,
+    /// Where glue goes: striped, over the faces of the piece it lies on
+    /// (an item with that piece's id and only those triangles).
+    Glue,
 }
 
 pub struct Item<'a> {
@@ -23,6 +26,9 @@ pub struct Item<'a> {
 pub const PAPER: [u8; 3] = [0xF4, 0xF1, 0xE8];
 const INK: [u8; 3] = [0x1F, 0x2A, 0x24];
 const FADE: [u8; 3] = [0xE4, 0xE0, 0xD6];
+/// Glue stripes: a magenta no filament colour is mistaken for, and its pale tint.
+pub const GLUE: [u8; 3] = [0xD8, 0x1B, 0x72];
+const GLUE_PALE: [u8; 3] = [0xF6, 0xC4, 0xDB];
 pub const NO_ID: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug)]
@@ -160,6 +166,11 @@ pub fn render(cam: &Camera, items: &[Item], ssaa: usize) -> Frame {
             }
             let lit = 0.5 + 0.5 * geom::dot(n, light).max(0.0);
             let shade = base.map(|x| (x * lit).min(255.0));
+            let glue = item.style == Style::Glue;
+            let stripe = |x: usize, y: usize| {
+                let c = if ((x + y) / (3 * k)).is_multiple_of(2) { GLUE } else { GLUE_PALE };
+                float(c).map(|v| (v * (0.8 + 0.2 * lit)).min(255.0))
+            };
             let [a, b, cc] = t.map(|v| screen[v as usize]);
             let area = (b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0]);
             if area.abs() < 1e-9 {
@@ -184,9 +195,10 @@ pub fn render(cam: &Camera, items: &[Item], ssaa: usize) -> Frame {
                     }
                     let z = w0 * a[2] + w1 * b[2] + w2 * cc[2];
                     let i = y * w + x;
-                    if z > depth[i] {
+                    // Glue lies on faces already drawn, at their depth.
+                    if z > depth[i] || (glue && z >= depth[i] - 1e-3) {
                         depth[i] = z;
-                        colour[i] = shade;
+                        colour[i] = if glue { stripe(x, y) } else { shade };
                         ids[i] = item.id;
                         style[i] = item.style;
                     }
@@ -268,6 +280,25 @@ mod tests {
         assert!((a[0] - 0.5).abs() < 0.1 && (a[1] - 0.5).abs() < 0.1);
         // Corners stay paper.
         assert_eq!(&f.rgb[..3], &PAPER);
+    }
+
+    #[test]
+    fn glue_shows_over_the_faces_it_marks() {
+        let (p, t) = cuboid([0.0; 3], [10.0; 3]);
+        let cam = Camera::new(35.0, 25.0, [0.0; 3], [10.0; 3], 80, 60);
+        // The top face (+Z).
+        let top: Vec<[u32; 3]> =
+            t.iter().copied().filter(|tri| tri.iter().all(|&v| p[v as usize][2] == 10.0)).collect();
+        assert_eq!(top.len(), 2);
+        let items = [
+            Item { positions: &p, tris: &t, rgb: [40, 160, 40], id: 7, style: Style::Faded },
+            Item { positions: &p, tris: &top, rgb: [0; 3], id: 7, style: Style::Glue },
+        ];
+        let f = render(&cam, &items, 1);
+        let magenta = f.rgb.chunks(3).filter(|c| c[0] > 150 && c[1] < 120 && c[2] > 60).count();
+        assert!(magenta > 50, "{magenta}");
+        // Same piece: no outline between the glue and the faces around it.
+        assert_eq!(f.count(7), f.ids.iter().filter(|&&i| i != NO_ID).count());
     }
 
     #[test]

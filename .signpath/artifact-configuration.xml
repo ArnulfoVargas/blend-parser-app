@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Artifact configuration for the SignPath project (paste it in SignPath > Project >
+  Artifact configurations). The release workflow uploads a ZIP with nsis/ and msi/
+  folders; the version parameter is the app version without the tag prefix ("0.0.3").
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="nsis/BlendParser_*_x64-setup.exe" product-name="BlendParser" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+    <msi-file path="msi/BlendParser_*_x64_*.msi" subject="BlendParser">
+      <authenticode-sign />
+    </msi-file>
+  </zip-file>
+</artifact-configuration>

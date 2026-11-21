@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bp-core", "crates/bp-blend", "crates/bp-3mf", "src-tauri"]
+members = ["crates/bp-core", "crates/bp-blend", "crates/bp-3mf", "crates/bp-cli", "src-tauri"]
 
 [workspace.package]
 version = "0.0.2"
@@ -20,6 +20,11 @@ serde_json = "1"
 thiserror = "2"
 
 [profile.dev.package."*"]
+opt-level = 3
+
+# The geometry and painting core runs on every edit: unoptimized, a turn or a cut
+# of a large model takes seconds in `tauri dev`.
+[profile.dev.package.bp-core]
 opt-level = 3
 
 [profile.release]
