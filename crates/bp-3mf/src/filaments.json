@@ -4,13 +4,16 @@
   "commit": "79df7ae309be398ed30c9f397c13c9911c2edc57",
   "files": [
    "resources/profiles/BBL/filament/filaments_color_codes.json",
-   "resources/profiles/BBL.json"
+   "resources/profiles/BBL.json",
+   "resources/flush/flush_data_material_pair.json"
   ]
  },
  "types": {
   "ABS": {
    "preset": "Bambu ABS",
    "material": "ABS",
+   "id": "GFB00",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -55,6 +58,8 @@
   "ABS-GF": {
    "preset": "Bambu ABS-GF",
    "material": "ABS-GF",
+   "id": "GFB50",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL H2C",
@@ -72,6 +77,8 @@
   "ASA": {
    "preset": "Bambu ASA",
    "material": "ASA",
+   "id": "GFB01",
+   "support": false,
    "printers": [
     "@BBL A1 0.2 nozzle",
     "@BBL A1 0.4 nozzle",
@@ -113,11 +120,15 @@
   "ASA Aero": {
    "preset": null,
    "material": null,
+   "id": "GFB02",
+   "support": false,
    "printers": []
   },
   "ASA-CF": {
    "preset": "Bambu ASA-CF",
    "material": "ASA-CF",
+   "id": "GFB51",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.6 nozzle",
@@ -141,6 +152,8 @@
   "PA6-CF": {
    "preset": "Bambu PA6-CF",
    "material": "PA6-CF",
+   "id": "GFN05",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL H2C",
@@ -169,6 +182,8 @@
   "PA6-GF": {
    "preset": "Bambu PA6-GF",
    "material": "PA-GF",
+   "id": "GFN08",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL H2C",
@@ -186,6 +201,8 @@
   "PAHT-CF": {
    "preset": "Bambu PAHT-CF",
    "material": "PA-CF",
+   "id": "GFN04",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL H2C",
@@ -215,6 +232,8 @@
   "PC": {
    "preset": "Bambu PC",
    "material": "PC",
+   "id": "GFC00",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1",
@@ -295,6 +314,8 @@
   "PC FR": {
    "preset": "Bambu PC FR",
    "material": "PC",
+   "id": "GFC01",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -336,6 +357,8 @@
   "PET-CF": {
    "preset": "Bambu PET-CF",
    "material": "PET-CF",
+   "id": "GFT01",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL H2C",
@@ -354,6 +377,8 @@
   "PETG Basic": {
    "preset": "Bambu PETG Basic",
    "material": "PETG",
+   "id": "GFG00",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -397,6 +422,8 @@
   "PETG HF": {
    "preset": "Bambu PETG HF",
    "material": "PETG",
+   "id": "GFG02",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -443,6 +470,8 @@
   "PETG Matte": {
    "preset": "Bambu PETG Matte",
    "material": "PETG",
+   "id": "GFG03",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -489,6 +518,8 @@
   "PETG Translucent": {
    "preset": "Bambu PETG Translucent",
    "material": "PETG",
+   "id": "GFG01",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -533,6 +564,8 @@
   "PETG-CF": {
    "preset": "Bambu PETG-CF",
    "material": "PETG-CF",
+   "id": "GFG50",
+   "support": false,
    "printers": [
     "@BBL A1 0.4 nozzle",
     "@BBL A1 0.8 nozzle",
@@ -568,6 +601,8 @@
   "PLA Aero": {
    "preset": "Bambu PLA Aero",
    "material": "PLA-AERO",
+   "id": "GFA11",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1M",
@@ -590,6 +625,8 @@
   "PLA Basic": {
    "preset": "Bambu PLA Basic",
    "material": "PLA",
+   "id": "GFA00",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -638,6 +675,8 @@
   "PLA Dynamic": {
    "preset": "Bambu PLA Dynamic",
    "material": "PLA",
+   "id": "GFA13",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -676,6 +715,8 @@
   "PLA Galaxy": {
    "preset": "Bambu PLA Galaxy",
    "material": "PLA",
+   "id": "GFA15",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -714,6 +755,8 @@
   "PLA Glow": {
    "preset": "Bambu PLA Glow",
    "material": "PLA",
+   "id": "GFA12",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -750,6 +793,8 @@
   "PLA Lite": {
    "preset": "Bambu PLA Lite",
    "material": "PLA",
+   "id": "GFA18",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -795,6 +840,8 @@
   "PLA Marble": {
    "preset": "Bambu PLA Marble",
    "material": "PLA",
+   "id": "GFA07",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1M",
@@ -820,6 +867,8 @@
   "PLA Matte": {
    "preset": "Bambu PLA Matte",
    "material": "PLA",
+   "id": "GFA01",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -868,6 +917,8 @@
   "PLA Metal": {
    "preset": "Bambu PLA Metal",
    "material": "PLA",
+   "id": "GFA02",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -905,6 +956,8 @@
   "PLA Pure": {
    "preset": "Bambu PLA Pure",
    "material": "PLA",
+   "id": "GFA19",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -951,6 +1004,8 @@
   "PLA Silk": {
    "preset": "Bambu PLA Silk",
    "material": "PLA",
+   "id": "GFA05",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -986,6 +1041,8 @@
   "PLA Silk+": {
    "preset": "Bambu PLA Silk+",
    "material": "PLA",
+   "id": "GFA06",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -1033,6 +1090,8 @@
   "PLA Sparkle": {
    "preset": "Bambu PLA Sparkle",
    "material": "PLA",
+   "id": "GFA08",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1M",
@@ -1059,6 +1118,8 @@
   "PLA Tough": {
    "preset": "Bambu PLA Tough",
    "material": "PLA",
+   "id": "GFA09",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -1090,6 +1151,8 @@
   "PLA Tough+": {
    "preset": "Bambu PLA Tough+",
    "material": "PLA",
+   "id": "GFA10",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -1136,6 +1199,8 @@
   "PLA Translucent": {
    "preset": "Bambu PLA Translucent",
    "material": "PLA",
+   "id": "GFA17",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -1182,6 +1247,8 @@
   "PLA Wood": {
    "preset": "Bambu PLA Wood",
    "material": "PLA",
+   "id": "GFA16",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1M",
@@ -1211,6 +1278,8 @@
   "PLA-CF": {
    "preset": "Bambu PLA-CF",
    "material": "PLA-CF",
+   "id": "GFA50",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.8 nozzle",
@@ -1246,6 +1315,8 @@
   "PPA-CF": {
    "preset": "Bambu PPA-CF",
    "material": "PPA-CF",
+   "id": "GFN06",
+   "support": false,
    "printers": [
     "@BBL H2C",
     "@BBL H2C 0.4 nozzle",
@@ -1263,6 +1334,8 @@
   "PPS-CF": {
    "preset": "Bambu PPS-CF",
    "material": "PPS-CF",
+   "id": "GFT02",
+   "support": false,
    "printers": [
     "@BBL H2C",
     "@BBL H2C 0.4 nozzle",
@@ -1275,6 +1348,8 @@
   "PVA": {
    "preset": "Bambu PVA",
    "material": "PVA",
+   "id": "GFS04",
+   "support": true,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -1308,6 +1383,8 @@
   "Support for ABS": {
    "preset": "Bambu Support for ABS",
    "material": "ABS",
+   "id": "GFS06",
+   "support": true,
    "printers": [
     "@BBL A1",
     "@BBL H2C",
@@ -1334,6 +1411,8 @@
   "Support for PA/PET": {
    "preset": "Bambu Support For PA/PET",
    "material": "PA",
+   "id": "GFS03",
+   "support": true,
    "printers": [
     "@BBL A1",
     "@BBL H2C",
@@ -1351,6 +1430,8 @@
   "Support for PLA": {
    "preset": "Bambu Support For PLA",
    "material": "PLA",
+   "id": "GFS02",
+   "support": true,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -1393,6 +1474,8 @@
   "Support for PLA/PETG": {
    "preset": "Bambu Support For PLA/PETG",
    "material": "PLA",
+   "id": "GFS05",
+   "support": true,
    "printers": [
     "@BBL A1",
     "@BBL A1 0.2 nozzle",
@@ -1433,6 +1516,8 @@
   "TPU 85A": {
    "preset": "Bambu TPU 85A",
    "material": "TPU",
+   "id": "GFU04",
+   "support": false,
    "printers": [
     "@BBL A2L 0.6 nozzle",
     "@BBL A2L 0.8 nozzle",
@@ -1455,6 +1540,8 @@
   "TPU 90A": {
    "preset": "Bambu TPU 90A",
    "material": "TPU",
+   "id": "GFU03",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1M",
@@ -1485,6 +1572,8 @@
   "TPU 95A": {
    "preset": "Bambu TPU 95A",
    "material": "TPU",
+   "id": "GFU01",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1",
@@ -1533,6 +1622,8 @@
   "TPU 95A HF": {
    "preset": "Bambu TPU 95A HF",
    "material": "TPU",
+   "id": "GFU00",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1M",
@@ -1567,6 +1658,8 @@
   "TPU for AMS": {
    "preset": "Bambu TPU for AMS",
    "material": "TPU-AMS",
+   "id": "GFU02",
+   "support": false,
    "printers": [
     "@BBL A1",
     "@BBL A1M",
@@ -1598,6 +1691,28 @@
    ]
   }
  },
+ "pairs": [
+  {
+   "from": "GFG00",
+   "to": "GFA00",
+   "purge": 650
+  },
+  {
+   "from": "GFA00",
+   "to": "GFG00",
+   "purge": 650
+  },
+  {
+   "from": "GFB00",
+   "to": "GFN08",
+   "purge": 400
+  },
+  {
+   "from": "GFB01",
+   "to": "GFN04",
+   "purge": 350
+  }
+ ],
  "colours": [
   {
    "id": "40300",

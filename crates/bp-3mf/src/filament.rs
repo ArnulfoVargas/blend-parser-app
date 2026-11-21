@@ -31,7 +31,18 @@ pub struct Filament {
 struct Type {
     preset: Option<String>,
     material: Option<String>,
+    /// Bambu's filament id ("GFA00").
+    id: Option<String>,
+    #[serde(default)]
+    support: bool,
     printers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Pair {
+    from: String,
+    to: String,
+    purge: f32,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +58,8 @@ struct Colour {
 #[derive(Deserialize)]
 struct Source {
     types: HashMap<String, Type>,
+    #[serde(default)]
+    pairs: Vec<Pair>,
     colours: Vec<Colour>,
 }
 
@@ -104,6 +117,34 @@ pub fn for_slot(kind: &str, printer: &Printer) -> SlotFilament {
     SlotFilament { material: material(kind), preset }
 }
 
+/// Flush into a support material, and the least out of one, as Bambu Studio sets them.
+const FLUSH_TO_SUPPORT_MM3: f32 = 230.0;
+const MIN_FLUSH_FROM_SUPPORT_MM3: f32 = 700.0;
+/// Bambu Studio's cap on one flush (`bp_core::waste::MAX_FLUSH_MM3`).
+const MAX_FLUSH_MM3: f32 = 900.0;
+
+/// The flush of a swap between two slots' lines (`None` for a slot without a
+/// filament), from `colour` (the colour-based flush, nozzle included), as
+/// Bambu Studio's flush table does: into a support material a set 230 mm³;
+/// otherwise at least what Bambu measured between the two materials (PLA and
+/// PETG: 650), and out of a support material at least 700.
+pub fn flush(from: Option<&str>, to: Option<&str>, colour: f32) -> f32 {
+    let types = &source().types;
+    let line = |k: Option<&str>| k.and_then(|k| types.get(k));
+    let (a, b) = (line(from), line(to));
+    if b.is_some_and(|t| t.support) {
+        return FLUSH_TO_SUPPORT_MM3;
+    }
+    let ids = a.and_then(|t| t.id.as_deref()).zip(b.and_then(|t| t.id.as_deref()));
+    let measured = ids.and_then(|(x, y)| source().pairs.iter().find(|p| p.from == x && p.to == y)).map(|p| p.purge);
+    let v = measured.map_or(colour, |m| colour.max(m).min(MAX_FLUSH_MM3));
+    if a.is_some_and(|t| t.support) {
+        v.max(MIN_FLUSH_FROM_SUPPORT_MM3)
+    } else {
+        v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +177,18 @@ mod tests {
         assert_eq!(for_slot("PLA Matte", &Printer::new(other, 0.4)).preset, None);
         assert_eq!(for_slot("PETG", &Printer::default()), SlotFilament { material: "PETG".into(), preset: None });
         assert_eq!(material("Silk PLA"), "SILK");
+    }
+
+    #[test]
+    fn material_pairs_and_supports_set_their_own_flush() {
+        // PLA after PETG was measured at 650: more than the colours ask for.
+        assert_eq!(flush(Some("PETG Basic"), Some("PLA Basic"), 300.0), 650.0);
+        assert_eq!(flush(Some("PETG Basic"), Some("PLA Basic"), 800.0), 800.0);
+        // Same material, or no filament picked: the colours decide.
+        assert_eq!(flush(Some("PLA Basic"), Some("PLA Matte"), 300.0), 300.0);
+        assert_eq!(flush(None, Some("PLA Basic"), 300.0), 300.0);
+        // Into a support material a set amount; out of one, at least 700.
+        assert_eq!(flush(Some("PLA Basic"), Some("Support for PLA"), 500.0), 230.0);
+        assert_eq!(flush(Some("Support for PLA"), Some("PLA Basic"), 200.0), 700.0);
     }
 }

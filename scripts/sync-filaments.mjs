@@ -9,7 +9,9 @@
 // slot colour), with their Spanish and English names. For each filament type it
 // records the material Bambu Studio gives it (`filament_type`, through
 // `inherits`) and the printers it has a preset for, as the preset name's suffix
-// ("@BBL X1C", "@BBL A1 0.2 nozzle").
+// ("@BBL X1C", "@BBL A1 0.2 nozzle"), its filament id ("GFA00") and whether it is a
+// support material. It also keeps the purge Bambu measured between materials
+// (`resources/flush/flush_data_material_pair.json`), by filament id.
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +22,7 @@ const OUT = join(ROOT, 'crates/bp-3mf/src/filaments.json');
 
 const commit = process.argv[2] ?? (await (await fetch(`https://api.github.com/repos/${REPO}/commits/master`)).json()).sha;
 if (!/^[0-9a-f]{40}$/.test(commit ?? '')) throw new Error(`not a commit: ${commit}`);
-const raw = (path) => `https://raw.githubusercontent.com/${REPO}/${commit}/resources/profiles/${path.split('/').map(encodeURIComponent).join('/')}`;
+const raw = (path) => `https://raw.githubusercontent.com/${REPO}/${commit}/resources/${path.startsWith('flush/') ? '' : 'profiles/'}${path.split('/').map(encodeURIComponent).join('/')}`;
 
 async function get(path) {
   for (let attempt = 0; ; attempt++) {
@@ -34,13 +36,13 @@ async function get(path) {
 const index = await get('BBL.json');
 const paths = new Map(index.filament_list.map((f) => [f.name, `BBL/${f.sub_path}`]));
 
-/** A preset's `filament_type`, following `inherits` up to where it is set. */
-async function materialOf(name, depth = 0) {
+/** A preset's `key`, following `inherits` up to where it is set. */
+async function settingOf(name, key, depth = 0) {
   const path = paths.get(name);
   if (!path || depth > 8) return null;
   const p = await get(path);
-  const t = Array.isArray(p.filament_type) ? p.filament_type[0] : p.filament_type;
-  return t ?? (p.inherits ? materialOf(p.inherits, depth + 1) : null);
+  const v = Array.isArray(p[key]) ? p[key][0] : p[key];
+  return v ?? (p.inherits ? settingOf(p.inherits, key, depth + 1) : null);
 }
 
 const colours = (await get('BBL/filament/filaments_color_codes.json')).data;
@@ -54,14 +56,25 @@ for (const type of [...new Set(single.map((c) => c.fila_type))].sort()) {
   types[type] = {
     // The preset names as Bambu Studio spells them ("Support For PLA").
     preset: base ? base.slice(0, -' @base'.length) : null,
-    material: base ? await materialOf(base) : null,
+    material: base ? await settingOf(base, 'filament_type') : null,
+    id: single.find((c) => c.fila_type === type)?.fila_id ?? null,
+    support: base ? (await settingOf(base, 'filament_is_support')) === '1' : false,
     printers: named.filter((n) => n.includes(' @BBL ')).map((n) => n.slice(n.indexOf('@BBL '))).sort(),
   };
 }
 
+const pairs = (await get('flush/flush_data_material_pair.json')).pairs
+  .filter((p) => p.from && p.to && Number(p.purge) > 0)
+  .map((p) => ({ from: p.from, to: p.to, purge: Number(p.purge) }));
+
 const out = {
-  source: { repo: REPO, commit, files: ['resources/profiles/BBL/filament/filaments_color_codes.json', 'resources/profiles/BBL.json'] },
+  source: {
+    repo: REPO,
+    commit,
+    files: ['resources/profiles/BBL/filament/filaments_color_codes.json', 'resources/profiles/BBL.json', 'resources/flush/flush_data_material_pair.json'],
+  },
   types,
+  pairs,
   colours: single
     .map((c) => ({
       id: c.fila_color_code,
