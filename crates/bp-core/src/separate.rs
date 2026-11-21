@@ -123,6 +123,7 @@ pub fn sub_part(part: &Part, tris: &[u32]) -> Part {
         uv_layers: vec![vec![]; part.uv_layers.len()],
         color_layers: vec![vec![]; part.color_layers.len()],
         object: part.object,
+        plate: part.plate,
         ..Default::default()
     };
     let mut loops = 0u32;

@@ -3,10 +3,12 @@
 
 use crate::bvh::{Bvh, RayHit, TriSoup};
 use crate::color::{to_u8, Classifier, Rgb};
+use crate::connect;
 use crate::cut;
 use crate::encode;
 use crate::estimate::{self, SwapEstimate};
 use crate::field::ColorField;
+use crate::fit;
 use crate::geom::{self, Vec3, ROOT};
 use crate::mesh::{Mesh, MeshOps, MeshPart, RepairReport};
 use crate::optimize;
@@ -17,6 +19,8 @@ use crate::separate;
 use crate::split::{self, ColorPiece};
 use std::collections::HashMap;
 
+mod plates;
+pub use plates::PlateEditError;
 mod selection;
 pub use selection::{ColourMatch, RefineFailure, RegionAction, RegionFailure, RegionPreview};
 
@@ -64,7 +68,10 @@ pub struct ExportPart {
     pub name: String,
     /// The printed object it belongs to (see [`Part::object`]).
     pub object: u32,
-    /// Final millimetres, base on Z = 0, centred on XY.
+    /// The plate it prints on (see [`Part::plate`]).
+    pub plate: u32,
+    /// Final millimetres, base on Z = 0, centred on XY; split across
+    /// plates, each plate's parts are centred on their own.
     pub positions: Vec<Vec3>,
     pub tris: Vec<[u32; 3]>,
     pub paint: Vec<String>,
@@ -83,6 +90,16 @@ pub struct Stats {
     /// For each slot, the closest other slot and their ΔE.
     pub nearest: Vec<Option<(usize, f32)>>,
     pub repair: RepairReport,
+}
+
+/// The objects on one plate (see [`Project::plate_groups`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlateGroup {
+    pub objects: usize,
+    /// Width, depth and height of what is on the plate.
+    pub size_mm: Vec3,
+    /// Centre of its box in preview coordinates; the export puts it on the plate's centre.
+    pub centre: Vec3,
 }
 
 /// A disconnected piece of the model (see [`Project::detect_pieces`]).
@@ -104,6 +121,94 @@ pub enum SeparateError {
     Stale,
     /// Every piece would stay in the object it is in.
     NothingToSeparate,
+}
+
+/// Where to cut a model that is too large for the printer, and how.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SplitPlan {
+    /// Cut positions along X, Y and Z, in preview coordinates.
+    pub cuts: [Vec<f32>; 3],
+    /// Rest each piece on its largest cut face, where it still fits that way.
+    pub lay_on_cut: bool,
+    /// Dowels across every joint where they fit (size, depth and clearance; `at` is not used).
+    pub dowels: Option<connect::Connectors>,
+}
+
+/// One printed object of a split.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitPiece {
+    pub name: String,
+    /// As it will print, in millimetres.
+    pub size_mm: Vec3,
+    /// The plate it goes on, `None` when it fits none.
+    pub plate: Option<usize>,
+    /// It rests on its largest cut face.
+    pub laid: bool,
+    /// Under 3 mm across: worth a second look.
+    pub small: bool,
+    pub dowel: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitReport {
+    pub pieces: Vec<SplitPiece>,
+    pub plates: usize,
+    pub cuts: usize,
+    /// Dowels made across joints.
+    pub joints: usize,
+    /// Joints with no room for a dowel and its socket walls.
+    pub joints_missing: usize,
+}
+
+impl SplitReport {
+    pub fn fits(&self) -> bool {
+        self.pieces.iter().all(|p| p.plate.is_some())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SplitError {
+    /// No cut asked for: the model fits as it is.
+    NoCuts,
+    Params,
+    Cut(cut::CutError),
+    /// Some piece fits no plate; the report says which.
+    DoesNotFit(SplitReport),
+}
+
+/// A split worked out but not yet applied.
+struct PlannedSplit {
+    parts: Vec<Part>,
+    paint: Vec<Option<CutPaint>>,
+    transfers: Vec<Option<PaintTransfer>>,
+    report: SplitReport,
+}
+
+/// Per cut plane (axis and index), each dowel's centre and the sockets it needs on both sides.
+type Sockets = HashMap<(usize, usize), Vec<(Vec3, [cut::Feature; 2])>>;
+
+/// A piece of a part while it is being cut: where it came from and, per
+/// triangle, the source triangle it lies in.
+struct Chunk {
+    part: Part,
+    from: usize,
+    origins: Vec<Option<u32>>,
+}
+
+/// Connector openings per scene part and the loose dowels a connected cut adds.
+struct Joints {
+    features: Vec<Vec<cut::Feature>>,
+    dowels: Vec<Part>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConnectError {
+    Cut(cut::CutError),
+    /// Sizes out of range.
+    Params,
+    NoConnectors,
+    /// What is wrong with each connector, `None` where it is fine.
+    Connectors(Vec<Option<connect::Issue>>),
 }
 
 /// A plane worth reviewing as a cut (see [`Project::propose_cuts`]).
@@ -142,6 +247,7 @@ enum UndoEntry {
     Stroke(Vec<Change>),
     Slots(Box<SlotSnapshot>),
     Geometry(Box<Project>),
+    AddPlate(usize),
     Cut,
 }
 
@@ -192,6 +298,7 @@ pub struct RigidMove {
 /// What a cut replaced, to undo it.
 #[derive(Clone)]
 struct CutSnapshot {
+    minimum_plates: usize,
     parts: Vec<Part>,
     unrotated: Vec<Vec<Vec3>>,
     painted: Vec<Vec<u8>>,
@@ -375,6 +482,8 @@ pub struct Project {
     placement: Vec3,
     /// Parts before each cut, for undo.
     cut_history: Vec<CutSnapshot>,
+    /// Keeps empty plates in the project alongside plates with assigned objects.
+    minimum_plates: usize,
     mesh_ops: MeshOps,
     color_ops: ColorOps,
     print_ops: PrintOps,
@@ -408,6 +517,7 @@ impl Project {
             rotation: IDENTITY,
             placement: [0.0; 3],
             cut_history: vec![],
+            minimum_plates: 1,
             scene,
             source_positions,
             source_size,
@@ -611,7 +721,7 @@ impl Project {
         point[axis] = at;
         normal[axis] = 1.0;
         // Preserve the original axis-cut placement for callers of the old interface.
-        self.cut_impl(cut::Plane { point, normal }, keep_low, keep_other, false, &[], false).is_ok()
+        self.cut_impl(cut::Plane { point, normal }, keep_low, keep_other, false, &[], false, None).is_ok()
     }
 
     /// Cuts in preview coordinates. An empty selection means all parts.
@@ -632,9 +742,164 @@ impl Project {
         if let (Some((_, hi)), Some((_, shape_hi))) = (self.work.bounds(), self.shape.bounds()) {
             plane.point = geom::add(plane.point, geom::sub(shape_hi, hi));
         }
-        self.cut_impl(plane, keep_low, keep_other, lay_on_cut, selected, true)
+        self.cut_impl(plane, keep_low, keep_other, lay_on_cut, selected, true, None)
     }
 
+    // ---- cutting with connectors -----------------------------------------
+
+    /// The plane through `point` along `normal` (preview coordinates) and the
+    /// section it leaves on each part it crosses (all, or the `selected` ones),
+    /// with the part each section belongs to.
+    fn connector_sections(
+        &self,
+        point: Vec3,
+        normal: Vec3,
+        selected: &[usize],
+    ) -> Result<(connect::Frame, Vec<connect::Section>, Vec<usize>), cut::CutError> {
+        let plane = cut::Plane::new(point, normal)?;
+        if selected.iter().any(|&i| i >= self.scene.parts.len()) {
+            return Err(cut::CutError::InvalidPlane);
+        }
+        let (u, v) = plane.basis();
+        let frame = connect::Frame { point: plane.point, normal: plane.normal, u, v, scale: self.scale };
+        let off = self.preview_offset();
+        let stretch = self.stretch;
+        let source = cut::Plane::new(
+            std::array::from_fn(|i| (plane.point[i] + off[i]) / stretch[i]),
+            std::array::from_fn(|i| plane.normal[i] * stretch[i]),
+        )?;
+        let eps = geom::len(self.source_size) * 1e-6;
+        let to_preview = |p: Vec3| -> Vec3 { std::array::from_fn(|i| p[i] * stretch[i] - off[i]) };
+        let (mut sections, mut parts) = (vec![], vec![]);
+        for (pi, (part, src)) in self.scene.parts.iter().zip(&self.source_positions).enumerate() {
+            if !selected.is_empty() && !selected.contains(&pi) {
+                continue;
+            }
+            let whole = Part { positions: src.clone(), ..part.clone() };
+            let loops: Vec<Vec<[f32; 2]>> = cut::section_loops(&whole, source, eps)
+                .into_iter()
+                .map(|ring| ring.into_iter().map(|p| frame.flat(to_preview(p))).collect())
+                .collect();
+            if loops.is_empty() {
+                continue;
+            }
+            let mut soup = TriSoup::default();
+            for ti in 0..whole.tris.len() {
+                soup.push(whole.corners(ti).map(to_preview), pi as u32, ti as u32);
+            }
+            sections.push(connect::Section::from_loops(&loops, (Bvh::build(&soup), soup)));
+            parts.push(pi);
+        }
+        Ok((frame, sections, parts))
+    }
+
+    /// How far a flattened base moved the preview down from the scene.
+    fn preview_offset(&self) -> Vec3 {
+        match (self.work.bounds(), self.shape.bounds()) {
+            (Some((_, hi)), Some((_, shape_hi))) => geom::sub(shape_hi, hi),
+            _ => [0.0; 3],
+        }
+    }
+
+    /// What is wrong with each connector of `c` on this cut, `None` where it can be made.
+    pub fn check_connectors(
+        &self,
+        point: Vec3,
+        normal: Vec3,
+        selected: &[usize],
+        c: &connect::Connectors,
+    ) -> Result<Vec<Option<connect::Issue>>, cut::CutError> {
+        let (frame, sections, _) = self.connector_sections(point, normal, selected)?;
+        let wall = connect::min_wall(self.print_ops.nozzle_mm);
+        Ok(connect::check(c, &frame, &sections, wall).into_iter().map(|x| x.1).collect())
+    }
+
+    /// Good places for connectors of `c`'s size on this cut, in preview coordinates.
+    pub fn suggest_connectors(
+        &self,
+        point: Vec3,
+        normal: Vec3,
+        selected: &[usize],
+        c: &connect::Connectors,
+    ) -> Result<Vec<Vec3>, cut::CutError> {
+        let (frame, sections, _) = self.connector_sections(point, normal, selected)?;
+        let wall = connect::min_wall(self.print_ops.nozzle_mm);
+        Ok(connect::suggest(c, &sections, wall).into_iter().map(|q| frame.lift(q)).collect())
+    }
+
+    /// Cuts like [`Self::cut_plane`], keeping both halves (A below the plane,
+    /// B beside it), with the connectors of `c` made in them as one undoable
+    /// step. Dowels are objects of their own, named with `dowel_label`. Only
+    /// halves with sockets alone can lie on their cut face. Returns how many
+    /// objects there are now.
+    pub fn cut_connected(
+        &mut self,
+        point: Vec3,
+        normal: Vec3,
+        lay_on_cut: bool,
+        selected: &[usize],
+        c: &connect::Connectors,
+        dowel_label: &str,
+    ) -> Result<usize, ConnectError> {
+        if !c.valid() {
+            return Err(ConnectError::Params);
+        }
+        if c.at.is_empty() {
+            return Err(ConnectError::NoConnectors);
+        }
+        let (frame, sections, parts) = self.connector_sections(point, normal, selected).map_err(ConnectError::Cut)?;
+        let wall = connect::min_wall(self.print_ops.nozzle_mm);
+        let checked = connect::check(c, &frame, &sections, wall);
+        if checked.iter().any(|x| x.1.is_some()) {
+            return Err(ConnectError::Connectors(checked.into_iter().map(|x| x.1).collect()));
+        }
+        let off = self.preview_offset();
+        let stretch = self.stretch;
+        let to_source = |p: Vec3| -> Vec3 { std::array::from_fn(|i| (p[i] + off[i]) / stretch[i]) };
+        let unit = 1.0 / self.scale;
+        let (sockets, pins) = c.sides();
+        let mut features: Vec<Vec<cut::Feature>> = vec![vec![]; self.scene.parts.len()];
+        let mut dowels = vec![];
+        for (&at, (section, _)) in c.at.iter().zip(&checked) {
+            let pi = parts[section.expect("checked connectors sit on a section")];
+            let centre = frame.lift(frame.flat(at));
+            let mut feature = |grow: f32, length: f32, side: usize, into: bool| {
+                let ring = c.outline(centre, frame.u, frame.v, grow, unit).into_iter().map(to_source).collect();
+                let along = geom::scale(frame.inward(side), if into { length * unit } else { -length * unit });
+                let depth = std::array::from_fn(|i| along[i] / stretch[i]);
+                features[pi].push(cut::Feature { ring, depth, side });
+            };
+            for &side in &sockets {
+                feature(c.clearance_mm, c.depth_mm + c.clearance_mm, side, true);
+            }
+            if let Some(side) = pins {
+                feature(0.0, c.depth_mm, side, false);
+            }
+            if c.kind == connect::Kind::Dowel {
+                let part = &self.scene.parts[pi];
+                let colour = part.sample(&self.scene.images, 0, [1.0 / 3.0; 3]).rgb();
+                let (positions, tris) = connect::dowel(c);
+                let n = tris.len();
+                dowels.push(Part {
+                    name: format!("{} {} {}", part.name, dowel_label, dowels.len() + 1),
+                    positions: positions.iter().map(|p| std::array::from_fn(|i| p[i] * unit / stretch[i])).collect(),
+                    tris,
+                    tri_loops: vec![[0; 3]; n],
+                    tri_source: vec![0; n],
+                    sources: vec![crate::scene::ColorSource::Flat(colour)],
+                    ..Default::default()
+                });
+            }
+        }
+        let mut plane = cut::Plane::new(point, normal).map_err(ConnectError::Cut)?;
+        plane.point = geom::add(plane.point, off);
+        let lay = lay_on_cut && pins.is_none();
+        self.cut_impl(plane, true, true, lay, selected, true, Some(Joints { features, dowels }))
+            .map_err(ConnectError::Cut)?;
+        Ok(self.object_count())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn cut_impl(
         &mut self,
         preview_plane: cut::Plane,
@@ -643,6 +908,7 @@ impl Project {
         lay_on_cut: bool,
         selected: &[usize],
         checked: bool,
+        joints: Option<Joints>,
     ) -> Result<(), cut::CutError> {
         // Positions are stored before per-axis stretch. The plane is a covector:
         // its normal transforms by S^T, not S^-1.
@@ -652,6 +918,7 @@ impl Project {
         )?;
         let eps = geom::len(self.source_size) * 1e-6;
         let first_new_object = self.scene.parts.iter().map(|p| p.object).max().unwrap_or(0) + 1;
+        let joints_used = joints.is_some();
         let (mut kept, mut other) = (vec![], vec![]);
         let (mut kept_paint, mut other_paint) = (vec![], vec![]);
         let (mut untouched, mut untouched_paint) = (vec![], vec![]);
@@ -685,7 +952,16 @@ impl Project {
             let crosses = whole.positions.iter().any(|&v| plane.distance(v) < -eps)
                 && whole.positions.iter().any(|&v| plane.distance(v) > eps);
             intersects |= crosses;
-            let sides = cut::split_plane_with_origins(&whole, plane, eps);
+            let sides = match joints.as_ref().map(|j| &j.features[pi]).filter(|f| !f.is_empty()) {
+                Some(features) => {
+                    let (sides, unplaced) = cut::split_plane_with_features(&whole, plane, eps, features);
+                    if unplaced > 0 {
+                        return Err(cut::CutError::InvalidGeometry);
+                    }
+                    sides
+                }
+                None => cut::split_plane_with_origins(&whole, plane, eps),
+            };
             if checked && sides.iter().any(|(p, _)| !p.tris.is_empty() && !cut::valid_solid(p, eps)) {
                 return Err(cut::CutError::InvalidGeometry);
             }
@@ -742,7 +1018,8 @@ impl Project {
             }
             for p in &mut other {
                 p.object += first_new_object;
-                p.name = format!("{} ({})", p.name, p.object + 1);
+                p.name =
+                    if joints.is_some() { format!("{} B", p.name) } else { format!("{} ({})", p.name, p.object + 1) };
                 if !checked {
                     for v in &mut p.positions {
                         *v = mat_vec(turn, *v);
@@ -770,12 +1047,33 @@ impl Project {
             for v in other.iter_mut().flat_map(|p| p.positions.iter_mut()) {
                 *v = geom::add(*v, shift);
             }
+            if let Some(joints) = joints {
+                for p in &mut kept {
+                    p.name = format!("{} A", p.name);
+                }
+                // Dowels stand in a row past the B half, each an object of its own.
+                let mut x = bounds(&other).1[0];
+                let mut object = other.iter().chain(&kept).chain(&untouched).map(|p| p.object).max().unwrap_or(0);
+                for mut d in joints.dowels {
+                    let (lo, hi) = bounds(std::slice::from_ref(&d));
+                    let shift = [x + gap - lo[0], (klo[1] + khi[1] - lo[1] - hi[1]) / 2.0, klo[2] - lo[2]];
+                    for v in &mut d.positions {
+                        *v = geom::add(*v, shift);
+                    }
+                    x = hi[0] + shift[0];
+                    object += 1;
+                    d.object = object;
+                    other.push(d);
+                    other_paint.push(None);
+                }
+            }
             kept.append(&mut other);
             kept_paint.append(&mut other_paint);
         }
         kept.append(&mut untouched);
         kept_paint.append(&mut untouched_paint);
-        self.commit_parts(kept, kept_paint, &transfers, "cut");
+        let kind = if joints_used { "connect" } else { "cut" };
+        self.commit_parts(kept, kept_paint, &transfers, kind);
         Ok(())
     }
 
@@ -792,6 +1090,7 @@ impl Project {
         self.end_stroke();
         let previous = std::mem::replace(&mut self.scene.parts, parts);
         self.cut_history.push(CutSnapshot {
+            minimum_plates: self.minimum_plates,
             parts: previous,
             unrotated: self.unrotated.clone(),
             painted: self.painted.clone(),
@@ -847,12 +1146,13 @@ impl Project {
     }
 
     pub fn can_undo_cut(&self) -> bool {
-        !self.cut_history.is_empty()
+        !self.undo.iter().any(|e| matches!(e, UndoEntry::AddPlate(_)))
+            && self.cut_history.last().is_some_and(|s| matches!(s.kind, "cut" | "connect" | "separate" | "split"))
     }
 
     /// Printed objects: 1 for the model, more once pieces cut off it are kept.
     pub fn object_count(&self) -> usize {
-        self.scene.parts.iter().map(|p| p.object).collect::<std::collections::HashSet<_>>().len().max(1)
+        self.scene.parts.iter().map(|p| p.object).collect::<std::collections::HashSet<_>>().len()
     }
 
     // ---- separating pieces -------------------------------------------------
@@ -1081,9 +1381,413 @@ impl Project {
             .collect()
     }
 
+    // ---- splitting to fit the printer ---------------------------------------
+
+    /// Cuts along X, Y and Z (preview coordinates, evenly spread) that leave
+    /// every piece small enough for `room` standing as the model stands. None
+    /// when the model fits already. The model's scale is never changed.
+    pub fn propose_split(&self, room: &fit::Room) -> [Vec<f32>; 3] {
+        let Some((lo, hi)) = self.work.bounds() else { return Default::default() };
+        let size = std::array::from_fn(|i| (hi[i] - lo[i]) * self.scale);
+        let n = fit::cuts_needed(size, room);
+        std::array::from_fn(|a| fit::even_cuts(lo[a], hi[a], n[a]))
+    }
+
+    /// What [`Self::split_for_printer`] would make, without changing anything.
+    pub fn preview_split(&self, plan: &SplitPlan, room: &fit::Room) -> Result<SplitReport, SplitError> {
+        self.plan_split(plan, room, "").map(|split| split.report)
+    }
+
+    /// Cuts the model where `plan` says into pieces that each fit `room`, each
+    /// an object of its own named after its cell (`name 1-2-1`, X-Y-Z), with
+    /// dowels across the joints when asked, and shares them out across plates.
+    /// One undoable step. Refused, with the report, when a piece fits no plate.
+    pub fn split_for_printer(
+        &mut self,
+        plan: &SplitPlan,
+        room: &fit::Room,
+        dowel_label: &str,
+    ) -> Result<SplitReport, SplitError> {
+        let split = self.plan_split(plan, room, dowel_label)?;
+        if !split.report.fits() {
+            return Err(SplitError::DoesNotFit(split.report));
+        }
+        self.commit_parts(split.parts, split.paint, &split.transfers, "split");
+        Ok(split.report)
+    }
+
+    fn plan_split(&self, plan: &SplitPlan, room: &fit::Room, dowel_label: &str) -> Result<PlannedSplit, SplitError> {
+        let mut cuts = plan.cuts.clone();
+        for axis in &mut cuts {
+            axis.sort_by(f32::total_cmp);
+            axis.dedup_by(|a, b| (*a - *b).abs() * self.scale < 0.5);
+        }
+        let count: usize = cuts.iter().map(Vec::len).sum();
+        if count == 0 {
+            return Err(SplitError::NoCuts);
+        }
+        if !room.valid() || cuts.iter().flatten().any(|v| !v.is_finite()) || count > 64 {
+            return Err(SplitError::Params);
+        }
+        if plan.dowels.as_ref().is_some_and(|c| !c.valid()) {
+            return Err(SplitError::Params);
+        }
+        let off = self.preview_offset();
+        let stretch = self.stretch;
+        let eps = geom::len(self.source_size) * 1e-6;
+        let wall = connect::min_wall(self.print_ops.nozzle_mm);
+        let to_preview = |p: Vec3| -> Vec3 { std::array::from_fn(|i| p[i] * stretch[i] - off[i]) };
+        let to_source = |p: Vec3| -> Vec3 { std::array::from_fn(|i| (p[i] + off[i]) / stretch[i]) };
+        let unit_axis = |a: usize| -> Vec3 { std::array::from_fn(|i| f32::from(i == a)) };
+        let frame_at = |a: usize, at: f32| {
+            let mut point = [0.0; 3];
+            point[a] = at;
+            let plane = cut::Plane::new(point, unit_axis(a)).expect("an axis is a normal");
+            let (u, v) = plane.basis();
+            connect::Frame { point, normal: plane.normal, u, v, scale: self.scale }
+        };
+        let source_plane = |a: usize, at: f32| {
+            let mut point = [0.0; 3];
+            point[a] = at;
+            cut::Plane::new(to_source(point), std::array::from_fn(|i| unit_axis(a)[i] * stretch[i]))
+                .expect("an axis is a normal")
+        };
+        let planes: Vec<(usize, usize, f32)> =
+            (0..3).flat_map(|a| cuts[a].iter().enumerate().map(move |(m, &at)| (a, m, at))).collect();
+        let transfers: Vec<_> = self
+            .scene
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(pi, part)| {
+                self.painted[pi]
+                    .iter()
+                    .any(|&l| l != NO_LABEL)
+                    .then(|| PaintTransfer::new(&self.shape.parts[pi], &self.painted[pi], part.tris.len()))
+            })
+            .collect();
+        // Cuts every chunk the planes cross, X first, then Y, then Z, with any
+        // sockets that belong to the chunk's section on each plane.
+        let cut_all = |sockets: &Sockets| -> Result<Vec<Chunk>, cut::CutError> {
+            let mut chunks: Vec<Chunk> = self
+                .scene
+                .parts
+                .iter()
+                .zip(&self.source_positions)
+                .enumerate()
+                .map(|(pi, (part, src))| Chunk {
+                    part: Part { positions: src.clone(), ..part.clone() },
+                    from: pi,
+                    origins: (0..part.tris.len() as u32).map(Some).collect(),
+                })
+                .collect();
+            for &(a, m, at) in &planes {
+                let plane = source_plane(a, at);
+                let mut next = Vec::with_capacity(chunks.len() * 2);
+                for chunk in chunks {
+                    let crosses = chunk.part.positions.iter().any(|&v| plane.distance(v) < -eps)
+                        && chunk.part.positions.iter().any(|&v| plane.distance(v) > eps);
+                    if !crosses {
+                        next.push(chunk);
+                        continue;
+                    }
+                    let mut features = vec![];
+                    if let Some(here) = sockets.get(&(a, m)) {
+                        let frame = frame_at(a, at);
+                        let loops: Vec<Vec<[f32; 2]>> = cut::section_loops(&chunk.part, plane, eps)
+                            .into_iter()
+                            .map(|ring| ring.into_iter().map(|p| frame.flat(to_preview(p))).collect())
+                            .collect();
+                        let section = connect::Section::from_loops(&loops, Default::default());
+                        for (centre, pair) in here {
+                            if section.inside(frame.flat(*centre)) {
+                                features.extend(pair.iter().cloned());
+                            }
+                        }
+                    }
+                    let (sides, unplaced) = cut::split_plane_with_features(&chunk.part, plane, eps, &features);
+                    if unplaced > 0 || !cut::valid_section(&chunk.part, &sides, eps) {
+                        return Err(cut::CutError::InvalidGeometry);
+                    }
+                    for (part, origins) in sides {
+                        if part.tris.is_empty() {
+                            continue;
+                        }
+                        let origins = origins.iter().map(|o| o.and_then(|p| chunk.origins[p as usize])).collect();
+                        next.push(Chunk { part, from: chunk.from, origins });
+                    }
+                }
+                chunks = next;
+            }
+            Ok(chunks)
+        };
+        // Which cell of the grid a chunk lies in, by its box's centre.
+        let cell_of = |chunk: &Chunk| -> [usize; 3] {
+            let (lo, hi) = chunk.part.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), &v| {
+                let p = to_preview(v);
+                (std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn(|i| hi[i].max(p[i])))
+            });
+            std::array::from_fn(|a| cuts[a].iter().filter(|&&c| c < (lo[a] + hi[a]) / 2.0).count())
+        };
+        let mut sockets: Sockets = HashMap::new();
+        let mut dowels: Vec<Part> = vec![];
+        let mut missing = 0;
+        if let Some(spec) = &plan.dowels {
+            let spec = connect::Connectors { kind: connect::Kind::Dowel, at: vec![], ..spec.clone() };
+            // First the pieces as they come out, to find the faces each joint shares.
+            let first = cut_all(&HashMap::new()).map_err(SplitError::Cut)?;
+            let cells: Vec<[usize; 3]> = first.iter().map(cell_of).collect();
+            for &(a, m, at) in &planes {
+                let plane = source_plane(a, at);
+                let frame = frame_at(a, at);
+                for (i, p) in first.iter().enumerate() {
+                    for (j, q) in first.iter().enumerate() {
+                        let (cp, cq) = (cells[i], cells[j]);
+                        if p.from != q.from || cp[a] != m || cq[a] != m + 1 || (0..3).any(|k| k != a && cp[k] != cq[k])
+                        {
+                            continue;
+                        }
+                        if !cut::valid_solid(&p.part, eps) || !cut::valid_solid(&q.part, eps) {
+                            missing += 1;
+                            continue;
+                        }
+                        // P's cap on this plane: its new faces lying on it, facing the plane's normal.
+                        let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+                        for (t, tri) in p.part.tris.iter().enumerate() {
+                            let c = p.part.corners(t);
+                            let normal = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+                            if p.origins[t].is_some()
+                                || c.iter().any(|&v| plane.distance(v).abs() > eps * 10.0)
+                                || geom::dot(normal, plane.normal) <= 0.0
+                            {
+                                continue;
+                            }
+                            for k in 0..3 {
+                                let (x, y) = (tri[k], tri[(k + 1) % 3]);
+                                *edges.entry((x.min(y), x.max(y))).or_insert(0) += 1;
+                            }
+                        }
+                        let at2 = |v: u32| frame.flat(to_preview(p.part.positions[v as usize]));
+                        let rim: Vec<([f32; 2], [f32; 2])> =
+                            edges.iter().filter(|e| *e.1 == 1).map(|(&(x, y), _)| (at2(x), at2(y))).collect();
+                        if rim.is_empty() {
+                            continue;
+                        }
+                        let mut soup = TriSoup::default();
+                        for c in [p, q] {
+                            for t in 0..c.part.tris.len() {
+                                soup.push(c.part.corners(t).map(to_preview), 0, t as u32);
+                            }
+                        }
+                        let section = connect::Section { edges: rim, surface: (Bvh::build(&soup), soup) };
+                        let sections = [section];
+                        let found = connect::suggest(&spec, &sections, wall);
+                        let placed =
+                            connect::Connectors { at: found.iter().map(|&q| frame.lift(q)).collect(), ..spec.clone() };
+                        let fine: Vec<Vec3> = connect::check(&placed, &frame, &sections, wall)
+                            .into_iter()
+                            .zip(&placed.at)
+                            .filter(|(c, _)| c.1.is_none())
+                            .map(|(_, &at)| at)
+                            .collect();
+                        if fine.is_empty() {
+                            missing += 1;
+                        }
+                        let unit = 1.0 / self.scale;
+                        for centre in fine {
+                            let socket = |side: usize| {
+                                let ring = spec
+                                    .outline(centre, frame.u, frame.v, spec.clearance_mm, unit)
+                                    .into_iter()
+                                    .map(to_source)
+                                    .collect();
+                                let along = geom::scale(frame.inward(side), (spec.depth_mm + spec.clearance_mm) * unit);
+                                cut::Feature { ring, depth: std::array::from_fn(|i| along[i] / stretch[i]), side }
+                            };
+                            sockets.entry((a, m)).or_default().push((centre, [socket(0), socket(1)]));
+                            let part = &self.scene.parts[p.from];
+                            let (positions, tris) = connect::dowel(&spec);
+                            let n = tris.len();
+                            dowels.push(Part {
+                                name: format!("{} {} {}", part.name, dowel_label, dowels.len() + 1),
+                                positions: positions
+                                    .iter()
+                                    .map(|v| std::array::from_fn(|i| v[i] * unit / stretch[i]))
+                                    .collect(),
+                                tris,
+                                tri_loops: vec![[0; 3]; n],
+                                tri_source: vec![0; n],
+                                sources: vec![crate::scene::ColorSource::Flat(
+                                    part.sample(&self.scene.images, 0, [1.0 / 3.0; 3]).rgb(),
+                                )],
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let chunks = cut_all(&sockets).map_err(SplitError::Cut)?;
+        // One object per object of the model and cell, in a stable order.
+        let mut keyed: Vec<([usize; 3], u32, Chunk)> =
+            chunks.into_iter().map(|c| (cell_of(&c), self.scene.parts[c.from].object, c)).collect();
+        keyed.sort_by_key(|(cell, object, c)| (cell[2], cell[1], cell[0], *object, c.from));
+        let mut objects: Vec<Vec<(Part, Option<CutPaint>)>> = vec![];
+        let mut last = None;
+        for (cell, object, chunk) in keyed {
+            if last != Some((cell, object)) {
+                objects.push(vec![]);
+                last = Some((cell, object));
+            }
+            let id = objects.len() as u32 - 1;
+            let corners = (0..chunk.part.tris.len())
+                .map(|t| chunk.part.corners(t).map(|v| std::array::from_fn(|i| v[i] * stretch[i])))
+                .collect();
+            let paint = transfers[chunk.from].as_ref().map(|_| CutPaint {
+                part: chunk.from,
+                origins: chunk.origins.clone(),
+                corners,
+            });
+            let mut part = chunk.part;
+            part.name = format!("{} {}-{}-{}", part.name, cell[0] + 1, cell[1] + 1, cell[2] + 1);
+            part.object = id;
+            objects.last_mut().unwrap().push((part, paint));
+        }
+        let first_dowel = objects.len();
+        for d in dowels {
+            let id = objects.len() as u32;
+            objects.push(vec![(Part { object: id, ..d }, None)]);
+        }
+        // Turns in the stretched frame the preview shows, and boxes in millimetres.
+        let scale = self.scale;
+        let turn_parts = |parts: &mut [(Part, Option<CutPaint>)], turn: Mat3| {
+            for v in parts.iter_mut().flat_map(|p| p.0.positions.iter_mut()) {
+                let turned = mat_vec(turn, std::array::from_fn(|i| v[i] * stretch[i]));
+                *v = std::array::from_fn(|i| turned[i] / stretch[i]);
+            }
+        };
+        let box_mm = |parts: &[(Part, Option<CutPaint>)]| -> (Vec3, Vec3) {
+            parts.iter().flat_map(|p| p.0.positions.iter()).fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
+                let p: Vec3 = std::array::from_fn(|i| v[i] * stretch[i] * scale);
+                (std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn(|i| hi[i].max(p[i])))
+            })
+        };
+        let fits = |(lo, hi): (Vec3, Vec3)| {
+            let s = geom::sub(hi, lo);
+            let [w, d] = room.area_mm;
+            s[2] <= room.height_mm + 1e-3
+                && ((s[0] <= w + 1e-3 && s[1] <= d + 1e-3) || (s[1] <= w + 1e-3 && s[0] <= d + 1e-3))
+        };
+        let mut laid = vec![false; objects.len()];
+        if plan.lay_on_cut {
+            for (o, parts) in objects.iter_mut().enumerate().take(first_dowel) {
+                // The largest cut face, by plane and the way it faces.
+                let mut faces: HashMap<(usize, usize, bool), f32> = HashMap::new();
+                for (part, _) in parts.iter() {
+                    for t in 0..part.tris.len() {
+                        let c = part.corners(t).map(|v| -> Vec3 { std::array::from_fn(|i| v[i] * stretch[i]) });
+                        let n = geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0]));
+                        for &(a, m, at) in &planes {
+                            let plane = source_plane(a, at);
+                            let raw = part.corners(t);
+                            if raw.iter().all(|&v| plane.distance(v).abs() <= eps * 10.0) && n[a].abs() > 0.0 {
+                                *faces.entry((a, m, n[a] > 0.0)).or_insert(0.0) += geom::len(n) * 0.5;
+                            }
+                        }
+                    }
+                }
+                let Some((&(a, _, up), _)) = faces.iter().max_by(|x, y| x.1.total_cmp(y.1).then(y.0.cmp(x.0))) else {
+                    continue;
+                };
+                let turn = rotation_between(geom::scale(unit_axis(a), if up { 1.0 } else { -1.0 }), [0.0, 0.0, -1.0]);
+                // Only where the piece still fits lying down.
+                let turned = parts.iter().flat_map(|p| p.0.positions.iter()).fold(
+                    ([f32::MAX; 3], [f32::MIN; 3]),
+                    |(lo, hi), v| {
+                        let p = geom::scale(mat_vec(turn, std::array::from_fn(|i| v[i] * stretch[i])), scale);
+                        (std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn(|i| hi[i].max(p[i])))
+                    },
+                );
+                if fits(turned) {
+                    turn_parts(parts, turn);
+                    laid[o] = true;
+                }
+            }
+        }
+        let footprints: Vec<[f32; 2]> = objects
+            .iter()
+            .map(|parts| {
+                let (lo, hi) = box_mm(parts);
+                [hi[0] - lo[0], hi[1] - lo[1]]
+            })
+            .collect();
+        let tall: Vec<bool> = objects
+            .iter()
+            .map(|parts| {
+                let (lo, hi) = box_mm(parts);
+                hi[2] - lo[2] > room.height_mm + 1e-3
+            })
+            .collect();
+        let spots = fit::pack(&footprints, room);
+        // Plates shown side by side; the export puts each plate's pieces on a plate of their own.
+        let stride = room.area_mm[0] * 1.3;
+        let mut pieces = vec![];
+        let (mut out, mut out_paint) = (vec![], vec![]);
+        for (o, mut parts) in objects.into_iter().enumerate() {
+            let spot = spots[o].filter(|_| !tall[o]);
+            if let Some(spot) = spot {
+                if spot.turned {
+                    turn_parts(&mut parts, axis_turn(2, 90.0));
+                }
+                let (lo, _) = box_mm(&parts);
+                let target = [
+                    spot.plate as f32 * stride - room.area_mm[0] / 2.0 + spot.at[0],
+                    -room.area_mm[1] / 2.0 + spot.at[1],
+                    0.0,
+                ];
+                let shift: Vec3 = std::array::from_fn(|i| (target[i] - lo[i]) / scale / stretch[i]);
+                for (part, _) in parts.iter_mut() {
+                    part.plate = spot.plate as u32;
+                    for v in &mut part.positions {
+                        *v = geom::add(*v, shift);
+                    }
+                }
+            }
+            let (lo, hi) = box_mm(&parts);
+            let size = geom::sub(hi, lo);
+            pieces.push(SplitPiece {
+                name: parts[0].0.name.clone(),
+                size_mm: size,
+                plate: spot.map(|s| s.plate),
+                laid: laid[o],
+                small: size.iter().copied().fold(0.0, f32::max) < 3.0,
+                dowel: o >= first_dowel,
+            });
+            for (part, paint) in parts {
+                out.push(part);
+                out_paint.push(paint);
+            }
+        }
+        let plates = pieces.iter().filter_map(|p| p.plate).max().map_or(0, |p| p + 1);
+        let report = SplitReport {
+            pieces,
+            plates,
+            cuts: count,
+            joints: out.len() - first_dowel.min(out.len()),
+            joints_missing: missing,
+        };
+        let joints = report.pieces.iter().filter(|p| p.dowel).count();
+        Ok(PlannedSplit { parts: out, paint: out_paint, transfers, report: SplitReport { joints, ..report } })
+    }
+
     /// Puts back what the last cut took, in the orientation the model has now.
     pub fn undo_cut(&mut self) -> bool {
+        self.can_undo_cut() && self.undo_parts()
+    }
+
+    fn undo_parts(&mut self) -> bool {
         let Some(s) = self.cut_history.pop() else { return false };
+        self.minimum_plates = s.minimum_plates;
         self.scene.parts = s.parts;
         self.unrotated = s.unrotated;
         self.place_from_file();
@@ -1233,6 +1937,7 @@ impl Project {
             UndoEntry::Stroke(_) => "stroke",
             UndoEntry::Slots(_) => "merge",
             UndoEntry::Geometry(_) => "fix",
+            UndoEntry::AddPlate(_) => "addPlate",
             UndoEntry::Cut => self.cut_history.last().map_or("cut", |c| c.kind),
         })
     }
@@ -1524,7 +2229,11 @@ impl Project {
         self.end_stroke();
         match self.undo.pop() {
             None => false,
-            Some(UndoEntry::Cut) => self.undo_cut(),
+            Some(UndoEntry::Cut) => self.undo_parts(),
+            Some(UndoEntry::AddPlate(previous)) => {
+                self.minimum_plates = previous;
+                true
+            }
             Some(UndoEntry::Stroke(stroke)) => {
                 for c in stroke.into_iter().rev() {
                     let (p, i) = (c.part as usize, c.tri as usize);
@@ -1654,6 +2363,14 @@ impl Project {
     }
 
     pub fn export_parts(&self) -> Vec<ExportPart> {
+        // On one plate the scene is already centred; split across plates, each plate's group is.
+        let groups = self.plate_groups();
+        let centre = |plate: u32| -> Vec3 {
+            match groups.get(plate as usize) {
+                Some(g) if groups.len() > 1 => [g.centre[0], g.centre[1], 0.0],
+                _ => [0.0; 3],
+            }
+        };
         self.work
             .parts
             .iter()
@@ -1662,9 +2379,44 @@ impl Project {
             .map(|((part, nodes), src)| ExportPart {
                 name: part.name.clone(),
                 object: src.object,
-                positions: part.positions.iter().map(|&v| geom::scale(v, self.scale)).collect(),
+                plate: src.plate,
+                positions: part
+                    .positions
+                    .iter()
+                    .map(|&v| geom::scale(geom::sub(v, centre(src.plate)), self.scale))
+                    .collect(),
                 tris: part.tris.clone(),
                 paint: nodes.iter().map(encode::encode).collect(),
+            })
+            .collect()
+    }
+
+    /// Includes empty plates and any plates assigned by a split.
+    pub fn plate_count(&self) -> usize {
+        self.scene.parts.iter().map(|p| p.plate as usize + 1).max().unwrap_or(1).max(self.minimum_plates)
+    }
+
+    /// What goes on each plate, as the preview shows it.
+    pub fn plate_groups(&self) -> Vec<PlateGroup> {
+        let mut groups: Vec<(std::collections::HashSet<u32>, Vec3, Vec3)> =
+            vec![(Default::default(), [f32::MAX; 3], [f32::MIN; 3]); self.plate_count()];
+        for (part, src) in self.work.parts.iter().zip(&self.scene.parts) {
+            let g = &mut groups[src.plate as usize];
+            g.0.insert(src.object);
+            for v in &part.positions {
+                g.1 = std::array::from_fn(|i| g.1[i].min(v[i]));
+                g.2 = std::array::from_fn(|i| g.2[i].max(v[i]));
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(objects, lo, hi)| {
+                let empty = lo[0] > hi[0];
+                PlateGroup {
+                    objects: objects.len(),
+                    size_mm: if empty { [0.0; 3] } else { geom::scale(geom::sub(hi, lo), self.scale) },
+                    centre: if empty { [0.0; 3] } else { geom::scale(geom::add(lo, hi), 0.5) },
+                }
             })
             .collect()
     }
@@ -1696,6 +2448,7 @@ mod tests {
             uv_layers: vec![],
             color_layers: vec![],
             object: 0,
+            plate: 0,
         };
         Scene { parts: vec![part], ..Default::default() }
     }
@@ -1965,6 +2718,373 @@ mod tests {
         assert!(matches!(z[0].signal, separate::Signal::Colour { .. }));
         // It is a proposal only: the model is still one piece.
         assert_eq!(p.detect_pieces(0.01).0.len(), 1);
+    }
+
+    fn connectors(kind: connect::Kind, at: Vec<Vec3>) -> connect::Connectors {
+        connect::Connectors {
+            kind,
+            shape: connect::Shape::Round,
+            size_mm: 4.0,
+            depth_mm: 5.0,
+            clearance_mm: 0.2,
+            angle_deg: 0.0,
+            at,
+        }
+    }
+
+    fn volume(part: &Part) -> f32 {
+        (0..part.tris.len())
+            .map(|t| {
+                let [a, b, c] = part.corners(t);
+                geom::dot(a, geom::cross(b, c)) / 6.0
+            })
+            .sum()
+    }
+
+    fn ring_area(r: f32) -> f32 {
+        let n = connect::ROUND_SIDES as f32;
+        0.5 * n * r * r * (std::f32::consts::TAU / n).sin()
+    }
+
+    #[test]
+    fn pins_meet_their_sockets_when_the_halves_go_back_together() {
+        let mut p = Project::new(tower(), 2);
+        brush_front(&mut p);
+        let before = p.preview();
+        let c = connectors(connect::Kind::Pin { on_low: true }, vec![[1.5, 1.0, 10.0]]);
+        assert_eq!(p.check_connectors([0.0, 0.0, 10.0], [0.0, 0.0, 1.0], &[], &c), Ok(vec![None]));
+        assert_eq!(p.cut_connected([0.0, 0.0, 10.0], [0.0, 0.0, 1.0], true, &[], &c, "dowel"), Ok(2));
+        assert_eq!(p.undo_label(), Some("connect"));
+        assert!(p.painted_count() > 0);
+        let [a, b] = [&p.scene.parts[0], &p.scene.parts[1]];
+        assert_eq!((a.name.as_str(), b.name.as_str()), ("t A", "t B"));
+        assert!(cut::valid_solid(a, 1e-5) && cut::valid_solid(b, 1e-5));
+        // Pins stand out of A; B lost the socket, with the clearance at its sides and floor.
+        assert!((volume(a) - (1000.0 + ring_area(2.0) * 5.0)).abs() < 0.05, "{}", volume(a));
+        assert!((volume(b) - (1000.0 - ring_area(2.2) * 5.2)).abs() < 0.05, "{}", volume(b));
+        // Laying on the cut is refused for halves with pins: A stands as it was, B on its cut face.
+        let top = |part: &Part, z: f32| -> Vec3 {
+            let ring: Vec<Vec3> = part.positions.iter().copied().filter(|v| (v[2] - z).abs() < 1e-3).collect();
+            geom::scale(ring.iter().fold([0.0; 3], |s, &v| geom::add(s, v)), 1.0 / ring.len() as f32)
+        };
+        let box_of = |part: &Part| {
+            part.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
+                (std::array::from_fn(|i| lo[i].min(v[i])), std::array::from_fn(|i| hi[i].max(v[i])))
+            })
+        };
+        let ((alo, _), (blo, _)) = (box_of(a), box_of(b));
+        assert!((alo[2]).abs() < 1e-4 && (blo[2]).abs() < 1e-4);
+        // The pin's tip (15 mm up A) and the socket's floor (5.2 mm up B) share their axis once B is put back.
+        let pin = geom::sub(top(a, 15.0), alo);
+        let socket = geom::sub(top(b, 5.2), blo);
+        assert!((pin[0] - socket[0]).abs() < 1e-3 && (pin[1] - socket[1]).abs() < 1e-3, "{pin:?} {socket:?}");
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before.positions);
+        assert_eq!(p.preview().labels, before.labels);
+    }
+
+    #[test]
+    fn dowels_are_objects_of_their_own_and_both_halves_get_sockets() {
+        let mut p = Project::new(tower(), 2);
+        let c = connectors(connect::Kind::Dowel, vec![[-2.0, -2.0, 10.0], [2.0, 2.0, 10.0]]);
+        assert_eq!(p.cut_connected([0.0, 0.0, 10.0], [0.0, 0.0, 1.0], true, &[], &c, "dowel"), Ok(4));
+        assert_eq!(p.scene.parts.iter().map(|x| x.object).collect::<Vec<_>>(), [0, 1, 2, 3]);
+        assert_eq!(p.scene.parts[3].name, "t dowel 2");
+        for part in &p.scene.parts {
+            assert!(cut::valid_solid(part, 1e-5), "{}", part.name);
+        }
+        let socket = 2.0 * ring_area(2.2) * 5.2;
+        assert!((volume(&p.scene.parts[0]) - (1000.0 - socket)).abs() < 0.05);
+        assert!((volume(&p.scene.parts[1]) - (1000.0 - socket)).abs() < 0.05);
+        // Each dowel stands on the plate: 4 mm across and twice the depth long.
+        for x in p.export_parts().iter().filter(|x| x.object >= 2) {
+            let span = |i: usize| {
+                let (lo, hi) =
+                    x.positions.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v[i]), hi.max(v[i])));
+                (lo, hi - lo)
+            };
+            assert!(span(2).0.abs() < 1e-3 && (span(2).1 - 10.0).abs() < 1e-3 && (span(0).1 - 4.0).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn bad_connectors_are_named_and_leave_the_model_alone() {
+        let mut p = Project::new(tower(), 2);
+        let plane = ([0.0, 0.0, 10.0], [0.0, 0.0, 1.0]);
+        let c = connectors(
+            connect::Kind::Dowel,
+            vec![[20.0, 0.0, 10.0], [4.0, 0.0, 10.0], [-1.0, 0.0, 10.0], [0.5, 0.0, 10.0]],
+        );
+        let issues = p.check_connectors(plane.0, plane.1, &[], &c).unwrap();
+        use connect::Issue::*;
+        assert_eq!(issues, [Some(Outside), Some(ThinWall), Some(Overlap), Some(Overlap)]);
+        assert_eq!(p.cut_connected(plane.0, plane.1, false, &[], &c, "d"), Err(ConnectError::Connectors(issues)));
+        // 9 mm into a 10 mm half leaves no floor under the socket.
+        let deep = connect::Connectors { depth_mm: 9.0, ..connectors(connect::Kind::Dowel, vec![[0.0, 0.0, 10.0]]) };
+        assert_eq!(p.check_connectors(plane.0, plane.1, &[], &deep).unwrap(), [Some(TooDeep)]);
+        let none = connectors(connect::Kind::Dowel, vec![]);
+        assert_eq!(p.cut_connected(plane.0, plane.1, false, &[], &none, "d"), Err(ConnectError::NoConnectors));
+        let tiny = connect::Connectors { size_mm: 0.1, ..connectors(connect::Kind::Dowel, vec![[0.0, 0.0, 10.0]]) };
+        assert_eq!(p.cut_connected(plane.0, plane.1, false, &[], &tiny, "d"), Err(ConnectError::Params));
+        assert!(!p.can_undo_cut() && p.object_count() == 1);
+        // Suggestions fit: one in the middle of the 10 mm section is all there is room for.
+        let found = p.suggest_connectors(plane.0, plane.1, &[], &none).unwrap();
+        assert_eq!(found.len(), 1);
+        let placed = connect::Connectors { at: found, ..none };
+        assert_eq!(p.check_connectors(plane.0, plane.1, &[], &placed).unwrap(), [None]);
+    }
+
+    /// A closed box `size` large in one part, red, with its top blue.
+    fn bar(size: Vec3) -> Scene {
+        let c = |i: usize| [(i & 1) as f32 * size[0], ((i >> 1) & 1) as f32 * size[1], ((i >> 2) & 1) as f32 * size[2]];
+        let quads = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+        let tris: Vec<[u32; 3]> = quads.iter().flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]).collect();
+        let n = tris.len() as u32;
+        let part = Part {
+            name: "bar".into(),
+            positions: (0..8).map(c).collect(),
+            tri_loops: (0..n).map(|i| [i * 3, i * 3 + 1, i * 3 + 2]).collect(),
+            tri_source: (0..n).map(|i| u16::from((2..4).contains(&i))).collect(),
+            tris,
+            sources: vec![ColorSource::Flat([0.9, 0.1, 0.1]), ColorSource::Flat([0.1, 0.1, 0.9])],
+            ..Default::default()
+        };
+        Scene { parts: vec![part], ..Default::default() }
+    }
+
+    const ROOM: fit::Room = fit::Room { area_mm: [120.0, 120.0], height_mm: 150.0, gap_mm: 5.0 };
+
+    fn object_boxes(p: &Project) -> Vec<(u32, u32, Vec3)> {
+        let parts = p.export_parts();
+        let mut ids: Vec<u32> = parts.iter().map(|x| x.object).collect();
+        ids.dedup();
+        ids.into_iter()
+            .map(|o| {
+                let mine: Vec<&ExportPart> = parts.iter().filter(|x| x.object == o).collect();
+                let (lo, hi) =
+                    mine.iter().flat_map(|x| &x.positions).fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), v| {
+                        (std::array::from_fn(|i| lo[i].min(v[i])), std::array::from_fn(|i| hi[i].max(v[i])))
+                    });
+                (o, mine[0].plate, geom::sub(hi, lo))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_open_model_can_be_split_across_plates() {
+        let mut source = bar([300.0, 40.0, 30.0]);
+        // Remove one end face. The other end and both cuts should remain intact.
+        let part = &mut source.parts[0];
+        let removable: Vec<usize> =
+            (0..part.tris.len()).filter(|&i| part.corners(i).iter().all(|v| v[0] == 0.0)).collect();
+        assert_eq!(removable.len(), 2);
+        for i in removable.into_iter().rev() {
+            part.tris.remove(i);
+            part.tri_loops.remove(i);
+            part.tri_source.remove(i);
+        }
+        let mut p = Project::new(source, 2);
+        let before = p.preview();
+        let plan = SplitPlan { cuts: p.propose_split(&ROOM), ..Default::default() };
+        let report = p.preview_split(&plan, &ROOM).unwrap();
+        assert!(report.fits());
+        assert_eq!(report.pieces.len(), 3);
+        assert_eq!(p.split_for_printer(&plan, &ROOM, "dowel"), Ok(report));
+        assert_eq!(p.scene.parts.iter().filter(|part| cut::valid_solid(part, 1e-4)).count(), 2);
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before.positions);
+    }
+
+    #[test]
+    fn moving_and_emptying_a_plate_preserve_objects_and_undo() {
+        let mut source = bar([25.0, 20.0, 30.0]);
+        let mut component = source.parts[0].clone();
+        for p in &mut component.positions {
+            p[1] += 25.0;
+        }
+        source.parts.push(component);
+        let mut p = Project::new(source, 2);
+        let target = brush_bar(&mut p);
+        let before = p.preview();
+        p.add_plate();
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [1, 0]);
+        assert_eq!(p.move_to_plate(0, 7, 120.0), Err(PlateEditError::Plate));
+        p.move_to_plate(0, 1, 120.0).unwrap();
+        assert!(p.export_parts().iter().all(|part| part.plate == 1));
+        assert!(brush_area(&p, target) > 0.0);
+        p.clear_plate(1).unwrap();
+        assert_eq!(p.object_count(), 0);
+        assert_eq!(p.plate_count(), 2);
+        assert!(p.preview().positions.is_empty());
+        assert_eq!(p.stats().triangles, 0);
+        assert!(p.undo());
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [0, 1]);
+        assert!(p.undo());
+        assert_eq!(p.preview().labels, before.labels);
+        assert!(p.undo());
+        assert_eq!(p.plate_count(), 1);
+    }
+
+    #[test]
+    fn cloning_copies_all_components_and_paint_as_one_object() {
+        let mut source = bar([25.0, 20.0, 30.0]);
+        let mut component = source.parts[0].clone();
+        for p in &mut component.positions {
+            p[1] += 25.0;
+        }
+        source.parts.push(component);
+        let mut p = Project::new(source, 2);
+        let target = brush_bar(&mut p);
+        let area = brush_area(&p, target);
+        p.add_plate();
+        p.move_to_plate(0, 1, 120.0).unwrap();
+        let before = p.preview();
+        p.clone_object(0, "copy", 120.0).unwrap();
+        let parts = p.export_parts();
+        assert_eq!(
+            parts.iter().map(|part| (part.object, part.plate)).collect::<Vec<_>>(),
+            [(0, 1), (0, 1), (1, 1), (1, 1),]
+        );
+        assert_eq!(parts[0].paint, parts[2].paint);
+        assert_eq!(parts[1].paint, parts[3].paint);
+        assert!((brush_area(&p, target) - 2.0 * area).abs() < 1e-3);
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before.positions);
+        assert_eq!(p.preview().labels, before.labels);
+    }
+
+    #[test]
+    fn arrangement_and_cloning_pack_into_more_plates_without_resizing() {
+        let mut p = Project::new(bar([90.0, 55.0, 30.0]), 2);
+        let target = brush_bar(&mut p);
+        let area = brush_area(&p, target);
+        p.clone_object(0, "copy", 120.0).unwrap();
+        p.clone_object(0, "copy", 120.0).unwrap();
+        let before = p.preview();
+        assert_eq!(p.plate_count(), 1);
+        p.arrange_plates(&ROOM, 120.0).unwrap();
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [2, 1]);
+        let pieces = p.export_parts();
+        let a = &pieces[0].positions;
+        let b = &pieces[1].positions;
+        let a_max_y = a.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+        let b_min_y = b.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        assert!((b_min_y - a_max_y - ROOM.gap_mm).abs() < 1e-3);
+        assert!(object_boxes(&p).iter().all(|(_, _, size)| geom::len(geom::sub(*size, [90.0, 55.0, 30.0])) < 1e-3));
+        assert!((brush_area(&p, target) - 3.0 * area).abs() < 1e-3);
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before.positions);
+        p.clone_and_arrange(0, "copy", &ROOM, 120.0).unwrap();
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [2, 2]);
+        let too_small = fit::Room { area_mm: [40.0; 2], ..ROOM };
+        assert_eq!(p.clone_and_arrange(0, "copy", &too_small, 120.0), Err(PlateEditError::DoesNotFit));
+        assert_eq!(p.object_count(), 4);
+        assert!(p.undo());
+        assert_eq!(p.object_count(), 3);
+        assert_eq!(p.plate_count(), 1);
+    }
+
+    #[test]
+    fn a_long_model_is_split_into_pieces_that_fit_and_shared_across_plates() {
+        let mut p = Project::new(bar([300.0, 40.0, 30.0]), 2);
+        let target = brush_bar(&mut p);
+        let before = p.preview();
+        let cuts = p.propose_split(&ROOM);
+        assert_eq!(cuts.iter().map(Vec::len).collect::<Vec<_>>(), [2, 0, 0]);
+        assert!((cuts[0][0] + 50.0).abs() < 1e-3 && (cuts[0][1] - 50.0).abs() < 1e-3, "{cuts:?}");
+        let plan = SplitPlan { cuts, ..Default::default() };
+        let report = p.preview_split(&plan, &ROOM).unwrap();
+        assert_eq!(report.pieces.len(), 3);
+        assert!(report.fits() && report.plates == 2 && report.cuts == 2);
+        assert!(!p.can_undo_cut(), "a preview changes nothing");
+        assert_eq!(p.split_for_printer(&plan, &ROOM, "dowel"), Ok(report.clone()));
+        assert_eq!(p.undo_label(), Some("split"));
+        let names: Vec<&str> = p.scene.parts.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["bar 1-1-1", "bar 2-1-1", "bar 3-1-1"]);
+        assert_eq!(p.plate_count(), 2);
+        // The scale is kept: 100 mm pieces, the whole volume still there.
+        let boxes = object_boxes(&p);
+        for (_, plate, size) in &boxes {
+            assert!(
+                (size[0] - 100.0).abs() < 1e-2 && (size[1] - 40.0).abs() < 1e-2 && (size[2] - 30.0).abs() < 1e-2,
+                "{size:?}"
+            );
+            assert!(*plate < 2);
+        }
+        let volume: f32 = p.scene.parts.iter().map(volume).sum::<f32>() * p.scale.powi(3);
+        assert!((volume - 300.0 * 40.0 * 30.0).abs() < 1.0, "{volume}");
+        for part in &p.scene.parts {
+            assert!(cut::valid_solid(part, 1e-4));
+        }
+        // Each plate's pieces fit the room, centred on their plate.
+        for group in p.plate_groups() {
+            assert!(group.size_mm[0] <= 120.0 && group.size_mm[1] <= 120.0, "{group:?}");
+        }
+        for part in p.export_parts() {
+            let (lo, hi) = part.positions.iter().fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v[0]), b.max(v[0])));
+            assert!(lo >= -60.0 - 1e-2 && hi <= 60.0 + 1e-2, "{lo} {hi}");
+        }
+        assert!(brush_area(&p, target) > 0.0);
+        assert!(p.undo());
+        assert_eq!(p.plate_count(), 1);
+        assert_eq!(p.preview().positions, before.positions);
+        assert_eq!(p.preview().labels, before.labels);
+    }
+
+    fn brush_bar(p: &mut Project) -> u8 {
+        let target = 1 - p.trees[0][0].dominant();
+        let (lo, hi) = p.work.bounds().unwrap();
+        let origin = [lo[0] + (hi[0] - lo[0]) / 30.0, lo[1] - 30.0, lo[2] + (hi[2] - lo[2]) / 3.0];
+        p.paint(origin, [0.0, 1.0, 0.0], 0.01, target).unwrap();
+        p.end_stroke();
+        assert_eq!(p.painted_count(), 1);
+        target
+    }
+
+    #[test]
+    fn a_split_can_add_dowels_and_lay_pieces_on_their_cut_faces() {
+        let mut p = Project::new(bar([300.0, 40.0, 30.0]), 2);
+        let dowels = connect::Connectors {
+            kind: connect::Kind::Dowel,
+            shape: connect::Shape::Round,
+            size_mm: 5.0,
+            depth_mm: 6.0,
+            clearance_mm: 0.2,
+            angle_deg: 0.0,
+            at: vec![],
+        };
+        let plan = SplitPlan { cuts: p.propose_split(&ROOM), lay_on_cut: true, dowels: Some(dowels) };
+        let report = p.split_for_printer(&plan, &ROOM, "dowel").unwrap();
+        assert!(report.joints >= 2 && report.joints_missing == 0, "{report:?}");
+        assert_eq!(report.pieces.iter().filter(|x| x.dowel).count(), report.joints);
+        // The end pieces lie on their one cut face; the middle one on either.
+        assert!(
+            report.pieces.iter().filter(|x| !x.dowel).all(|x| x.laid && (x.size_mm[2] - 100.0).abs() < 1e-2),
+            "{report:?}"
+        );
+        for part in &p.scene.parts {
+            assert!(cut::valid_solid(part, 1e-4), "{}", part.name);
+        }
+        // Sockets came out of the pieces: two per dowel, 6.2 mm deep.
+        let socket = 0.5 * 32.0 * 2.7f32.powi(2) * (std::f32::consts::TAU / 32.0).sin() * 6.2;
+        let pieces: f32 =
+            p.scene.parts.iter().filter(|x| !x.name.contains("dowel")).map(volume).sum::<f32>() * p.scale.powi(3);
+        assert!((pieces - (300.0 * 40.0 * 30.0 - 2.0 * report.joints as f32 * socket)).abs() < 1.0, "{pieces}");
+    }
+
+    #[test]
+    fn a_split_says_what_does_not_fit_and_changes_nothing() {
+        let mut p = Project::new(bar([300.0, 40.0, 30.0]), 2);
+        assert_eq!(p.split_for_printer(&SplitPlan::default(), &ROOM, ""), Err(SplitError::NoCuts));
+        // One cut leaves 150 mm pieces for a 120 mm plate.
+        let plan = SplitPlan { cuts: [vec![0.0], vec![], vec![]], ..Default::default() };
+        let Err(SplitError::DoesNotFit(report)) = p.split_for_printer(&plan, &ROOM, "") else { panic!() };
+        assert!(report.pieces.iter().all(|x| x.plate.is_none() && (x.size_mm[0] - 150.0).abs() < 1e-2));
+        assert!(!p.can_undo_cut() && p.object_count() == 1);
+        let small = fit::Room { area_mm: [1.0, 1.0], ..ROOM };
+        assert_eq!(p.preview_split(&plan, &small), Err(SplitError::Params));
+        // A model that fits gets no cuts.
+        assert!(Project::new(bar([100.0, 40.0, 30.0]), 2).propose_split(&ROOM).iter().all(Vec::is_empty));
     }
 
     #[test]
