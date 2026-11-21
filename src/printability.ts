@@ -53,20 +53,24 @@ const FIX_OF: Record<string, string> = {
   degenerate: "deepClean", duplicate: "deepClean", nonManifoldEdges: "deepClean", winding: "orient", volume: "orient",
   openEdges: "fillHoles", smallComponents: "removeSmall", contact: "flattenBase",
   buildVolume: "fitPlate", floating: "dropFloating", nonManifoldVertices: "splitVertices", overhang: "rotate",
+  thinWalls: "thicken",
 };
 /** Where a fix's mesh operations show in the summary, to tell whether it still holds. */
 const SETTING: Record<keyof MeshFix, keyof Summary["settings"]> = {
   repair: "repair", orient: "orient", fillHoles: "fillHoles", splitVertices: "splitVertices",
   dropFloating: "dropFloating", minPieceMm: "minPieceMm", flattenMm: "flattenMm", deepClean: "deepClean",
+  thickenMm: "thickenMm",
 };
 /** What "Corregir todo" warns each fix may do to the model, in the order it lists them; other fixes are repairs. */
-const EFFECT: Record<string, string> = { rotate: "rotate", flattenBase: "flattenBase", removeSmall: "removeSmall", fitPlate: "fitPlate" };
-const EFFECTS = ["repair", "rotate", "flattenBase", "removeSmall", "fitPlate"];
+const EFFECT: Record<string, string> = { rotate: "rotate", flattenBase: "flattenBase", removeSmall: "removeSmall", fitPlate: "fitPlate", thicken: "thicken" };
+const EFFECTS = ["repair", "rotate", "flattenBase", "removeSmall", "thicken", "fitPlate"];
 /** Key of what "Corregir todo" applied, beside the single fixes in `applied`. */
 const ALL = "all";
 const same = (a: number[] | number[][], b: number[] | number[][]) =>
   a.flat().every((v, i) => Math.abs(v - b.flat()[i]) < 1e-5);
 const base = (s: Summary) => Math.max(0.4, Math.round(s.settings.layerMm * 2 * 100) / 100);
+/** The thickness printability asks of a wall, with a little to spare so thickening clears it. */
+export const wallTarget = (p: PrintabilityParams) => Math.round(Math.max(p.wallMm, p.extrusionMm * p.perimeters) * 1.05 * 100) / 100;
 
 /** Turns mesh operations on; reverting puts back the values they had. */
 function meshFix(ops: FixOps, available: Fix["available"], patch: NonNullable<Fix["patch"]>, mm?: Fix["mm"]): Fix {
@@ -108,6 +112,7 @@ function makeFixes(ops: FixOps): Record<string, Fix> {
     dropFloating: mesh((s) => !s.settings.dropFloating, () => ({ repair: true, dropFloating: true })),
     removeSmall: mesh((s, r) => s.settings.minPieceMm < r.params.componentMm, (_, r) => ({ repair: true, minPieceMm: r.params.componentMm }), (_, r) => r.params.componentMm),
     flattenBase: mesh((s) => s.settings.flattenMm === 0, (s) => ({ flattenMm: base(s) }), base),
+    thicken: mesh((s, r) => s.settings.thickenMm < wallTarget(r.params), (_, r) => ({ thickenMm: wallTarget(r.params) }), (_, r) => wallTarget(r.params)),
     // Turning drops a per-axis stretch, so turning back also puts the size back.
     rotate: measured((s) => s.settings.rotation, (r) => ops.orient(r.params.overhangDeg), async (v, s) => {
       await ops.rotate(v);
@@ -149,6 +154,10 @@ export function setupPrintability(options: {
   resize(mm: Vec3): Promise<unknown>;
   confirm(message: string): Promise<boolean>;
   error(error: unknown): void;
+  /** The report the panel shows, or null when it no longer describes the model. */
+  report?(r: PrintabilityReport | null): void;
+  /** A card was picked: show the model as that check sees it and bring its places into view. */
+  view?(code: string, points: Vec3[]): void;
 }) {
   const FIXES = makeFixes(options);
   const panel = document.querySelector<HTMLElement>("#printability")!;
@@ -239,6 +248,7 @@ export function setupPrintability(options: {
     token++;
     outdated = outdated || report !== null;
     report = null;
+    options.report?.(null);
     markers(null, []);
     // A fix in progress redraws the results once it has analysed again; emptying
     // them meanwhile collapses the panel and the sidebar jumps back to the top.
@@ -329,7 +339,7 @@ export function setupPrintability(options: {
     const actions = el("div", "pa-check__actions");
     // What "Corregir todo" fixed comes back with "Revertir todo", all together.
     if ((done && by !== ALL) || fixable) {
-      const button = el("button", "btn btn--sm", t(done ? "printability.revert" : "printability.fix"));
+      const button = el("button", "btn btn--sm", done ? t("printability.revert") : id === "thicken" ? t("thicken.apply") : t("printability.fix"));
       button.type = "button";
       button.dataset.fix = id;
       button.disabled = busy;
@@ -340,10 +350,23 @@ export function setupPrintability(options: {
       const locate = el("button", "link", t("printability.locate"));
       locate.type = "button";
       locate.setAttribute("aria-pressed", "false");
-      locate.addEventListener("click", () => shown === locate ? markers(null, []) : markers(locate, c.locations));
+      locate.addEventListener("click", () => {
+        if (shown === locate) return markers(null, []);
+        markers(locate, c.locations);
+        options.view?.(c.code, c.locations);
+      });
       actions.append(locate);
     }
     if (actions.childElementCount) row.append(actions);
+    // A click anywhere else on a card with places shows the model as that check sees it.
+    if (c.locations.length && c.severity !== "pass" && options.view) {
+      row.classList.add("is-viewable");
+      row.title = t("printability.viewCard");
+      row.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement).closest("button, a")) return;
+        options.view!(c.code, c.locations);
+      });
+    }
     return row;
   }
 
@@ -397,6 +420,7 @@ export function setupPrintability(options: {
   function show(r: PrintabilityReport, message = "", tone: Tone = "ok") {
     report = r;
     outdated = false;
+    options.report?.(r);
     markers(null, []);
     const s = options.summary();
     const checks = [...r.checks].sort((a, b) => RANK[a.severity] - RANK[b.severity]);
@@ -611,5 +635,5 @@ export function setupPrintability(options: {
   });
   labels();
   reset();
-  return { update };
+  return { update, run, report: () => report };
 }

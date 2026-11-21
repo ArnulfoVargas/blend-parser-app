@@ -104,10 +104,17 @@ const attacks = {
   async mesh(b) {
     for (const [keepRatio, flattenMm, minPieceMm] of [[0, 0, 0], [0.0001, 0, 0], [1, BIG, 0], [1, 0, BIG], [1, 79, 0], [-1, -1, -1]])
       await attack(b, "mesh", "set_mesh_ops", { keepRatio, flattenMm, repair: true, minPieceMm });
+    for (const [protectColors, protectDetail] of [[true, true], [true, false], ["yes", 1], [null, null]])
+      await attack(b, "mesh", "set_mesh_ops", { keepRatio: 0.05, flattenMm: 0, repair: true, minPieceMm: 0, protectColors, protectDetail });
+    await attack(b, "mesh", "set_mesh_ops", { keepRatio: NaN, flattenMm: 0, repair: true, minPieceMm: 0, protectColors: true });
     await attack(b, "mesh", "set_mesh_ops", { keepRatio: 1, flattenMm: 0, repair: true, minPieceMm: 0 });
     await attack(b, "mesh", "fix_mesh", { fix: { repair: true, orient: true, fillHoles: true, splitVertices: true, dropFloating: true, deepClean: true, minPieceMm: 1000, flattenMm: 1000 } });
     await attack(b, "mesh", "undo", {});
     await attack(b, "mesh", "orient_for_print", { overhangDeg: -10 });
+    for (const overhangDeg of [-10, 0, 90, 1e30, NaN, "45"]) await attack(b, "mesh", "plan_orientation", { overhangDeg });
+    await attack(b, "mesh", "set_rotation", { rotation: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] });
+    await attack(b, "mesh", "set_rotation", { rotation: [[1e30, 0, 0], [0, 1, 0], [0, 0, 1]] });
+    await attack(b, "mesh", "undo", {});
   },
   // The repair switches: counted while other commands run, toggled in a burst, undone in a loop.
   async repairs(b) {
@@ -130,6 +137,95 @@ const attacks = {
     for (let i = 0; i < 4; i++) for (const op of ["fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"]) await click(b, `#repair-ops input[data-op="${op}"]`);
     await settle(b);
     await attack(b, "repairs", "mesh_issues", {});
+  },
+  // The analysis views: picked in quick succession while the analysis runs, and across modes.
+  async views(b) {
+    await click(b, "[role=tab][data-tab=mesh]");
+    for (let i = 0; i < 5; i++) for (const v of ["thickness", "edges", "overhang", "none"]) await click(b, `button[data-analysis="${v}"]`);
+    await click(b, "[role=tab][data-tab=model]");
+    await click(b, "[role=tab][data-tab=mesh]");
+    await click(b, 'button[data-analysis="edges"]');
+    await click(b, '#repair-ops input[data-op="fillHoles"]');
+    await settle(b);
+    const h = await health(b);
+    log("views", "analysis views clicked 20 times and across modes", h.alive && !h.errors.length ? "ok" : "BROKEN", `${h.why} ${h.errors[0] ?? ""}`.slice(0, 200));
+  },
+  // Subdivide and smooth: out of range, past the cap, and in a burst with undos.
+  async smoothing(b) {
+    for (const args of [{ subdivide: 3, smooth: 0, creaseDeg: 30, maxTriangles: 1e9 }, { subdivide: 2, smooth: 99, creaseDeg: 30, maxTriangles: 1e6 },
+      { subdivide: 2, smooth: 2, creaseDeg: -1, maxTriangles: 1e6 }, { subdivide: 2, smooth: 2, creaseDeg: NaN, maxTriangles: 1e6 },
+      { subdivide: 2, smooth: 2, creaseDeg: 30, maxTriangles: 0 }, { subdivide: 2, smooth: 2, creaseDeg: 30, maxTriangles: -5 },
+      { subdivide: 1, smooth: 20, creaseDeg: 180, maxTriangles: 8000000 }, { subdivide: 2, smooth: 0, creaseDeg: 0, maxTriangles: 8000000 }])
+      await attack(b, "smoothing", "smooth_mesh", args, 180000);
+    for (let i = 0; i < 4; i++) await call(b, "undo");
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 8; i++) {
+        calls.push(I("smooth_mesh", { subdivide: i % 3, smooth: i, creaseDeg: 30, maxTriangles: 2000000 }));
+        calls.push(I("undo", {}));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("smoothing", "16 concurrent smooths and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+  },
+  // Hollowing: hostile walls and drains, an open model, and hollowing in a burst with undos.
+  async hollowing(b) {
+    for (const args of [{ wallMm: -1, drains: 0, drainMm: 3 }, { wallMm: 1e30, drains: 0, drainMm: 3 }, { wallMm: NaN, drains: 0, drainMm: 3 },
+      { wallMm: 0.1, drains: 0, drainMm: 3 }, { wallMm: 2, drains: 9, drainMm: 3 }, { wallMm: 2, drains: 4, drainMm: 0 }, { wallMm: 2, drains: 4, drainMm: 1e9 },
+      { wallMm: 50, drains: 0, drainMm: 3 }, { wallMm: 2, drains: 4, drainMm: 20 }, { wallMm: 0.8, drains: 4, drainMm: 1 }, { wallMm: 0, drains: 0, drainMm: 3 }])
+      await attack(b, "hollowing", "hollow_mesh", args, 180000);
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 6; i++) {
+        calls.push(I("hollow_mesh", { wallMm: 1 + i, drains: i % 3, drainMm: 3 }));
+        calls.push(I("fix_mesh", { fix: { fillHoles: i % 2 === 0 } }));
+        calls.push(I("undo", {}));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("hollowing", "18 concurrent hollows, repairs and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+  },
+  // Thickening: hostile minimums through fix_mesh, and in a burst with undos.
+  async thickening(b) {
+    for (const thickenMm of [-1, 0, 1e30, NaN, 10, 0.05, "1"]) await attack(b, "thickening", "fix_mesh", { fix: { thickenMm } }, 180000);
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 8; i++) {
+        calls.push(I("fix_mesh", { fix: { thickenMm: (i % 4) * 0.5 } }));
+        calls.push(I("undo", {}));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("thickening", "16 concurrent thickenings and undos", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+  },
+  // Malla's view helpers: hostile rays and tolerances, wireframe bursts, keys pressed across modes.
+  async meshView(b) {
+    const g = await box(b);
+    for (const [origin, dir, toleranceMm] of [[above(g), [0, 0, -1], 0.001], [above(g), [0, 0, 0], 0.001], [above(g), [0, 0, -1], 0], [above(g), [0, 0, -1], BIG],
+      [[BIG, BIG, BIG], [-1, -1, -1], 0.001], [[NaN, 0, 0], [0, 0, -1], 0.001], [at(g, 0.5), [1, 0, 0], 0.001]])
+      await attack(b, "meshView", "measure_thickness", { origin, dir, toleranceMm });
+    const r = await b.executeAsync((done) => {
+      const I = window.__TAURI_INTERNALS__.invoke;
+      const calls = [];
+      for (let i = 0; i < 10; i++) {
+        calls.push(I("wire_mesh", {}));
+        calls.push(I("set_mesh_ops", { keepRatio: i % 2 ? 0.5 : 1, flattenMm: 0, repair: true, minPieceMm: 0 }));
+      }
+      Promise.allSettled(calls).then((rs) => done(rs.filter((x) => x.status === "rejected").map((x) => JSON.stringify(x.reason)).slice(0, 3)));
+    });
+    const h = await health(b);
+    log("meshView", "20 concurrent wireframes and simplifications", h.alive && !h.errors.length ? "ok" : "BROKEN", `${r.length} rejected ${r.join(" ").slice(0, 160)} ${h.why}`);
+    for (const k of ["z", "k", "t", "c", "k", "z", "b", "z", "k", "t"]) await b.execute((kk) => window.dispatchEvent(new KeyboardEvent("keydown", { key: kk, bubbles: true })), k);
+    for (let i = 0; i < 5; i++) for (const sel of ["#toggle-wire", 'button[data-tool="clip"]', "#clip-flip", "#clip-off", '[role=tab][data-tab=cut]', '[role=tab][data-tab=mesh]']) await click(b, sel);
+    await settle(b);
+    const h2 = await health(b);
+    log("meshView", "helper keys and buttons across modes", h2.alive && !h2.errors.length ? "ok" : "BROKEN", `${h2.why} ${h2.errors[0] ?? ""}`.slice(0, 200));
   },
   // Cuts, in each branch's signature (the missing ones report "missing").
   async cuts(b) {

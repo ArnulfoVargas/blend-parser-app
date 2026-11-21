@@ -11,7 +11,32 @@ import type { Hit, PaintResult, Plate, PreviewMesh, Vec3 } from "./api";
 THREE.ColorManagement.enabled = false;
 
 export type View = "filament" | "texture";
-export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section";
+/** What the mesh mode paints over the model: nothing, overhangs, wall thickness or flagged edges. */
+export type Analysis = "none" | "overhang" | "thickness" | "edges";
+/** What each analysis view paints with, in preview units. */
+export interface AnalysisData {
+  /** Faces looking down more than this (degrees) overhang; faces on the plate do not. */
+  overhangDeg: number;
+  /** How far above the lowest point a face still rests on the plate. */
+  plateTol: number;
+  /** Measured wall thickness at sample points (millimetres), and the minimum it should reach. */
+  thickness?: { points: Vec3[]; mm: (number | null)[]; threshold: number };
+  /** Open edges, and edges shared by more than two faces or by two that disagree. */
+  edges?: { open: [Vec3, Vec3][]; bad: [Vec3, Vec3][] };
+}
+
+/** Analysis colours (sRGB bytes): the model in neutral grey, then a warm ramp for the problem. */
+const NEUTRAL: [number, number, number] = [196, 198, 192];
+const UNKNOWN: [number, number, number] = [150, 152, 150];
+const RAMP: [number, number, number][] = [[214, 48, 32], [236, 150, 40], [232, 208, 74], [96, 178, 110]];
+/** A point on RAMP, 0 (worst) to 1 (fine). */
+function ramp(t: number): [number, number, number] {
+  const x = Math.min(1, Math.max(0, t)) * (RAMP.length - 1);
+  const i = Math.min(RAMP.length - 2, Math.floor(x));
+  const f = x - i;
+  return [0, 1, 2].map((k) => Math.round(RAMP[i][k] + (RAMP[i + 1][k] - RAMP[i][k]) * f)) as [number, number, number];
+}
+export type Tool = "orbit" | "brush" | "measure" | "size" | "move" | "rotate" | "section" | "clip" | "thickness";
 export type Axis = 0 | 1 | 2;
 
 /** A cut across the model: what lies past `t` (0 at the low end of the axis, 1 at the high) is hidden; flipped, what lies before. */
@@ -33,6 +58,8 @@ export interface BrushHandlers {
   rotate(axis: Axis, degrees: number): Promise<boolean>;
   /** The cut was slid in the view. */
   section(s: Section): void;
+  /** A click on the model with the thickness tool, as a ray (preview units). */
+  thickness?(origin: Vec3, dir: Vec3): void;
 }
 
 /** A size handle: one axis, or all three from the corner. */
@@ -79,6 +106,18 @@ export class Viewer {
   private plate: THREE.Mesh;
   private tape = new THREE.Group();
   private findings = new THREE.Group();
+  /** The analysis view: its colours per leaf, and the flagged edges drawn over the model. */
+  private analysis: Analysis = "none";
+  private analysisData: AnalysisData | null = null;
+  private analysisRgb: Uint8Array | null = null;
+  private edgeLines = new THREE.Group();
+  /** The mesh's edges drawn over it, and the wall measured with the thickness tool. */
+  private wire: THREE.LineSegments | null = null;
+  private wall = new THREE.Group();
+  private wallLabel: HTMLDivElement;
+  private wallAt: [Vec3, Vec3] | null = null;
+  /** The faces a proposed turn would rest on the plate, tinted over the model. */
+  private resting: THREE.Mesh | null = null;
   private tapePoints: Vec3[] = [];
   /** Where the pointer is on the model while measuring. */
   private hover: Vec3 | null = null;
@@ -138,6 +177,8 @@ export class Viewer {
     this.controls.addEventListener("change", () => this.requestRender());
 
     this.scene.add(this.findings);
+    this.edgeLines.renderOrder = 25;
+    this.scene.add(this.edgeLines);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f86, 1.6));
     const key = new THREE.DirectionalLight(0xffffff, 1.6);
     key.position.set(0.6, -1, 1.4);
@@ -300,6 +341,9 @@ export class Viewer {
     canvas.after(this.overlay);
     this.overlay.setAttribute("aria-hidden", "true");
     this.tapeLabel = Object.assign(document.createElement("div"), { className: "tape-label", hidden: true });
+    this.wallLabel = Object.assign(document.createElement("div"), { className: "tape-label wall-label", hidden: true });
+    this.wall.renderOrder = 26;
+    this.scene.add(this.wall);
     this.heightLabel = Object.assign(document.createElement("div"), { className: "tape-label is-z", hidden: true });
     this.sizeChips = ([0, 1, 2] as Axis[]).map((axis) => {
       const chip = Object.assign(document.createElement("label"), { className: `size-chip is-${"xyz"[axis]}`, hidden: true });
@@ -307,7 +351,7 @@ export class Viewer {
       return chip;
     });
     this.placeLabel = Object.assign(document.createElement("div"), { className: "tape-label is-live", hidden: true });
-    this.overlay.append(this.tapeLabel, this.heightLabel, this.placeLabel, ...this.sizeChips);
+    this.overlay.append(this.tapeLabel, this.wallLabel, this.heightLabel, this.placeLabel, ...this.sizeChips);
 
     // Shift changes the tape while the pointer rests, so listen to the key itself too.
     const onShift = (e: KeyboardEvent) => {
@@ -363,6 +407,8 @@ export class Viewer {
   /** Replaces the mesh. Keeps the camera unless `frame` is set. */
   load(data: PreviewMesh, frame: boolean) {
     this.data = data;
+    this.setResting(null);
+    this.setWall(null);
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -374,11 +420,13 @@ export class Viewer {
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
     geo.computeBoundingBox();
-    this.mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, flatShading: true }));
+    // Pushed back a hair, so the wireframe drawn on the faces does not flicker through them.
+    this.mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, flatShading: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }));
     // Where the cut opens the model, its inner faces show flat, as a section's face.
     const inside = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: cssColor("--color-ink-2"), side: THREE.BackSide }));
     this.mesh.add(inside);
     this.scene.add(this.mesh);
+    this.buildAnalysis();
     this.recolorAll();
     this.reshaped();
     if (frame) this.frameAll();
@@ -487,7 +535,7 @@ export class Viewer {
     this.hoverRing = null;
     this.hoverCut = false;
     // The cut starts across the middle the first time its tool is picked; it stays after.
-    if (t === "section" && !this.section) this.setSection({ axis: 2, t: 0.5, flip: false });
+    if ((t === "section" || t === "clip") && !this.section) this.setSection({ axis: 2, t: 0.5, flip: false });
     this.showHandles();
     // Moving needs the plate to move against.
     this.buildBed();
@@ -497,7 +545,7 @@ export class Viewer {
     const on = this.mesh !== null;
     this.slides.visible = on && this.tool === "move";
     this.rings.visible = on && this.tool === "rotate";
-    this.cut.visible = on && this.tool === "section" && this.section !== null;
+    this.cut.visible = on && (this.tool === "section" || this.tool === "clip") && this.section !== null;
     this.placeHandles();
     this.requestRender();
   }
@@ -531,9 +579,12 @@ export class Viewer {
   private colorLeaves(from: number, to: number) {
     const { labels, sourceRgb } = this.data!;
     const c = this.colors!;
+    const a = this.analysisRgb;
     for (let l = from; l < to; l++) {
       let r: number, g: number, b: number;
-      if (this.view === "texture") {
+      if (a) {
+        r = a[l * 3]; g = a[l * 3 + 1]; b = a[l * 3 + 2];
+      } else if (this.view === "texture") {
         r = sourceRgb[l * 3]; g = sourceRgb[l * 3 + 1]; b = sourceRgb[l * 3 + 2];
       } else {
         [r, g, b] = this.palette[labels[l]] ?? [200, 200, 200];
@@ -575,7 +626,7 @@ export class Viewer {
     if (this.moveDrag) return this.slideTo(e);
     if (this.turnDrag) return this.turnTo(e);
     if (this.cutDrag) return this.cutTo(e);
-    if ((this.tool === "move" || this.tool === "rotate" || this.tool === "section") && e.buttons === 0) {
+    if ((this.tool === "move" || this.tool === "rotate" || this.tool === "section" || this.tool === "clip") && e.buttons === 0) {
       this.rayFrom(e);
       let over = false;
       if (this.tool === "move") {
@@ -699,7 +750,7 @@ export class Viewer {
   private grab(e: PointerEvent) {
     // While the last move, turn or resize is still being applied, the pointer orbits.
     if (e.button !== 0 || !this.mesh || this.settling) return;
-    if (this.tool === "move" || this.tool === "rotate" || this.tool === "section") {
+    if (this.tool === "move" || this.tool === "rotate" || this.tool === "section" || this.tool === "clip") {
       this.rayFrom(e);
       const started = this.tool === "move" ? this.grabSlide() : this.tool === "rotate" ? this.grabRing(e) : this.grabCut();
       if (!started) return;
@@ -973,6 +1024,11 @@ export class Viewer {
       this.clip.set(new THREE.Vector3().setComponent(s.axis, s.flip ? 1 : -1), s.flip ? -v : v);
     }
     const planes = s && box ? [this.clip] : [];
+    if (this.wire) {
+      const m = this.wire.material as THREE.Material;
+      if ((m.clippingPlanes?.length ?? 0) !== planes.length) m.needsUpdate = true;
+      m.clippingPlanes = planes;
+    }
     if (this.mesh) {
       // Uncut, the inner faces are never seen: not drawn at all.
       this.mesh.children[0].visible = planes.length > 0;
@@ -1250,6 +1306,11 @@ export class Viewer {
       put(this.tapeLabel, screen(a.add(b).multiplyScalar(0.5)));
     } else put(this.tapeLabel, null);
 
+    if (this.wallAt) {
+      const [a, b] = this.wallAt.map((p) => new THREE.Vector3(...p));
+      put(this.wallLabel, screen(a.add(b).multiplyScalar(0.5)));
+    } else put(this.wallLabel, null);
+
     // Nothing measured yet: the height, on the vertical edge nearest the camera.
     const mbox = this.mesh?.geometry.boundingBox;
     const showHeight = this.tool === "measure" && pts.length === 0 && mbox !== null && mbox !== undefined;
@@ -1320,6 +1381,192 @@ export class Viewer {
     this.requestRender();
   }
 
+  // ---- mesh helpers: wireframe and wall thickness ----------------------------------
+
+  /** Draws the mesh's edges over it (preview units), or with null takes them away. */
+  setWire(wire: { positions: Float32Array; ends: Uint32Array } | null) {
+    if (this.wire) {
+      this.scene.remove(this.wire);
+      this.wire.geometry.dispose();
+      (this.wire.material as THREE.Material).dispose();
+      this.wire = null;
+    }
+    if (wire) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(wire.positions, 3));
+      geo.setIndex(new THREE.BufferAttribute(wire.ends, 1));
+      const mat = new THREE.LineBasicMaterial({ color: cssColor("--color-ink"), transparent: true, opacity: 0.45, depthWrite: false });
+      this.wire = new THREE.LineSegments(geo, mat);
+      this.wire.renderOrder = 6;
+      this.scene.add(this.wire);
+      this.applySection();
+    }
+    this.requestRender();
+  }
+
+  /** Marks a measured wall: from where it was measured to the surface across, with `label`. Null clears. */
+  setWall(at: [Vec3, Vec3] | null, label = "") {
+    this.wall.clear();
+    this.wallAt = at;
+    this.wallLabel.textContent = label;
+    if (at) {
+      const r = this.markerSize();
+      const mat = (name: string) => new THREE.MeshBasicMaterial({ color: cssColor(name), depthTest: false, transparent: true });
+      for (const p of at) {
+        const dot = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), mat("--color-accent-deep"));
+        dot.position.set(...p);
+        dot.renderOrder = 27;
+        this.wall.add(dot);
+      }
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(at.map((p) => new THREE.Vector3(...p))),
+        new THREE.LineBasicMaterial({ color: cssColor("--color-accent-deep"), depthTest: false, transparent: true }),
+      );
+      line.renderOrder = 26;
+      this.wall.add(line);
+    }
+    this.requestRender();
+  }
+
+  // ---- analysis views ---------------------------------------------------------
+
+  /** Paints the model with an analysis, or with "none" its colours again. Nothing is measured here
+   *  but the faces' slope: thickness and edges come from the printability report. */
+  setAnalysis(mode: Analysis, data: AnalysisData | null) {
+    this.analysis = mode;
+    this.analysisData = data;
+    this.buildAnalysis();
+    this.recolorAll();
+  }
+
+  getAnalysis(): Analysis {
+    return this.analysis;
+  }
+
+  /** Colours per leaf and edge lines for the current analysis and mesh. */
+  private buildAnalysis() {
+    for (const child of this.edgeLines.children) {
+      const line = child as THREE.LineSegments;
+      line.geometry.dispose();
+      (line.material as THREE.Material).dispose();
+    }
+    this.edgeLines.clear();
+    this.analysisRgb = null;
+    const d = this.analysisData;
+    if (this.analysis === "none" || !d || !this.data) return;
+    const p = this.data.positions;
+    const leaves = this.data.labels.length;
+    const rgb = new Uint8Array(leaves * 3);
+    const put = (l: number, c: [number, number, number]) => rgb.set(c, l * 3);
+    if (this.analysis === "overhang") {
+      let floor = Infinity;
+      for (let i = 2; i < p.length; i += 3) floor = Math.min(floor, p[i]);
+      const limit = THREE.MathUtils.clamp(d.overhangDeg, 0, 89.9);
+      for (let l = 0; l < leaves; l++) {
+        const i = l * 9;
+        const ux = p[i + 3] - p[i], uy = p[i + 4] - p[i + 1], uz = p[i + 5] - p[i + 2];
+        const vx = p[i + 6] - p[i], vy = p[i + 7] - p[i + 1], vz = p[i + 8] - p[i + 2];
+        const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        const len = Math.hypot(nx, ny, nz);
+        const onPlate = p[i + 2] <= floor + d.plateTol && p[i + 5] <= floor + d.plateTol && p[i + 8] <= floor + d.plateTol;
+        // How far past the limit the face looks down, as the analysis measures it: asin(-nz).
+        const angle = len > 0 && nz < 0 ? THREE.MathUtils.radToDeg(Math.asin(Math.min(1, -nz / len))) : -1;
+        put(l, onPlate || angle <= limit ? NEUTRAL : ramp(0.66 * (1 - (angle - limit) / (90 - limit))));
+      }
+    } else if (this.analysis === "thickness" && d.thickness) {
+      const { points, mm, threshold } = d.thickness;
+      const nearest = nearestIndex(points);
+      for (let l = 0; l < leaves; l++) {
+        const i = l * 9;
+        const at: Vec3 = [(p[i] + p[i + 3] + p[i + 6]) / 3, (p[i + 1] + p[i + 4] + p[i + 7]) / 3, (p[i + 2] + p[i + 5] + p[i + 8]) / 3];
+        const k = nearest(at);
+        const v = k < 0 ? null : mm[k];
+        // Red under the minimum, through amber and yellow up to green at twice it.
+        put(l, v === null ? UNKNOWN : v < threshold ? RAMP[0] : ramp(0.33 + 0.67 * Math.min(1, (v - threshold) / threshold)));
+      }
+    } else {
+      for (let l = 0; l < leaves; l++) put(l, NEUTRAL);
+      const lines = (segments: [Vec3, Vec3][], colour: string) => {
+        if (!segments.length) return;
+        const geo = new THREE.BufferGeometry().setFromPoints(segments.flatMap(([a, b]) => [new THREE.Vector3(...a), new THREE.Vector3(...b)]));
+        const mat = new THREE.LineBasicMaterial({ color: cssColor(colour), depthTest: false, transparent: true });
+        const seg = new THREE.LineSegments(geo, mat);
+        seg.renderOrder = 25;
+        this.edgeLines.add(seg);
+      };
+      lines(d.edges?.open ?? [], "--color-error");
+      lines(d.edges?.bad ?? [], "--color-warn");
+    }
+    this.analysisRgb = rgb;
+  }
+
+  /** Brings `points` (preview units) into view: the camera keeps its angle and comes close enough to see them. */
+  frameOn(points: Vec3[]) {
+    if (!points.length) return;
+    const box = new THREE.Box3().setFromPoints(points.map((q) => new THREE.Vector3(...q)));
+    const centre = box.getCenter(new THREE.Vector3());
+    const model = this.mesh?.geometry.boundingSphere?.radius ?? 1;
+    // Never closer than a fifth of the model, so the zone is seen in its place.
+    const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, model * 0.2);
+    const dist = (radius / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.2;
+    const dir = this.camera.position.clone().sub(this.controls.target).normalize();
+    this.controls.target.copy(centre);
+    this.camera.position.copy(centre).addScaledVector(dir, dist);
+    this.camera.near = Math.min(this.camera.near, dist / 100);
+    this.camera.updateProjectionMatrix();
+    this.controls.update();
+    this.requestRender();
+  }
+
+  /**
+   * Tints the faces that would rest on the plate if the model were turned so
+   * `down` (preview axes, as the model stands now) faced it: the lowest along
+   * `down`, facing it. Null clears. Returns how many leaf triangles it tinted.
+   */
+  setResting(down: Vec3 | null): number {
+    if (this.resting) {
+      this.scene.remove(this.resting);
+      this.resting.geometry.dispose();
+      (this.resting.material as THREE.Material).dispose();
+      this.resting = null;
+    }
+    const box = this.mesh?.geometry.boundingBox;
+    if (!down || !this.data || !box) {
+      this.requestRender();
+      return 0;
+    }
+    const p = this.data.positions;
+    const d = new THREE.Vector3(...down).normalize();
+    const along = (i: number) => p[i] * d.x + p[i + 1] * d.y + p[i + 2] * d.z;
+    let base = -Infinity;
+    for (let i = 0; i < p.length; i += 3) base = Math.max(base, along(i));
+    // The same tolerance the backend takes for touching the plate.
+    const tol = box.getSize(new THREE.Vector3()).length() * 1e-3;
+    const picked: number[] = [];
+    const [a, b, c] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    for (let i = 0; i < p.length; i += 9) {
+      if (along(i) < base - tol || along(i + 3) < base - tol || along(i + 6) < base - tol) continue;
+      a.fromArray(p, i);
+      b.fromArray(p, i + 3);
+      c.fromArray(p, i + 6);
+      if (b.clone().sub(a).cross(c.clone().sub(a)).dot(d) <= 0) continue;
+      for (let k = 0; k < 9; k++) picked.push(p[i + k]);
+    }
+    if (picked.length) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(picked, 3));
+      const mat = new THREE.MeshBasicMaterial({
+        color: cssColor("--color-rest"), transparent: true, opacity: 0.75, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, depthWrite: false,
+      });
+      this.resting = new THREE.Mesh(geo, mat);
+      this.resting.renderOrder = 5;
+      this.scene.add(this.resting);
+    }
+    this.requestRender();
+    return picked.length / 9;
+  }
+
   /** Shows the measured points (preview units) and the line between them. */
   setMeasure(points: Vec3[]) {
     this.tapePoints = points;
@@ -1347,7 +1594,7 @@ export class Viewer {
   }
 
   private onDown(e: PointerEvent) {
-    if (this.tool === "measure" && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
+    if ((this.tool === "measure" || this.tool === "thickness") && e.button === 0) this.down = { x: e.clientX, y: e.clientY };
     if (this.drag || this.moveDrag || this.turnDrag || this.cutDrag) return;
     if (this.tool !== "brush" || e.button !== 0 || !this.mesh) return;
     this.painting = true;
@@ -1364,6 +1611,12 @@ export class Viewer {
     // A click, not a drag to orbit, places a measuring point.
     const d = this.down;
     this.down = null;
+    if (this.tool === "thickness" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+      const [o, dir] = this.rayFrom(e);
+      // Through the section: the wall is measured where the cut shows it.
+      const from = this.clipRay(o, dir);
+      if (from) this.handlers.thickness?.(from, dir);
+    }
     if (this.tool === "measure" && d && this.mesh && e.target === this.canvas && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
       this.shift = e.shiftKey;
       // With Shift the point is where the tape shows it, on the axis; otherwise on the model.
@@ -1378,4 +1631,53 @@ export class Viewer {
     this.painting = false;
     this.handlers.endStroke();
   }
+}
+
+/** Nearest of `points` to a query, through a uniform grid; -1 with no points. */
+function nearestIndex(points: Vec3[]): (q: Vec3) => number {
+  if (!points.length) return () => -1;
+  const lo = [0, 1, 2].map((k) => Math.min(...points.map((q) => q[k])));
+  const hi = [0, 1, 2].map((k) => Math.max(...points.map((q) => q[k])));
+  const span = Math.max(...hi.map((v, k) => v - lo[k]), 1e-6);
+  // About two points per cell along the longest side.
+  const n = Math.max(1, Math.min(64, Math.round(Math.cbrt(points.length) / 1.3)));
+  const size = span / n;
+  const dims = hi.map((v, k) => Math.max(1, Math.ceil((v - lo[k]) / size) + 1));
+  const cell = (q: Vec3) => q.map((v, k) => Math.min(dims[k] - 1, Math.max(0, Math.floor((v - lo[k]) / size))));
+  const grid = new Map<number, number[]>();
+  const key = (c: number[]) => (c[0] * dims[1] + c[1]) * dims[2] + c[2];
+  points.forEach((q, i) => {
+    const k = key(cell(q));
+    const list = grid.get(k);
+    if (list) list.push(i);
+    else grid.set(k, [i]);
+  });
+  const reach = Math.max(...dims);
+  return (q) => {
+    const c = cell(q);
+    let best = -1;
+    let bestD = Infinity;
+    // Rings of cells outwards until no closer point can be further out.
+    for (let r = 0; r <= reach; r++) {
+      if (best >= 0 && (r - 1) * size > Math.sqrt(bestD)) break;
+      for (let x = c[0] - r; x <= c[0] + r; x++) {
+        if (x < 0 || x >= dims[0]) continue;
+        for (let y = c[1] - r; y <= c[1] + r; y++) {
+          if (y < 0 || y >= dims[1]) continue;
+          for (let z = c[2] - r; z <= c[2] + r; z++) {
+            if (z < 0 || z >= dims[2]) continue;
+            if (Math.max(Math.abs(x - c[0]), Math.abs(y - c[1]), Math.abs(z - c[2])) !== r) continue;
+            for (const i of grid.get(key([x, y, z])) ?? []) {
+              const d = (points[i][0] - q[0]) ** 2 + (points[i][1] - q[1]) ** 2 + (points[i][2] - q[2]) ** 2;
+              if (d < bestD) {
+                bestD = d;
+                best = i;
+              }
+            }
+          }
+        }
+      }
+    }
+    return best;
+  };
 }
