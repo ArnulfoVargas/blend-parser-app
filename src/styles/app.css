@@ -4,6 +4,7 @@
 /* Hallmark · pre-emit critique: P4 H4 E4 S5 R4 V4 · weakest: H, three panels of controls compete with the model; the stage keeps the widest column and settings group under three short heads */
 @import url("./tokens.css");
 @import url("./base.css");
+@import url("./mesh.css");
 
 :root {
   --bar-h: 64px;
