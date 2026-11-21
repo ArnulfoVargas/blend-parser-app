@@ -493,6 +493,8 @@ mod tests {
                     core_slot: None,
                     min_piece_mm3: 20.0,
                     mix: false,
+                    contents: Default::default(),
+                    pins: None,
                 },
                 density_g_cm3: 1.24,
                 flush: Default::default(),
