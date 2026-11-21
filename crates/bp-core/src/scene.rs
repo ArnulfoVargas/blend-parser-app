@@ -64,6 +64,8 @@ pub struct Part {
     pub color_layers: Vec<Vec<Rgb>>,
     /// The printed object the part belongs to: 0 for the model, more for pieces cut off it.
     pub object: u32,
+    /// The plate its object prints on, 0 for the first; more once a model is split across plates.
+    pub plate: u32,
 }
 
 impl Part {
@@ -116,10 +118,16 @@ impl Scene {
     }
 
     /// Moves the scene so XY is centred on the origin and the lowest point sits
-    /// on Z = 0. Returns how far it moved.
+    /// on Z = 0; split across plates, the first plate's parts are centred and
+    /// the rest keep their places beside it. Returns how far it moved.
     pub fn place_on_plate(&mut self) -> Vec3 {
-        let Some((lo, hi)) = self.bounds() else { return [0.0; 3] };
-        let shift = [-(lo[0] + hi[0]) * 0.5, -(lo[1] + hi[1]) * 0.5, -lo[2]];
+        let Some((all_lo, all_hi)) = self.bounds() else { return [0.0; 3] };
+        let first = self.parts.iter().filter(|p| p.plate == 0).flat_map(|p| p.positions.iter().copied());
+        let (lo, hi) = first.fold((all_hi, all_lo), |(a, b), p| {
+            (std::array::from_fn(|i| a[i].min(p[i])), std::array::from_fn(|i| b[i].max(p[i])))
+        });
+        let (lo, hi) = if lo[0] <= hi[0] { (lo, hi) } else { (all_lo, all_hi) };
+        let shift = [-(lo[0] + hi[0]) * 0.5, -(lo[1] + hi[1]) * 0.5, -all_lo[2]];
         for p in &mut self.parts {
             for v in &mut p.positions {
                 *v = geom::add(*v, shift);

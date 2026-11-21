@@ -81,6 +81,13 @@ export interface Plate {
   rotated: boolean; // turned from the file's orientation
   canUndoCut: boolean;
   objects: number; // the model and the pieces cut off it that were kept
+  /** Split across plates, each plate's own check; empty on one plate. */
+  plates: (PlateCheck & { objects: number; sizeMm: Vec3; centre: Vec3; fits: boolean; fitsHeight: boolean })[];
+}
+/** Where one plate's pieces land and what is wrong with them. */
+export interface PlateCheck {
+  area: Rect; excluded: Rect[]; model: Rect; tower: Rect | null; usable: Rect;
+  offPlate: boolean; inMargin: boolean; onExcluded: boolean; onTower: boolean; towerOffPlate: boolean; fitFactor: number;
 }
 
 /** A turn; `rigid` says how the preview moved when it could follow as it is: p' = matrix · p + shift. */
@@ -100,7 +107,7 @@ export interface Summary {
   fileName: string;
   fileSize: number;
   importWarnings: { code: string; detail: string }[];
-  parts: { name: string; triangles: number; object: number; previewStart: number; previewEnd: number }[];
+  parts: { name: string; triangles: number; object: number; plate: number; previewStart: number; previewEnd: number }[];
   materials: Material[];
   slots: Slot[];
   sourceTriangles: number;
@@ -121,12 +128,52 @@ export interface Summary {
   waste: Waste;
   plate: Plate;
   canUndo: boolean;
-  undoLabel: "stroke" | "merge" | "fix" | "cut" | null;
+  undoLabel: "stroke" | "merge" | "fix" | "cut" | "separate" | "connect" | "split" | "regionRemove" | "regionExtract" | "refine" | null;
   paintedTriangles: number;
 }
 
 export interface Hit { point: Vec3; normal: Vec3 }
+
+/** The connectors of a cut: sizes in mm, centres on the plane in preview coordinates. */
+export interface Connectors {
+  kind: "pin" | "dowel"; pinsOnA: boolean; shape: "round" | "square";
+  sizeMm: number; depthMm: number; clearanceMm: number; angleDeg: number; at: Vec3[];
+}
+/** Per connector what is wrong with it (null when fine) and, when all are fine, the objects the cut leaves. */
+export interface ConnectReview { issues: ("outside" | "overlap" | "thinWall" | "tooDeep" | null)[]; objects: number | null }
+
+/** Cuts that make every piece fit the printer, and the room each plate has. */
+export interface SplitProposal { cuts: [number[], number[], number[]]; roomMm: [number, number]; heightMm: number; sizeMm: Vec3 }
+export interface SplitPlan {
+  cuts: [number[], number[], number[]]; // preview coordinates
+  layOnCut: boolean; gapMm: number;
+  dowels: { shape: "round" | "square"; sizeMm: number; depthMm: number; clearanceMm: number } | null;
+}
+export interface SplitPiece { name: string; sizeMm: Vec3; plate: number | null; laid: boolean; small: boolean; dowel: boolean }
+export interface SplitReport { pieces: SplitPiece[]; plates: number; cuts: number; joints: number; jointsMissing: number; fits: boolean }
+
+/** A disconnected piece of the model. */
+export interface Piece { part: number; partName: string; object: number; triangles: number; sizeMm: Vec3; centre: Vec3; closed: boolean }
+/** The pieces and, per preview triangle, the index of its piece (2³²−1 for none). */
+export interface Pieces { pieces: Piece[]; triPiece: number[] }
+/** A plane worth reviewing as a cut, in preview coordinates, with the signal behind it. */
+export interface CutProposal {
+  part: number; axis: 0 | 1 | 2; point: Vec3; normal: Vec3;
+  signal: { kind: "neck"; areaMm2: number; beforeMm2: number; afterMm2: number } | { kind: "colour"; from: number; to: number };
+}
 export interface PaintResult extends Hit { tris: number[] }
+
+/** The region selection: global preview triangle ids, and how many separate regions they make. */
+export interface Selection { tris: number[]; count: number; regions: number }
+export type SelectionOp = "grow" | "connected" | "smooth" | "invert" | "clear" | "get";
+/** How a cut region is closed: a shell `mm` thick, the piece `clearanceMm` smaller than its pocket; or a cap `mm` deep (negative bulges out). */
+export type Closure = { kind: "shell"; mm: number; clearanceMm?: number } | { kind: "cap"; mm: number };
+/** The region goes, or each connected region becomes an object of its own (with `group`, all one object). */
+export type RegionAction = { kind: "remove" } | { kind: "extract"; layFlat: boolean; group?: boolean };
+/** What makes faces the same colour: the model's material, the filament slot, or the colour within ΔE. */
+export type ColourMatch = { kind: "material" } | { kind: "filament" } | { kind: "similar"; deltaE: number };
+/** What cutting the region out would make, in preview units: flat xyz triangles (9 numbers each). */
+export interface RegionPreview { closure: number[]; pieces: number[][]; directions: Vec3[]; pieceMm3: number[]; restMm3: number; closed: boolean; small: number }
 
 /** The paintable mesh, decoded from the binary preview payload. */
 export interface PreviewMesh {
@@ -179,6 +226,36 @@ export const api = {
   previewCut: (point: Vec3, normal: Vec3, keepLow: boolean, keepOther: boolean, layOnCut: boolean, selected: number[]) =>
     invoke<number>("preview_cut", { point, normal, keepLow, keepOther, layOnCut, selected }),
   undoCut: () => invoke<Summary>("undo_cut"),
+  detectPieces: (weldMm: number) => invoke<Pieces>("detect_pieces", { weldMm }),
+  /** Same group: one object; null: the piece stays in the object it is in. */
+  separatePieces: (weldMm: number, groups: (number | null)[], layFlat: boolean) => invoke<Summary>("separate_pieces", { weldMm, groups, layFlat }),
+  proposeCuts: (selected: number[]) => invoke<CutProposal[]>("propose_cuts", { selected }),
+  proposeSplit: (gapMm: number) => invoke<SplitProposal>("propose_split", { gapMm }),
+  previewSplit: (plan: SplitPlan) => invoke<SplitReport>("preview_split", { plan }),
+  splitForPrinter: (plan: SplitPlan, dowelLabel: string) => invoke<Summary>("split_for_printer", { plan, dowelLabel }),
+  addPlate: () => invoke<Summary>("add_plate"),
+  moveToPlate: (object: number, plate: number) => invoke<Summary>("move_to_plate", { object, plate }),
+  cloneObject: (object: number, label: string, gapMm?: number) => invoke<Summary>("clone_object", { object, label, gapMm }),
+  arrangePlates: (gapMm: number) => invoke<Summary>("arrange_plates", { gapMm }),
+  clearPlate: (plate: number) => invoke<Summary>("clear_plate", { plate }),
+  suggestConnectors: (point: Vec3, normal: Vec3, selected: number[], connectors: Connectors) =>
+    invoke<Vec3[]>("suggest_connectors", { point, normal, selected, connectors }),
+  /** Checks every connector on a copy and, when all are fine, makes the cut there. */
+  previewConnectedCut: (point: Vec3, normal: Vec3, layOnCut: boolean, selected: number[], connectors: Connectors) =>
+    invoke<ConnectReview>("preview_connected_cut", { point, normal, layOnCut, selected, connectors }),
+  cutConnected: (point: Vec3, normal: Vec3, layOnCut: boolean, selected: number[], connectors: Connectors, dowelLabel: string) =>
+    invoke<Summary>("cut_connected", { point, normal, layOnCut, selected, connectors, dowelLabel }),
+  /** Adds to the region selection, or with `add` false takes from it; never paints. */
+  selectRegion: (origin: Vec3, dir: Vec3, radiusMm: number, add: boolean, through: boolean) =>
+    invoke<PaintResult | null>("select_region", { origin, dir, radiusMm, add, through }),
+  selectionOp: (op: SelectionOp) => invoke<Selection>("selection_op", { op }),
+  previewRegion: (closure: Closure, action: RegionAction) => invoke<RegionPreview>("preview_region", { closure, action }),
+  applyRegion: (closure: Closure, action: RegionAction) => invoke<Summary>("apply_region", { closure, action }),
+  /** Selects (or with `add` false, deselects) the faces the same colour as preview triangle `seed`; with `base`, starting from that selection. */
+  selectByColour: (seed: number, how: ColourMatch, contiguous: boolean, add: boolean, base: number[] | null = null) =>
+    invoke<Selection>("select_by_colour", { seed, how, contiguous, add, base }),
+  /** Makes colour borders that cross triangles edges of the mesh; one undoable step. */
+  refineToPaint: () => invoke<Summary>("refine_to_paint"),
   reducePalette: (target: number) => invoke<Summary>("reduce_palette", { target }),
   mergeSlots: (from: number, into: number) => invoke<Summary>("merge_slots", { from, into }),
   setMeshOps: (keepRatio: number, flattenMm: number, repair: boolean, minPieceMm: number) =>
