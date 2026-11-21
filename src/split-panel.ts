@@ -28,6 +28,8 @@ export class SplitPanel {
     box(): { min: Vec3; max: Vec3 } | null;
     split(plan: SplitPlan): Promise<boolean>;
     shrink(): void;
+    /** Resizes the model to these final millimetres; false when refused. */
+    resize(sizeMm: Vec3): Promise<boolean>;
     close(): void;
     redraw(): void;
     error(e: unknown): string;
@@ -52,6 +54,43 @@ export class SplitPanel {
     $("#spl-off").addEventListener("click", () => deps.close());
     $("#spl-scale").addEventListener("click", () => deps.shrink());
     $("#spl-apply").addEventListener("click", () => void this.apply());
+    // The size the piece has to be: typed here, the model is scaled to it and
+    // the cuts are proposed again so every piece fits the printer at that size.
+    const sizes = [0, 1, 2].map((axis) => $<HTMLInputElement>(`#spl-s${"xyz"[axis]}`));
+    sizes.forEach((input, axis) => {
+      input.addEventListener("input", () => {
+        const now = this.deps.summary()?.size.targetMm;
+        const v = input.valueAsNumber;
+        const ok = this.valid(input);
+        input.setAttribute("aria-invalid", String(!ok));
+        if (ok && now && $<HTMLInputElement>("#spl-prop").checked) {
+          const k = v / now[axis];
+          sizes.forEach((other, i) => { if (i !== axis) other.value = inputValue(now[i] * k, 1); });
+        }
+        this.syncResize();
+      });
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") void this.resize(); });
+    });
+    $("#spl-resize").addEventListener("click", () => void this.resize());
+  }
+
+  private sizeInputs() {
+    return [0, 1, 2].map((axis) => $<HTMLInputElement>(`#spl-s${"xyz"[axis]}`));
+  }
+
+  /** "Use these sizes" is on when the typed sizes are valid and differ from the model's. */
+  private syncResize() {
+    const now = this.deps.summary()?.size.targetMm;
+    const inputs = this.sizeInputs();
+    const changed = !!now && inputs.some((input, i) => Math.abs(input.valueAsNumber - now[i]) > 0.05);
+    $<HTMLButtonElement>("#spl-resize").disabled = !changed || !inputs.every((input) => this.valid(input));
+  }
+
+  private async resize() {
+    const inputs = this.sizeInputs();
+    if (!inputs.every((input) => this.valid(input))) return;
+    await this.deps.resize(inputs.map((input) => input.valueAsNumber) as Vec3);
+    this.syncResize();
   }
 
   open() {
@@ -155,6 +194,9 @@ export class SplitPanel {
     const p = this.proposal;
     const dims = (v: number[]) => `${v.map((x) => num(x, 0)).join(" × ")} mm`;
     $("#spl-room").textContent = p ? t("spl.room", { model: dims(p.sizeMm), room: dims([...p.roomMm, p.heightMm]) }) : "";
+    const target = s?.size.targetMm;
+    if (target) this.sizeInputs().forEach((input, i) => { if (document.activeElement !== input) input.value = inputValue(target[i], 1); });
+    this.syncResize();
     $("#spl-lay").setAttribute("aria-pressed", String(this.lay));
     $("#spl-keep").setAttribute("aria-pressed", String(!this.lay));
     $("#spl-dowel-fields").hidden = !$<HTMLInputElement>("#spl-dowels").checked;

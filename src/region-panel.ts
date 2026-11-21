@@ -1,4 +1,4 @@
-import { api, isAppError, type Closure, type ColourMatch, type PaintResult, type RegionAction, type RegionPreview, type Selection, type Summary, type Vec3 } from "./api";
+import { api, isAppError, type Closure, type ColourMatch, type PaintResult, type RegionAction, type RegionPreview, type Selection, type Suggestion, type Summary, type Vec3 } from "./api";
 import { num, t, volume, type Key } from "./i18n";
 import "./styles/region.css";
 
@@ -10,6 +10,8 @@ const PICKED_MIX = 0.55;
 const GHOST: Vec3 = [236, 236, 232];
 /** The brush's footprint: the selection's colour, or grey while it erases. */
 const CURSOR = { select: "#d63384", erase: "#7b807b" };
+/** What a suggestion would add to the selection, shown while the pointer is on it. */
+const SUGGESTED: Vec3 = [30, 144, 255];
 
 type Op = "grow" | "connected" | "smooth" | "invert" | "clear";
 /** A one-click way out of a refused cut: what the button says and what it changes. */
@@ -41,6 +43,10 @@ export class RegionPanel {
   private picks = 0;
   private picked = new Set<number>();
   private info: Selection = { tris: [], count: 0, regions: 0 };
+  /** Whole regions read from the rough selection, offered to take instead of it. */
+  private suggestions: Suggestion[] = [];
+  private suggesting = 0;
+  private hovered: Suggestion | null = null;
   private preview: RegionPreview | null = null;
   /** The preview matches the selection and the settings as they are. */
   private fresh = false;
@@ -150,6 +156,9 @@ export class RegionPanel {
 
   close() {
     this.active = false;
+    this.suggestions = [];
+    this.hovered = null;
+    this.renderSuggestions();
     $<HTMLDetailsElement>("#reg-more").open = false;
     this.lastPick = null;
     this.generation++;
@@ -261,7 +270,58 @@ export class RegionPanel {
   private got(info: Selection) {
     this.info = info;
     this.picked = new Set(info.tris);
+    this.hovered = null;
     this.changed();
+    void this.suggest();
+  }
+
+  /** Works out the whole regions the selection points at and offers them. */
+  private async suggest() {
+    const mine = ++this.suggesting;
+    let found: Suggestion[] = [];
+    if (this.active && this.picked.size) {
+      try {
+        found = await api.suggestRegions();
+      } catch {
+        found = [];
+      }
+    }
+    if (mine !== this.suggesting) return;
+    this.suggestions = found;
+    this.renderSuggestions();
+  }
+
+  private renderSuggestions() {
+    const box = $("#reg-suggest");
+    box.hidden = !this.active || !this.suggestions.length;
+    $("#reg-suggest-list").replaceChildren(...this.suggestions.map((sg) => {
+      const b = Object.assign(document.createElement("button"), { type: "button", className: "reg-suggestion" });
+      b.dataset.kind = sg.kind;
+      b.append(
+        Object.assign(document.createElement("span"), { textContent: t(`reg.suggest.${sg.kind}` as Key) }),
+        Object.assign(document.createElement("small"), { textContent: t("reg.count", { count: sg.count, n: num(sg.count) }) }),
+      );
+      b.title = t(`reg.suggest.${sg.kind}Help` as Key);
+      const show = (on: boolean) => { this.hovered = on ? sg : null; this.tint(); };
+      b.addEventListener("pointerenter", () => show(true));
+      b.addEventListener("pointerleave", () => show(false));
+      b.addEventListener("focus", () => show(true));
+      b.addEventListener("blur", () => show(false));
+      b.addEventListener("click", () => void this.take(sg));
+      return b;
+    }));
+  }
+
+  /** The suggestion becomes the selection, ready to separate. */
+  private async take(sg: Suggestion) {
+    this.lastPick = null;
+    try {
+      this.got(await api.setSelection(sg.tris));
+      if (this.action !== "extract") this.action = "extract";
+      this.render();
+    } catch (e) {
+      this.fail(e);
+    }
   }
 
   private settings(): { closure: Closure; action: RegionAction } | null {
@@ -320,6 +380,7 @@ export class RegionPanel {
     if (!this.picked.size || !n) return this.deps.tint(null, 1);
     const pulled = this.pulled();
     const colors: (Vec3 | null)[] = new Array(n).fill(null);
+    if (this.hovered && !pulled) for (const id of this.hovered.tris) if (id < n) colors[id] = SUGGESTED;
     for (const id of this.picked) if (id < n) colors[id] = pulled ? GHOST : PICKED;
     this.deps.tint(colors, pulled ? 0.85 : PICKED_MIX);
   }

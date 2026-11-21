@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { build } from "esbuild";
+import { BufferAttribute } from "three";
 
 const load = async (entry) => {
   const out = await build({ entryPoints: [entry], bundle: true, platform: "node", format: "esm", write: false, loader: { ".css": "empty" } });
@@ -27,10 +28,13 @@ test("a triangle tint covers all of its leaves and goes away with null", () => {
   viewer.colors = new Uint8Array(6 * 9);
   viewer.palette = [[10, 20, 30]];
   viewer.view = "filament";
-  viewer.mesh = { geometry: { getAttribute: () => ({}) } };
+  const tint = new BufferAttribute(viewer.colors, 3, true);
+  tint.addUpdateRange(0, 9);
+  viewer.mesh = { geometry: { getAttribute: () => tint } };
   viewer.requestRender = () => {};
   const leaf = (l) => Array.from(viewer.colors.slice(l * 9, l * 9 + 3));
   viewer.setTriangleTint([null, [200, 0, 0], [0, 0, 200]]);
+  assert.equal(tint.updateRanges.length, 0);
   assert.deepEqual([0, 1, 2, 3, 4, 5].map(leaf), [[10, 20, 30], [200, 0, 0], [200, 0, 0], [200, 0, 0], [0, 0, 200], [0, 0, 200]]);
   // A tint for another mesh is ignored rather than misapplied.
   viewer.setTriangleTint([[1, 1, 1]]);

@@ -32,6 +32,17 @@ pub enum RefineFailure {
     Nothing,
 }
 
+/// What a suggested region follows from the painted selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SuggestionKind {
+    /// The surface out to the model's sharp edges (creases and corners).
+    Edges,
+    /// The joined area of the filament most of the selection is painted with.
+    Colour,
+    /// Every connected piece the selection touches.
+    Piece,
+}
+
 /// What happens to the selected region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionAction {
@@ -223,6 +234,84 @@ impl Project {
         }
     }
 
+    /// Regions worth cutting out, read from a rough painted selection: out to
+    /// the sharp edges around it (`crease_deg` and more between faces), the
+    /// joined area of its main filament, and the whole pieces it touches. Each
+    /// as global triangle ids; one that is the selection again, repeats an
+    /// earlier one or takes in the whole model is left out.
+    pub fn suggest_regions(&self, crease_deg: f32) -> Vec<(SuggestionKind, Vec<u32>)> {
+        let picked: usize = self.selection.iter().flatten().filter(|&&m| m).count();
+        if picked == 0 {
+            return vec![];
+        }
+        let total: usize = self.selection.iter().map(Vec::len).sum();
+        let normals: Vec<Vec<Vec3>> = self
+            .work
+            .parts
+            .iter()
+            .map(|p| {
+                (0..p.tris.len())
+                    .map(|t| {
+                        let c = p.corners(t);
+                        geom::normalize(geom::cross(geom::sub(c[1], c[0]), geom::sub(c[2], c[0])))
+                    })
+                    .collect()
+            })
+            .collect();
+        let cos_crease = crease_deg.to_radians().cos();
+        // The filament most of the selection is painted with.
+        let mut votes = std::collections::HashMap::<u8, usize>::new();
+        for (pi, marks) in self.selection.iter().enumerate() {
+            for (t, _) in marks.iter().enumerate().filter(|m| *m.1) {
+                if let Some(slot) = self.trees.get(pi).and_then(|tr| tr.get(t)).map(|n| n.dominant()) {
+                    *votes.entry(slot).or_default() += 1;
+                }
+            }
+        }
+        let main_slot = votes.into_iter().max_by_key(|&(slot, n)| (n, std::cmp::Reverse(slot))).map(|(s, _)| s);
+        let flood = |joins: &dyn Fn(usize, usize, usize) -> bool| -> Vec<Vec<bool>> {
+            let mut out = self.selection.clone();
+            for (pi, marks) in out.iter_mut().enumerate() {
+                let mut stack: Vec<usize> = (0..marks.len()).filter(|&t| marks[t]).collect();
+                while let Some(t) = stack.pop() {
+                    for &(o, _) in &self.adjacency[pi][t] {
+                        let o = o as usize;
+                        if !marks[o] && joins(pi, t, o) {
+                            marks[o] = true;
+                            stack.push(o);
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let candidates = [
+            (SuggestionKind::Edges, flood(&|pi, a, b| geom::dot(normals[pi][a], normals[pi][b]) >= cos_crease)),
+            (
+                SuggestionKind::Colour,
+                flood(&|pi, _, b| {
+                    main_slot.is_some()
+                        && self.trees.get(pi).and_then(|tr| tr.get(b)).map(|n| n.dominant()) == main_slot
+                }),
+            ),
+            (SuggestionKind::Piece, flood(&|_, _, _| true)),
+        ];
+        let mut out: Vec<(SuggestionKind, Vec<u32>)> = vec![];
+        for (kind, marks) in candidates {
+            let ids: Vec<u32> = marks
+                .iter()
+                .enumerate()
+                .flat_map(|(pi, m)| m.iter().enumerate().filter(|x| *x.1).map(move |(t, _)| (pi, t)))
+                .map(|(pi, t)| self.tri_offsets[pi] + t as u32)
+                .collect();
+            if ids.len() == picked || ids.len() >= total || out.iter().any(|(_, o)| *o == ids) {
+                continue;
+            }
+            out.push((kind, ids));
+        }
+        out
+    }
+
     /// Evens the border: a selected triangle with at most one selected
     /// neighbour leaves it, one outside with two or more joins it.
     pub fn smooth_selection(&mut self) {
@@ -269,6 +358,7 @@ impl Project {
         };
         let mut splits = vec![];
         let mut any = false;
+        let baked = self.cut_sources();
         for pi in 0..self.scene.parts.len() {
             let selected = self.scene_selection(pi);
             if !selected.contains(&true) {
@@ -276,7 +366,21 @@ impl Project {
                 continue;
             }
             any = true;
-            splits.push(Some(region::split(&self.scene.parts[pi], &selected, closure)?));
+            // The cleaned part, so seams and stray faces of the file do not stop the cut;
+            // every piece still says which scene triangle each of its faces came from.
+            let from = &baked[pi].from;
+            let mut part = baked[pi].part.clone();
+            for v in &mut part.positions {
+                *v = std::array::from_fn(|i| v[i] * self.stretch[i]);
+            }
+            let on: Vec<bool> = from.iter().map(|&t| selected.get(t as usize).copied().unwrap_or(false)).collect();
+            let mut split = region::split(&part, &on, closure)?;
+            for piece in std::iter::once(&mut split.rest).chain(split.regions.iter_mut()) {
+                for o in &mut piece.origins {
+                    *o = o.and_then(|t| from.get(t as usize).copied());
+                }
+            }
+            splits.push(Some(split));
         }
         if !any {
             return Err(RegionError::Empty.into());
@@ -610,6 +714,23 @@ mod tests {
         p.set_selection(&[0]);
         p.smooth_selection();
         assert!(p.selection().is_empty());
+    }
+
+    #[test]
+    fn a_rough_stroke_suggests_the_face_out_to_its_edges() {
+        let mut p = slab();
+        brush_top(&mut p);
+        let painted = p.selection().len();
+        let suggestions = p.suggest_regions(30.0);
+        // Out to the edges: the whole top face (4 × 4 quads), nothing of the sides.
+        let edges = suggestions.iter().find(|(k, _)| *k == SuggestionKind::Edges).expect("an edge suggestion");
+        assert_eq!(edges.1.len(), 32);
+        assert!(edges.1.len() > painted);
+        assert!(edges.1.iter().all(|&id| p.picker.1.corners[id as usize].iter().all(|v| v[2] > 9.9)));
+        // The whole piece is the whole model here: not worth offering.
+        assert!(suggestions.iter().all(|(k, _)| *k != SuggestionKind::Piece));
+        p.clear_selection();
+        assert!(p.suggest_regions(30.0).is_empty());
     }
 
     #[test]

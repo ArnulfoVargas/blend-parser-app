@@ -143,6 +143,12 @@ pub async fn open_blend(
         emit("palette");
         let mut project = bp_core::Project::new(imported.scene, 4);
         let state = handle.state::<AppState>();
+        // The clean-up and simplification chosen for the last model apply to this
+        // one too; what depends on a model's size (base, hollow, thicken, rounding) does not.
+        let carried = state.doc.lock()?.as_ref().map(|d| carry_mesh_ops(d.project.mesh_ops()));
+        if let Some(ops) = carried {
+            project.set_mesh_ops(ops);
+        }
         let prefs = state.prefs.lock()?;
         project.set_print_ops(print_ops(&printer, &prefs));
         let mut doc = Document {
@@ -199,6 +205,24 @@ pub async fn open_project(app: AppHandle, path: String) -> CmdResult<Summary> {
     })
     .await
     .map_err(AppError::internal)?
+}
+
+/// The mesh operations a newly opened model takes from the one before it.
+fn carry_mesh_ops(last: MeshOps) -> MeshOps {
+    MeshOps {
+        keep_ratio: last.keep_ratio,
+        repair: last.repair,
+        min_piece_mm: last.min_piece_mm,
+        orient: last.orient,
+        fill_holes: last.fill_holes,
+        split_vertices: last.split_vertices,
+        drop_floating: last.drop_floating,
+        deep_clean: last.deep_clean,
+        protect_colors: last.protect_colors,
+        protect_detail: last.protect_detail,
+        remove_hidden: last.remove_hidden,
+        ..MeshOps::default()
+    }
 }
 
 #[tauri::command]
@@ -687,6 +711,7 @@ fn plate_edit_error(error: bp_core::PlateEditError) -> AppError {
         bp_core::PlateEditError::ObjectLimit => "error.plateObjectLimit",
         bp_core::PlateEditError::NoRoom => "error.noRoom",
         bp_core::PlateEditError::DoesNotFit => "error.plateArrangeOversize",
+        bp_core::PlateEditError::Count => "error.cloneCount",
     })
 }
 
@@ -739,10 +764,40 @@ pub async fn arrange_plates(app: AppHandle, gap_mm: f32) -> CmdResult<Summary> {
     .await
 }
 
+/// `count` copies of `object`: its plate is laid out again with them, what does
+/// not fit goes to one new plate and the rest are not made (the report says so).
+#[tauri::command]
+pub async fn clone_copies(
+    app: AppHandle,
+    object: u32,
+    count: u32,
+    label: String,
+    gap_mm: f32,
+) -> CmdResult<dto::Cloned> {
+    in_range(gap_mm, 0.0..=50.0, "error.splitGap")?;
+    let label: String = label.chars().filter(|c| !c.is_control()).take(32).collect();
+    with_doc(app, move |d, prefs| {
+        let room = plate_room(d, prefs, gap_mm, d.offset_mm);
+        let report = d
+            .project
+            .clone_copies(object, count as usize, &label, &room, d.printer.bed_mm().0)
+            .map_err(plate_edit_error)?;
+        Ok(dto::Cloned {
+            summary: dto::summary(d, prefs),
+            plate: report.plate,
+            on_plate: report.on_plate,
+            new_plate: report.new_plate,
+            on_new_plate: report.on_new_plate,
+            dropped: report.dropped,
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn clear_plate(app: AppHandle, plate: u32) -> CmdResult<Summary> {
     with_doc(app, move |d, prefs| {
-        d.project.clear_plate(plate).map_err(plate_edit_error)?;
+        d.project.clear_plate(plate, d.printer.bed_mm().0).map_err(plate_edit_error)?;
         Ok(dto::summary(d, prefs))
     })
     .await
@@ -833,6 +888,37 @@ pub async fn selection_op(app: AppHandle, op: String) -> CmdResult<dto::Selectio
             "get" => {}
             _ => return Err(AppError::with("error.internal", json!({ "detail": op }))),
         }
+        Ok(dto::selection(&d.project))
+    })
+    .await
+}
+
+/// Regions worth cutting out, read from the painted selection (see [`bp_core::Project::suggest_regions`]).
+#[tauri::command]
+pub async fn suggest_regions(app: AppHandle) -> CmdResult<Vec<dto::SuggestionDto>> {
+    with_doc(app, move |d, _| {
+        Ok(d.project
+            .suggest_regions(30.0)
+            .into_iter()
+            .map(|(kind, tris)| dto::SuggestionDto {
+                kind: match kind {
+                    bp_core::SuggestionKind::Edges => "edges",
+                    bp_core::SuggestionKind::Colour => "colour",
+                    bp_core::SuggestionKind::Piece => "piece",
+                },
+                count: tris.len(),
+                tris,
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Replaces the selection with these preview triangles (a suggestion taken).
+#[tauri::command]
+pub async fn set_selection(app: AppHandle, tris: Vec<u32>) -> CmdResult<dto::SelectionDto> {
+    with_doc(app, move |d, _| {
+        d.project.set_selection(&tris);
         Ok(dto::selection(&d.project))
     })
     .await
@@ -1590,6 +1676,7 @@ pub struct MeshFix {
     min_piece_mm: Option<f32>,
     flatten_mm: Option<f32>,
     thicken_mm: Option<f32>,
+    remove_hidden: Option<bool>,
 }
 
 /// One undoable step, so Ctrl+Z restores geometry, colours and hand painting.
@@ -1603,6 +1690,7 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
             fill_holes: fix.fill_holes.unwrap_or(now.fill_holes),
             split_vertices: fix.split_vertices.unwrap_or(now.split_vertices),
             deep_clean: fix.deep_clean.unwrap_or(now.deep_clean),
+            remove_hidden: fix.remove_hidden.unwrap_or(now.remove_hidden),
             drop_floating: fix.drop_floating.unwrap_or(now.drop_floating),
             min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
             flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),

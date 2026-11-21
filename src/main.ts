@@ -36,6 +36,7 @@ import {
   type TurnResult,
   type Vec3,
   type WastePrefs,
+  type Cloned,
 } from "./api";
 import { applyStatic, currentLang, inputValue, LANGS, length, list, mass, num, onLangChange, setLang, t, tKey, volume, type Key, type Lang } from "./i18n";
 import { menubar } from "./menubar";
@@ -52,6 +53,17 @@ import { SplitPanel } from "./split-panel";
 import { RegionPanel } from "./region-panel";
 
 type State = "empty" | "converting" | "error" | "ready";
+
+// Containers without a scrollbar never stay scrolled (see app.css): a focus
+// that scrolled one anyway is undone at once, so the app never shifts out of place.
+const FIXED = "html, body, .app, .work, .stage, .stage__view, .stage__foot";
+document.addEventListener("scroll", (e) => {
+  const el = e.target === document ? document.documentElement : e.target;
+  if (el instanceof Element && el.matches(FIXED) && getComputedStyle(el).overflowY !== "auto" && (el.scrollTop || el.scrollLeft)) {
+    el.scrollTop = 0;
+    el.scrollLeft = 0;
+  }
+}, true);
 
 const app = document.querySelector<HTMLElement>("[data-app]")!;
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
@@ -190,6 +202,8 @@ const apply = (call: () => Promise<Summary | null>, done?: () => void) =>
 let measured: Vec3[] = [];
 
 const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
+  contextMenu: (at, object, plate) => openContextMenu(at, object, plate),
+  plateClick: (plate) => setActivePlate(plate),
   pick: (o, d) => api.pick(o, d),
   paint: async (o, d) => {
     if (!summary) return null;
@@ -239,6 +253,7 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
   // Malla's section slides the same plane as the cut; the cut's panel only follows its own.
   section: (s) => (clipOn ? syncClip() : syncSection(s)),
   thickness: (o, d) => void measureWall(o, d),
+  thicknessHover: (o, d) => hoverWallAt(o, d),
   sectionLine: (active, error) => {
     cutDrawing = active;
     syncCutDrawing();
@@ -512,6 +527,13 @@ const splitPanel = new SplitPanel({
   },
   // Shrinking is the user's call, never the split's.
   shrink: () => void apply(() => api.fitToPlate(), () => toast(t("spl.shrunk"))),
+  resize: async (size) => {
+    if (!size.every((v) => v >= SIZE_MIN && v <= SIZE_MAX)) {
+      toast(t("error.sizeRange", { min: nf(SIZE_MIN), max: nf(SIZE_MAX) }), "error");
+      return false;
+    }
+    return (await apply(() => api.setSize(size), () => toast(t("spl.resized", { size: dims(size, 1) })))) !== undefined;
+  },
   close: () => setTool("orbit"),
   redraw: () => viewer.requestRender(),
   error: errText,
@@ -741,11 +763,45 @@ $("#toggle-wire").addEventListener("click", () => setWire(!wireOn));
 
 /** The wall measured with the thickness tool, kept on the model until the mesh changes. */
 let wall: { at: [Vec3, Vec3]; mm: number | null } | null = null;
+/** The wall under the pointer while it rests on the model, shown before the click pins it. */
+let hoverWall: { at: [Vec3, Vec3]; mm: number | null } | null = null;
+let hoverBusy = false;
+let hoverNext: [Vec3, Vec3] | null | undefined;
+async function hoverWallAt(origin: Vec3 | null, dir: Vec3 | null) {
+  if (app.dataset.tool !== "thickness" || !summary) return;
+  const ray: [Vec3, Vec3] | null = origin && dir ? [origin, dir] : null;
+  // One measurement at a time: the latest position waits for the one in flight.
+  if (hoverBusy) {
+    hoverNext = ray;
+    return;
+  }
+  hoverBusy = true;
+  try {
+    if (!ray) hoverWall = null;
+    else {
+      const tolerance = Number(document.querySelector<HTMLInputElement>("#pa-toleranceMm")?.value) || 0.001;
+      const w = await api.measureThickness(ray[0], ray[1], tolerance).catch(() => null);
+      hoverWall = w ? { at: [w.point, w.across], mm: w.mm } : null;
+    }
+  } finally {
+    hoverBusy = false;
+  }
+  syncWall();
+  if (hoverNext !== undefined) {
+    const next = hoverNext;
+    hoverNext = undefined;
+    void hoverWallAt(next?.[0] ?? null, next?.[1] ?? null);
+  }
+}
 function syncWall() {
-  const text = !wall ? (app.dataset.tool === "thickness" ? t("thickness.first") : "")
-    : wall.mm === null ? t("thickness.open") : t("thickness.value", { mm: nf(wall.mm, 2) });
+  if (app.dataset.tool !== "thickness") hoverWall = null;
+  const shown = hoverWall ?? wall;
+  const pinned = shown === wall;
+  const text = !shown ? (app.dataset.tool === "thickness" ? t("thickness.first") : "")
+    : shown.mm === null ? t("thickness.open")
+    : pinned ? t("thickness.value", { mm: nf(shown.mm, 2) }) : t("thickness.hover", { mm: nf(shown.mm, 2) });
   bind("thicknessOut", text);
-  viewer.setWall(wall && wall.mm !== null ? wall.at : null, wall?.mm != null ? `${nf(wall.mm, 2)} mm` : "");
+  viewer.setWall(shown && shown.mm !== null ? shown.at : null, shown?.mm != null ? `${nf(shown.mm, 2)} mm` : "");
 }
 async function measureWall(origin: Vec3, dir: Vec3) {
   if (!summary) return;
@@ -880,12 +936,13 @@ function render(s: Summary) {
     r.degenerateTriangles && t("mesh.degenerate", { count: r.degenerateTriangles, n: nf(r.degenerateTriangles) }),
     r.duplicateTriangles && t("mesh.duplicate", { count: r.duplicateTriangles, n: nf(r.duplicateTriangles) }),
     r.loosePieces && t("mesh.loosePieces", { count: r.loosePieces, n: nf(r.loosePieces), tris: nf(r.looseTriangles) }),
+    r.hiddenPieces && t("mesh.hiddenPieces", { count: r.hiddenPieces, n: nf(r.hiddenPieces), tris: nf(r.hiddenTriangles) }),
   ].filter((x): x is string => Boolean(x));
   bind("repairOut", !st.repair && !r.loosePieces ? t("mesh.notRepaired") : fixes.length ? t("mesh.fixed", { list: fixes.join(", ") }) : t("mesh.clean"));
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
   bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
   // The mesh tab says when something there changes the model.
-  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || st.thickenMm > 0 || REPAIRS.some((op) => st[op]));
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || st.thickenMm > 0 || REPAIRS.some((op) => op !== "removeHidden" && st[op]));
   renderRepairs(s);
   syncSmoothForm(s);
   syncHollowForm(s);
@@ -1043,88 +1100,186 @@ $("#size-undo").addEventListener("click", () => void apply(() => api.undoSize())
 // ---- plate and tower --------------------------------------------------------------------
 
 const plateSvg = $<SVGSVGElement & HTMLElement>("#plate-view");
-const projectPlate = $<HTMLSelectElement>("#project-plate");
-const plateObject = $<HTMLSelectElement>("#plate-object");
-const plateDestination = $<HTMLSelectElement>("#plate-destination");
 let activePlate = 0;
 
 const plateName = (index: number) => t("plates.name", { n: nf(index + 1) });
-
-function setOptions(select: HTMLSelectElement, values: [number, string][], preferred = select.value) {
-  select.replaceChildren(...values.map(([id, label]) => new Option(label, String(id))));
-  if (values.some(([id]) => String(id) === preferred)) select.value = preferred;
-  select.disabled = values.length === 0;
+const plateCount = (s: Summary) => Math.max(1, s.plate.plates.length);
+/** Objects on each plate, by the parts they are made of. */
+function plateObjects(s: Summary): Map<number, number>[] {
+  const out = Array.from({ length: plateCount(s) }, () => new Map<number, number>());
+  s.parts.forEach((p) => out[p.plate]?.set(p.object, (out[p.plate].get(p.object) ?? 0) + 1));
+  return out;
 }
+const plateObjectName = (s: Summary, object: number) => s.parts.find((p) => p.object === object)?.name ?? t("plates.unnamedObject", { n: nf(object + 1) });
 
-function renderPlateControls(s: Summary) {
-  const count = Math.max(1, s.plate.plates.length);
-  activePlate = Math.min(activePlate, count - 1);
-  const plates: [number, string][] = Array.from({ length: count }, (_, i) => [i, plateName(i)]);
-  setOptions(projectPlate, plates, String(activePlate));
-
-  const objects = new Map<number, string>();
-  for (const part of s.parts) {
-    if (part.plate === activePlate && !objects.has(part.object)) objects.set(part.object, part.name);
-  }
-  const options: [number, string][] = [...objects].map(([id, name], index) => [
-    id, name ? t("plates.namedObject", { n: nf(index + 1), name }) : t("plates.unnamedObject", { n: nf(index + 1) }),
-  ]);
-  setOptions(plateObject, options);
-  setOptions(plateDestination, plates.filter(([i]) => i !== activePlate));
-  $<HTMLButtonElement>("#plate-move").disabled = plateObject.disabled || plateDestination.disabled;
-  $<HTMLButtonElement>("#plate-clear").disabled = plateObject.disabled;
-  $<HTMLButtonElement>("#plate-clone").disabled = plateObject.disabled;
-  $<HTMLButtonElement>("#plate-arrange").disabled = s.parts.length === 0;
-}
-
-projectPlate.addEventListener("change", () => {
-  activePlate = Number(projectPlate.value);
+/** The plate the side panel shows and the view frames brighter. */
+function setActivePlate(plate: number) {
+  activePlate = plate;
+  viewer.setActivePlate(plate);
   if (summary) renderPlate(summary);
-});
-$("#plate-add").addEventListener("click", () => {
-  void apply(async () => {
-    const s = await api.addPlate();
-    activePlate = Math.max(0, s.plate.plates.length - 1);
-    return s;
-  });
-});
-$("#plate-move").addEventListener("click", () => {
-  const object = Number(plateObject.value);
-  const destination = Number(plateDestination.value);
-  void apply(async () => {
-    const s = await api.moveToPlate(object, destination);
-    activePlate = destination;
-    return s;
-  });
-});
-function readPlateGap(): number | null {
-  const input = $<HTMLInputElement>("#plate-arrange-gap");
-  const n = input.valueAsNumber;
-  const valid = n >= 0 && n <= 50;
-  input.setAttribute("aria-invalid", String(!valid));
-  if (valid) return n;
-  input.focus();
-  toast(t("error.splitGap", { min: nf(0), max: nf(50) }), "error");
-  return null;
+}
+function renderPlateControls(s: Summary) {
+  const count = plateCount(s);
+  activePlate = Math.min(activePlate, count - 1);
+  viewer.setActivePlate(activePlate);
+  bind("activePlate", count > 1 ? t("plates.active", { n: nf(activePlate + 1), of: nf(count) }) : plateName(0));
 }
 
-$("#plate-clone").addEventListener("click", () => {
-  const object = Number(plateObject.value);
-  const gap = $<HTMLInputElement>("#plate-arrange-clones").checked ? readPlateGap() : undefined;
-  if (gap === null) return;
-  void apply(() => api.cloneObject(object, t("plates.copy"), gap), () => viewer.frameAll());
-});
-$("#plate-arrange").addEventListener("click", () => {
-  const gap = readPlateGap();
-  if (gap === null) return;
-  void apply(() => api.arrangePlates(gap), () => viewer.frameAll());
-});
-$("#plate-clear").addEventListener("click", async () => {
-  const plate = activePlate;
-  if (await ask(t("plates.confirmClear", { plate: plateName(plate) }), { title: t("plates.clear"), kind: "warning" })) {
-    await apply(() => api.clearPlate(plate));
+// ---- right click on the view: clone, move between plates, make plates ---------------
+
+const ctxMenu = $<HTMLElement>("#ctx-menu");
+const ctxItems = [...ctxMenu.querySelectorAll<HTMLButtonElement>("[data-ctx]")];
+/** What the open menu acts on: an object (null on an empty spot) and a plate. */
+let ctxFor: { object: number | null; plate: number } | null = null;
+
+function openContextMenu(at: { x: number; y: number }, object: number | null, plate: number | null) {
+  const s = summary;
+  if (!s || app.dataset.state !== "ready") return;
+  const count = plateCount(s);
+  const on = plate ?? activePlate;
+  ctxFor = { object, plate: on };
+  if (on !== activePlate) setActivePlate(on);
+  viewer.highlightObject(object);
+  const objects = plateObjects(s);
+  const enable: Record<string, boolean> = {
+    clone: object !== null,
+    move: object !== null && count > 1,
+    moveNew: object !== null,
+    addPlate: true,
+    arrange: s.parts.length > 0,
+    clear: (objects[on]?.size ?? 0) > 0,
+  };
+  for (const item of ctxItems) {
+    const kind = item.dataset.ctx!;
+    item.disabled = !enable[kind];
+    item.hidden = object === null && (kind === "clone" || kind === "move" || kind === "moveNew");
+    item.title = kind === "move" && object !== null && count < 2 ? t("ctx.moveOnlyOne") : "";
+  }
+  ctxMenu.querySelector<HTMLElement>(".ctx__sep")!.hidden = object === null;
+  $("#ctx-title").textContent = object !== null ? `${plateObjectName(s, object)} · ${plateName(on)}` : plateName(on);
+  ctxMenu.showPopover();
+  // Inside the window, beside the pointer.
+  const r = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = `${Math.max(4, Math.min(at.x, innerWidth - r.width - 4))}px`;
+  ctxMenu.style.top = `${Math.max(4, Math.min(at.y, innerHeight - r.height - 4))}px`;
+  ctxItems.find((i) => !i.disabled && !i.hidden)?.focus({ preventScroll: true });
+}
+function closeContextMenu(keepFor = false) {
+  if (ctxMenu.matches(":popover-open")) ctxMenu.hidePopover();
+  viewer.highlightObject(null);
+  if (!keepFor) ctxFor = null;
+}
+document.addEventListener("pointerdown", (e) => {
+  if (ctxMenu.matches(":popover-open") && !ctxMenu.contains(e.target as Node)) closeContextMenu();
+}, true);
+ctxMenu.addEventListener("keydown", (e) => {
+  const items = ctxItems.filter((i) => !i.disabled && !i.hidden);
+  const at = items.indexOf(document.activeElement as HTMLButtonElement);
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeContextMenu(); }
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    items[(at + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus({ preventScroll: true });
   }
 });
+window.addEventListener("blur", () => closeContextMenu());
+
+const ARRANGE_GAP_MM = 5;
+for (const item of ctxItems) item.addEventListener("click", () => {
+  const target = ctxFor;
+  closeContextMenu();
+  const s = summary;
+  if (!target || !s) return;
+  const { object, plate } = target;
+  switch (item.dataset.ctx) {
+    case "clone": if (object !== null) void cloneDialog(object); break;
+    case "move": if (object !== null) void moveDialog(object, plate); break;
+    case "moveNew":
+      if (object !== null) {
+        const fresh = plateCount(s);
+        void apply(() => api.moveToPlate(object, fresh), () => setActivePlate(fresh));
+      }
+      break;
+    case "addPlate": {
+      const fresh = plateCount(s);
+      void apply(() => api.addPlate(), () => {
+        setActivePlate(fresh);
+        toast(t("plates.added", { plate: plateName(fresh) }));
+      });
+      break;
+    }
+    case "arrange": void apply(() => api.arrangePlates(ARRANGE_GAP_MM), () => viewer.frameAll()); break;
+    case "clear":
+      void ask(t("plates.confirmClear", { plate: plateName(plate) }), { title: t("plates.clear"), kind: "warning" })
+        .then((ok) => { if (ok) void apply(() => api.clearPlate(plate)); });
+      break;
+  }
+});
+
+/** Opens a dialog and resolves with the button it was closed with. */
+function dialogResult(d: HTMLDialogElement): Promise<string> {
+  return new Promise((resolve) => {
+    d.addEventListener("close", () => resolve(d.returnValue), { once: true });
+    d.returnValue = "";
+    d.showModal();
+  });
+}
+
+async function cloneDialog(object: number) {
+  const s = summary;
+  if (!s) return;
+  const d = $<HTMLDialogElement>("#clone-dialog");
+  const count = $<HTMLInputElement>("#clone-count");
+  const gap = $<HTMLInputElement>("#clone-gap");
+  bind("cloneWhat", t("clone.what", { name: plateObjectName(s, object), plate: plateName(s.parts.find((p) => p.object === object)?.plate ?? 0) }));
+  count.value = "1";
+  requestAnimationFrame(() => count.select());
+  if ((await dialogResult(d)) !== "ok") return;
+  const n = Math.round(count.valueAsNumber);
+  const g = gap.valueAsNumber;
+  if (!(n >= 1 && n <= 500)) return toast(t("error.cloneCount", { max: nf(500) }), "error");
+  if (!(g >= 0 && g <= 50)) return toast(t("error.splitGap", { min: nf(0), max: nf(50) }), "error");
+  let made: Cloned | null = null;
+  await apply(async () => {
+    made = await api.cloneCopies(object, n, t("plates.copy"), g);
+    return made.summary;
+  }, () => {
+    const r = made as Cloned | null;
+    if (!r) return;
+    viewer.frameAll();
+    const parts = [t("clone.onPlate", { count: r.onPlate, n: nf(r.onPlate), plate: plateName(r.plate) })];
+    if (r.newPlate !== null && r.onNewPlate) parts.push(t("clone.onNew", { count: r.onNewPlate, n: nf(r.onNewPlate), plate: plateName(r.newPlate) }));
+    if (r.dropped) {
+      toast(t("clone.dropped", { made: parts.join(t("clone.and")), count: r.dropped, n: nf(r.dropped) }), "error");
+    } else {
+      toast(t("clone.done", { made: parts.join(t("clone.and")) }));
+    }
+  });
+}
+
+async function moveDialog(object: number, from: number) {
+  const s = summary;
+  if (!s) return;
+  const d = $<HTMLDialogElement>("#move-dialog");
+  const box = $<HTMLFieldSetElement>("#move-plates");
+  const objects = plateObjects(s);
+  const count = plateCount(s);
+  bind("moveWhat", t("move.what", { name: plateObjectName(s, object), plate: plateName(from) }));
+  box.querySelectorAll("label").forEach((l) => l.remove());
+  const choices = [...Array.from({ length: count }, (_, i) => i).filter((i) => i !== from), count];
+  choices.forEach((i, k) => {
+    const label = document.createElement("label");
+    label.className = "move-plate";
+    const input = Object.assign(document.createElement("input"), { type: "radio", name: "move-plate", value: String(i), checked: k === 0 });
+    const n = objects[i]?.size ?? 0;
+    const text = i === count ? t("move.newPlate") : `${plateName(i)} · ${t("move.objects", { count: n, n: nf(n) })}`;
+    label.append(input, Object.assign(document.createElement("span"), { textContent: text }));
+    box.append(label);
+  });
+  if ((await dialogResult(d)) !== "ok") return;
+  const to = Number(box.querySelector<HTMLInputElement>("input:checked")?.value ?? NaN);
+  if (!Number.isInteger(to)) return;
+  await apply(() => api.moveToPlate(object, to), () => setActivePlate(to));
+}
 
 function renderPlate(s: Summary) {
   renderPlateControls(s);
@@ -2151,7 +2306,7 @@ $("#flatten").addEventListener("keydown", (e) => {
 // ---- advanced repairs ----------------------------------------------------------------
 
 /** The repairs with a switch of their own in Malla; each is a `MeshFix` field and a setting. */
-const REPAIRS = ["fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"] as const;
+const REPAIRS = ["removeHidden", "fillHoles", "orient", "splitVertices", "dropFloating", "deepClean"] as const;
 type RepairOp = (typeof REPAIRS)[number];
 const repairGroup = $<HTMLDetailsElement>("#repair-group");
 const repairBox = (op: RepairOp) => $<HTMLInputElement>(`#repair-ops input[data-op="${op}"]`);
@@ -2171,10 +2326,11 @@ function issueText(op: RepairOp, i: Issues): string {
     case "splitVertices": return i.sharedVertices ? t("repair.shared", n(i.sharedVertices)) : t("repair.noShared");
     case "dropFloating": return i.floatingPieces ? t("repair.floating", n(i.floatingPieces)) : t("repair.noFloating");
     case "deepClean": return i.strayTriangles ? t("repair.stray", n(i.strayTriangles)) : t("repair.noStray");
+    case "removeHidden": return i.hiddenPieces ? t("repair.hidden", n(i.hiddenPieces)) : t("repair.noHidden");
   }
 }
 const issueCount = (op: RepairOp, i: Issues) =>
-  ({ fillHoles: i.openEdges, orient: i.flippedTriangles, splitVertices: i.sharedVertices, dropFloating: i.floatingPieces, deepClean: i.strayTriangles })[op];
+  ({ fillHoles: i.openEdges, orient: i.flippedTriangles, splitVertices: i.sharedVertices, dropFloating: i.floatingPieces, deepClean: i.strayTriangles, removeHidden: i.hiddenPieces })[op];
 
 /** Each switch's line: what it finds, or with it on, what there was and what is left. */
 function renderRepairs(s: Summary | null) {
@@ -2929,7 +3085,8 @@ function selectTab(tab: Tab, focus = false) {
   // a tool the new mode does not have hands the view back to orbiting.
   const tool = app.dataset.tool as Tool;
   if (tab === "cut") {
-    if (!["section", "connect", "separate", "split"].includes(tool)) setTool("section");
+    // A tool of Cortes' own stays; one shared with the other modes hands over to the cut.
+    if (toolModes(tool).join(" ") !== "cut") setTool("section");
   } else if (!toolModes(tool).includes(tab)) setTool("orbit");
   try {
     // A cut left open would turn the cut on at the next start: only the others are remembered.
@@ -2975,8 +3132,23 @@ function setView(v: View) {
   viewer.setView(v);
 }
 
+/** What each tool leaves on the view goes when another tool is picked: the cut's
+ *  plane (shared by the cut and its connectors), Malla's section (kept only for
+ *  the thickness tool, which measures through it), the tape and the wall. */
+function leaveTool(from: Tool, to: Tool) {
+  if (from === to) return;
+  const plane = (t: Tool) => t === "section" || t === "connect";
+  if (plane(from) && !plane(to)) setSection(null);
+  if (from === "clip" && to !== "thickness") clipEnd();
+  if (from === "thickness" && to !== "clip") {
+    clipEnd();
+    wall = null;
+  }
+  if (from === "measure") measured = [];
+}
+
 function setTool(tool: Tool) {
-  // The section turns on with its tool and stays while other Malla tools are used.
+  leaveTool((app.dataset.tool as Tool) ?? "orbit", tool);
   if (tool === "clip") clipStart();
   app.dataset.tool = tool;
   // A tool from another mode (its key, say) opens that mode first.

@@ -11,12 +11,15 @@ export interface Slot { hex: string; detectedHex: string; filament: Filament | n
 export interface Repair {
   weldedVertices: number; degenerateTriangles: number; duplicateTriangles: number; loosePieces: number; looseTriangles: number;
   filledHoles: number; flippedTriangles: number; splitVertices: number; droppedPieces: number; finTriangles: number;
+  hiddenPieces: number; hiddenTriangles: number;
 }
+/** What cloning made: how many copies went to the object's plate and to a new one, and how many did not fit. */
+export interface Cloned { summary: Summary; plate: number; onPlate: number; newPlate: number | null; onNewPlate: number; dropped: number }
 /** What each advanced repair finds on a mesh (see `bp_core::MeshIssues`). */
-export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number }
+export interface Issues { holes: number; openEdges: number; flippedTriangles: number; sharedVertices: number; floatingPieces: number; strayTriangles: number; hiddenPieces: number }
 export interface Material { name: string; kind: "flat" | "image" | "vertex"; detail: string; faces: number }
 export interface Estimate { layers: number; multicolorLayers: number; swaps: number }
-export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; hollowMm: number; drains: number; drainMm: number; thickenMm: number; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
+export interface Settings { heightMm: number; keepRatio: number; flattenMm: number; repair: boolean; minPieceMm: number; orient: boolean; fillHoles: boolean; splitVertices: boolean; dropFloating: boolean; deepClean: boolean; protectColors: boolean; protectDetail: boolean; subdivide: number; smooth: number; creaseDeg: number; hollowMm: number; drains: number; drainMm: number; thickenMm: number; removeHidden: boolean; rotation: number[][]; borderDetail: number; minIslandMm2: number; printer: string; nozzleMm: number; layerMm: number }
 
 export interface PrinterProfile {
   id: string; // blank for a new custom printer
@@ -201,6 +204,8 @@ export interface PaintResult extends Hit { tris: number[] }
 /** The region selection: global preview triangle ids, and how many separate regions they make. */
 export interface Selection { tris: number[]; count: number; regions: number }
 export type SelectionOp = "grow" | "connected" | "smooth" | "invert" | "clear" | "get";
+/** A region suggested from a rough painted selection: out to the sharp edges, the main colour's area, or the whole piece. */
+export interface Suggestion { kind: "edges" | "colour" | "piece"; tris: number[]; count: number }
 /** How a cut region is closed: a shell `mm` thick, the piece `clearanceMm` smaller than its pocket; or a cap `mm` deep (negative bulges out). */
 export type Closure = { kind: "shell"; mm: number; clearanceMm?: number } | { kind: "cap"; mm: number };
 /** The region goes, or each connected region becomes an object of its own (with `group`, all one object). */
@@ -290,6 +295,8 @@ export const api = {
   addPlate: () => invoke<Summary>("add_plate"),
   moveToPlate: (object: number, plate: number) => invoke<Summary>("move_to_plate", { object, plate }),
   cloneObject: (object: number, label: string, gapMm?: number) => invoke<Summary>("clone_object", { object, label, gapMm }),
+  /** `count` copies: the plate is laid out again; what does not fit goes to one new plate, the rest are not made. */
+  cloneCopies: (object: number, count: number, label: string, gapMm: number) => invoke<Cloned>("clone_copies", { object, count, label, gapMm }),
   arrangePlates: (gapMm: number) => invoke<Summary>("arrange_plates", { gapMm }),
   clearPlate: (plate: number) => invoke<Summary>("clear_plate", { plate }),
   suggestConnectors: (point: Vec3, normal: Vec3, selected: number[], connectors: Connectors) =>
@@ -303,6 +310,8 @@ export const api = {
   selectRegion: (origin: Vec3, dir: Vec3, radiusMm: number, add: boolean, through: boolean) =>
     invoke<PaintResult | null>("select_region", { origin, dir, radiusMm, add, through }),
   selectionOp: (op: SelectionOp) => invoke<Selection>("selection_op", { op }),
+  suggestRegions: () => invoke<Suggestion[]>("suggest_regions"),
+  setSelection: (tris: number[]) => invoke<Selection>("set_selection", { tris }),
   previewRegion: (closure: Closure, action: RegionAction) => invoke<RegionPreview>("preview_region", { closure, action }),
   applyRegion: (closure: Closure, action: RegionAction) => invoke<Summary>("apply_region", { closure, action }),
   /** Selects (or with `add` false, deselects) the faces the same colour as preview triangle `seed`; with `base`, starting from that selection. */
@@ -357,7 +366,7 @@ export const api = {
 /** Mesh operations a printability fix changes; omitted ones stay as they are. */
 export interface MeshFix {
   repair?: boolean; orient?: boolean; fillHoles?: boolean; splitVertices?: boolean; dropFloating?: boolean; deepClean?: boolean;
-  minPieceMm?: number; flattenMm?: number; thickenMm?: number;
+  minPieceMm?: number; flattenMm?: number; thickenMm?: number; removeHidden?: boolean;
 }
 export interface PrintabilityParams {
   extrusionMm: number; perimeters: number; wallMm: number; detailMm: number;

@@ -666,12 +666,23 @@ pub(crate) fn valid_solid(part: &Part, eps: f32) -> bool {
     surface_is_closed(part, eps) == Some(true)
 }
 
-/// Accepts a clean clipped surface when its source already had a boundary.
-/// Closed sources must still produce solids, including after the cap is built.
+/// Closed sources must produce solids, including after the cap is built. A
+/// source that was not a clean solid (open, or with faces the clean-up could
+/// not fix) is cut as it is: its pieces are no worse than the model was, and
+/// refusing would leave the tool unusable on most downloaded models.
 pub(crate) fn valid_section(source: &Part, sides: &[(Part, Vec<Option<u32>>); 2], eps: f32) -> bool {
     let mut pieces = sides.iter().map(|(part, _)| part).filter(|part| !part.tris.is_empty());
-    pieces.clone().all(|part| valid_solid(part, eps))
-        || (surface_is_closed(source, eps) == Some(false) && pieces.all(|part| surface_is_closed(part, eps).is_some()))
+    if pieces.clone().all(|part| valid_solid(part, eps)) {
+        return true;
+    }
+    match surface_is_closed(source, eps) {
+        Some(true) => false,
+        Some(false) => pieces.all(|part| surface_is_closed(part, eps).is_some()),
+        None => pieces.all(|part| {
+            part.positions.iter().flatten().all(|v| v.is_finite())
+                && part.tris.iter().flatten().all(|&index| (index as usize) < part.positions.len())
+        }),
+    }
 }
 
 /// None for degenerate, nonfinite, or inconsistently wound or shared edges.

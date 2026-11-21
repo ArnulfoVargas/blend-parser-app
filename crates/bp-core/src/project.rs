@@ -21,10 +21,12 @@ use crate::separate;
 use crate::split::{self, ColorPiece, Split, SplitParams};
 use std::collections::HashMap;
 
+mod bake;
 mod plates;
-pub use plates::PlateEditError;
+pub use plates::{CloneReport, PlateEditError, MAX_COPIES};
+
 mod selection;
-pub use selection::{ColourMatch, RefineFailure, RegionAction, RegionFailure, RegionPreview};
+pub use selection::{ColourMatch, RefineFailure, RegionAction, RegionFailure, RegionPreview, SuggestionKind};
 
 /// Colour settings, in final millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -600,6 +602,8 @@ pub struct Project {
     selection: Vec<Vec<bool>>,
     stroke: Vec<Change>,
     undo: Vec<UndoEntry>,
+    /// The parts as the cutting tools see them; see [`bake`].
+    cut_cache: bake::CutSourceCache,
 }
 
 impl Project {
@@ -639,6 +643,7 @@ impl Project {
             tri_offsets: vec![],
             stroke: vec![],
             undo: vec![],
+            cut_cache: Default::default(),
         };
         p.rebuild_geometry();
         let pal = p.suggest_palette(filaments);
@@ -769,6 +774,7 @@ impl Project {
             self.rotation = rotation;
             self.placement = geom::add(mat_vec(turn, self.placement), shift);
             self.source_positions = self.scene.parts.iter().map(|p| p.positions.clone()).collect();
+            self.cut_cache = Default::default();
             self.measure_source();
             let moved = RigidMove { matrix: turn, shift };
             self.picker_frame = moved.after(self.picker_frame);
@@ -889,12 +895,14 @@ impl Project {
         let eps = geom::len(self.source_size) * 1e-6;
         let to_preview = |p: Vec3| -> Vec3 { std::array::from_fn(|i| p[i] * stretch[i] - off[i]) };
         let (mut sections, mut parts) = (vec![], vec![]);
+        let baked = self.cut_sources();
         for (pi, (part, src)) in self.scene.parts.iter().zip(&self.source_positions).enumerate() {
             if !selected.is_empty() && !selected.contains(&pi) {
                 continue;
             }
-            let whole = Part { positions: src.clone(), ..part.clone() };
-            let loops: Vec<Vec<[f32; 2]>> = cut::section_loops(&whole, source, eps)
+            let _ = (part, src);
+            let whole = &baked[pi].part;
+            let loops: Vec<Vec<[f32; 2]>> = cut::section_loops(whole, source, eps)
                 .into_iter()
                 .map(|ring| ring.into_iter().map(|p| frame.flat(to_preview(p))).collect())
                 .collect();
@@ -1053,9 +1061,10 @@ impl Project {
                     .then(|| PaintTransfer::new(&self.shape.parts[pi], &self.painted[pi], part.tris.len()))
             })
             .collect();
+        let baked = self.cut_sources();
         for (pi, (part, src)) in self.scene.parts.iter().zip(&self.source_positions).enumerate() {
-            let whole = Part { positions: src.clone(), ..part.clone() };
             if !selected.is_empty() && !selected.contains(&pi) {
+                let whole = Part { positions: src.clone(), ..part.clone() };
                 let painted = transfers[pi].as_ref().map(|_| CutPaint {
                     part: pi,
                     origins: (0..whole.tris.len()).map(|i| Some(i as u32)).collect(),
@@ -1067,28 +1076,35 @@ impl Project {
                 untouched_paint.push(painted);
                 continue;
             }
+            // The cleaned part: open seams and stray faces of the file do not stop the cut.
+            let whole = &baked[pi].part;
+            let from = &baked[pi].from;
             let crosses = whole.positions.iter().any(|&v| plane.distance(v) < -eps)
                 && whole.positions.iter().any(|&v| plane.distance(v) > eps);
             intersects |= crosses;
-            let sides = match joints.as_ref().map(|j| &j.features[pi]).filter(|f| !f.is_empty()) {
+            let features = joints.as_ref().map(|j| &j.features[pi]).filter(|f| !f.is_empty());
+            let sides = match features {
                 Some(features) => {
-                    let (sides, unplaced) = cut::split_plane_with_features(&whole, plane, eps, features);
+                    let (sides, unplaced) = cut::split_plane_with_features(whole, plane, eps, features);
                     if unplaced > 0 {
                         return Err(cut::CutError::InvalidGeometry);
                     }
                     sides
                 }
-                None => cut::split_plane_with_origins(&whole, plane, eps),
+                None => cut::split_plane_with_origins(whole, plane, eps),
             };
-            let valid = if joints.is_some() {
+            // An open source can stay open unless we add connectors to it.
+            let valid = if features.is_some() {
                 sides.iter().all(|(p, _)| p.tris.is_empty() || cut::valid_solid(p, eps))
             } else {
-                cut::valid_section(&whole, &sides, eps)
+                cut::valid_section(whole, &sides, eps)
             };
             if checked && !valid {
                 return Err(cut::CutError::InvalidGeometry);
             }
             let [low, high] = sides.map(|(part, origins)| {
+                let origins: Vec<Option<u32>> =
+                    origins.iter().map(|o| o.and_then(|t| from.get(t as usize).copied())).collect();
                 let painted = transfers[pi].as_ref().map(|_| CutPaint {
                     part: pi,
                     origins,
@@ -1592,16 +1608,14 @@ impl Project {
         // Cuts every chunk the planes cross, X first, then Y, then Z, with any
         // sockets that belong to the chunk's section on each plane.
         let cut_all = |sockets: &Sockets| -> Result<Vec<Chunk>, cut::CutError> {
-            let mut chunks: Vec<Chunk> = self
-                .scene
-                .parts
+            let baked = self.cut_sources();
+            let mut chunks: Vec<Chunk> = baked
                 .iter()
-                .zip(&self.source_positions)
                 .enumerate()
-                .map(|(pi, (part, src))| Chunk {
-                    part: Part { positions: src.clone(), ..part.clone() },
+                .map(|(pi, b)| Chunk {
+                    part: b.part.clone(),
                     from: pi,
-                    origins: (0..part.tris.len() as u32).map(Some).collect(),
+                    origins: b.from.iter().copied().map(Some).collect(),
                 })
                 .collect();
             for &(a, m, at) in &planes {
@@ -2227,6 +2241,7 @@ impl Project {
     }
 
     fn apply_size(&mut self, size: Vec3) {
+        self.cut_cache = Default::default();
         self.size_mm = size;
         self.scale = (size[2] / self.source_height).max(1e-6);
         let stretch: Vec3 = std::array::from_fn(|i| size[i] / (self.source_size[i] * self.scale));
@@ -2258,6 +2273,7 @@ impl Project {
             || ops.fill_holes != self.mesh_ops.fill_holes
             || ops.split_vertices != self.mesh_ops.split_vertices
             || ops.deep_clean != self.mesh_ops.deep_clean
+            || ops.remove_hidden != self.mesh_ops.remove_hidden
             || ops.protect_colors != self.mesh_ops.protect_colors
             || ops.protect_detail != self.mesh_ops.protect_detail
             || ops.subdivide != self.mesh_ops.subdivide
@@ -2305,6 +2321,7 @@ impl Project {
     }
 
     fn rebuild_geometry_keep_paint(&mut self) {
+        self.cut_cache = Default::default();
         let (shape, work) = Mesh::build_with(&self.scene, self.mesh_ops, self.scale, &|m| self.triangle_labels(m));
         self.shape = shape;
         self.work = work;
@@ -2659,8 +2676,8 @@ impl Project {
         let (mut positions, rest) = rest.split_at_mut(leaves * 36);
         let (offset_bytes, rest) = rest.split_at_mut((tris + 1) * 4);
         let (mut labels, mut rgb) = rest.split_at_mut(leaves);
-        for (o, b) in offsets.iter().zip(offset_bytes.chunks_exact_mut(4)) {
-            b.copy_from_slice(&o.to_le_bytes());
+        for (o, b) in offsets.iter().zip(offset_bytes.as_chunks_mut::<4>().0) {
+            *b = o.to_le_bytes();
         }
         // Blocks of triangles own consecutive runs of every array.
         let mut blocks = vec![];
@@ -2987,6 +3004,7 @@ impl Project {
             tri_offsets: vec![],
             stroke: vec![],
             undo: vec![],
+            cut_cache: Default::default(),
         };
         p.rebuild_geometry();
         let counts: Vec<usize> = p.work.parts.iter().map(|w| w.tris.len()).collect();
@@ -3842,7 +3860,7 @@ mod tests {
     #[test]
     fn an_open_model_can_be_split_across_plates() {
         let mut source = bar([300.0, 40.0, 30.0]);
-        // Remove one end face. The other end and both cuts should remain intact.
+        // Remove one end face: the cut tools cap it first, so every piece comes out solid.
         let part = &mut source.parts[0];
         let removable: Vec<usize> =
             (0..part.tris.len()).filter(|&i| part.corners(i).iter().all(|v| v[0] == 0.0)).collect();
@@ -3859,9 +3877,31 @@ mod tests {
         assert!(report.fits());
         assert_eq!(report.pieces.len(), 3);
         assert_eq!(p.split_for_printer(&plan, &ROOM, "dowel"), Ok(report));
-        assert_eq!(p.scene.parts.iter().filter(|part| cut::valid_solid(part, 1e-4)).count(), 2);
+        assert_eq!(p.scene.parts.iter().filter(|part| cut::valid_solid(part, 1e-4)).count(), 3);
         assert!(p.undo());
         assert_eq!(p.preview().positions, before.positions);
+    }
+
+    #[test]
+    fn clone_copies_fill_the_plate_spill_to_one_new_plate_and_drop_the_rest() {
+        // 25 × 25 mm footprints, 5 mm apart, on a 120 × 120 mm room: 4 × 4 = 16 per plate.
+        let room = fit::Room { area_mm: [120.0, 120.0], height_mm: 150.0, gap_mm: 5.0 };
+        let mut p = Project::new(bar([25.0, 25.0, 10.0]), 2);
+        let report = p.clone_copies(0, 20, "copy", &room, 256.0).unwrap();
+        // The original plus 15 copies fill the plate; 5 go to a new one.
+        assert_eq!((report.on_plate, report.on_new_plate, report.dropped), (15, 5, 0));
+        assert_eq!(report.new_plate, Some(1));
+        assert_eq!(p.object_count(), 21);
+        assert_eq!(p.plate_groups().iter().map(|g| g.objects).collect::<Vec<_>>(), [16, 5]);
+        assert!(p.plate_groups().iter().all(|g| g.size_mm[0] <= 120.0 + 1e-2 && g.size_mm[1] <= 120.0 + 1e-2));
+        assert!(p.undo());
+        assert_eq!(p.object_count(), 1);
+        assert_eq!(p.plate_count(), 1);
+        // Too many for two plates: one full, one more, and the rest are not made.
+        let report = p.clone_copies(0, 40, "copy", &room, 256.0).unwrap();
+        assert_eq!((report.on_plate, report.on_new_plate, report.dropped), (15, 16, 9));
+        assert_eq!(p.plate_count(), 2);
+        assert_eq!(p.clone_copies(0, 0, "copy", &room, 256.0), Err(PlateEditError::Count));
     }
 
     #[test]
@@ -3881,7 +3921,7 @@ mod tests {
         p.move_to_plate(0, 1, 120.0).unwrap();
         assert!(p.export_parts().iter().all(|part| part.plate == 1));
         assert!(brush_area(&p, target) > 0.0);
-        p.clear_plate(1).unwrap();
+        p.clear_plate(1, 256.0).unwrap();
         assert_eq!(p.object_count(), 0);
         assert_eq!(p.plate_count(), 2);
         assert!(p.preview().positions.is_empty());
@@ -4229,6 +4269,12 @@ mod tests {
                 assert!(!p.can_undo_cut());
             }
         }
+        // An open surface is cut as it is instead of being refused, and undone in one step.
+        let mut p = Project::new(self::scene(), 2);
+        let before = p.preview().positions;
+        assert_eq!(p.cut_plane([0.0, 0.0, 8.0], [0.0, 0.0, 1.0], true, false, false, &[]), Ok(()));
+        assert!(p.undo());
+        assert_eq!(p.preview().positions, before);
     }
 
     #[test]

@@ -60,6 +60,6 @@ pub(super) fn clip(body: &Manifold, grown: &MeshData) -> Option<MeshData> {
     let gl = cut.get_mesh_gl(0);
     let stride = gl.num_prop as usize;
     let positions = gl.vert_properties.chunks_exact(stride).map(|v| [v[0], v[1], v[2]]).collect();
-    let tris = gl.tri_verts.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+    let tris = gl.tri_verts.as_chunks::<3>().0.to_vec();
     Some((positions, tris))
 }

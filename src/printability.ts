@@ -58,7 +58,7 @@ const FIX_OF: Record<string, string> = {
 /** Where a fix's mesh operations show in the summary, to tell whether it still holds. */
 const SETTING: Record<keyof MeshFix, keyof Summary["settings"]> = {
   repair: "repair", orient: "orient", fillHoles: "fillHoles", splitVertices: "splitVertices",
-  dropFloating: "dropFloating", minPieceMm: "minPieceMm", flattenMm: "flattenMm", deepClean: "deepClean",
+  dropFloating: "dropFloating", minPieceMm: "minPieceMm", flattenMm: "flattenMm", deepClean: "deepClean", removeHidden: "removeHidden",
   thickenMm: "thickenMm",
 };
 /** What "Corregir todo" warns each fix may do to the model, in the order it lists them; other fixes are repairs. */

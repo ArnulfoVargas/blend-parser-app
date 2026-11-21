@@ -85,6 +85,8 @@ pub struct RepairDto {
     pub split_vertices: usize,
     pub dropped_pieces: usize,
     pub fin_triangles: usize,
+    pub hidden_pieces: usize,
+    pub hidden_triangles: usize,
 }
 
 /// What each advanced repair finds, as [`bp_core::MeshIssues`] counts it.
@@ -97,6 +99,7 @@ pub struct IssuesDto {
     pub shared_vertices: usize,
     pub floating_pieces: usize,
     pub stray_triangles: usize,
+    pub hidden_pieces: usize,
 }
 
 impl From<bp_core::MeshIssues> for IssuesDto {
@@ -108,6 +111,7 @@ impl From<bp_core::MeshIssues> for IssuesDto {
             shared_vertices: i.shared_vertices,
             floating_pieces: i.floating_pieces,
             stray_triangles: i.stray_triangles,
+            hidden_pieces: i.hidden_pieces,
         }
     }
 }
@@ -265,6 +269,7 @@ pub struct SettingsDto {
     pub drains: u8,
     pub drain_mm: f32,
     pub thicken_mm: f32,
+    pub remove_hidden: bool,
     /// Rows of the rotation applied to the model as loaded.
     pub rotation: bp_core::Mat3,
     pub border_detail: u8,
@@ -590,6 +595,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
         drains,
         drain_mm,
         thicken_mm,
+        remove_hidden,
     } = p.mesh_ops();
     let ColorOps { border_detail, min_island_mm2 } = p.color_ops();
     let bed = doc.printer.bed_mm();
@@ -681,6 +687,8 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             split_vertices: stats.repair.split_vertices,
             dropped_pieces: stats.repair.dropped_pieces,
             fin_triangles: stats.repair.fin_triangles,
+            hidden_pieces: stats.repair.hidden_pieces,
+            hidden_triangles: stats.repair.hidden_triangles,
         },
         estimate: EstimateDto {
             layers: stats.swaps.layers,
@@ -707,6 +715,7 @@ pub fn summary(doc: &Document, prefs: &Prefs) -> Summary {
             drains,
             drain_mm,
             thicken_mm,
+            remove_hidden,
             rotation: p.rotation(),
             border_detail,
             min_island_mm2,
@@ -1028,4 +1037,25 @@ impl From<ColourMatchDto> for bp_core::ColourMatch {
             ColourMatchDto::Similar { delta_e } => Self::Similar { delta_e },
         }
     }
+}
+
+/// What cloning made, beside the new summary.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cloned {
+    pub summary: Summary,
+    pub plate: u32,
+    pub on_plate: usize,
+    pub new_plate: Option<u32>,
+    pub on_new_plate: usize,
+    pub dropped: usize,
+}
+
+/// A region suggested from the painted selection: what it follows and its preview triangles.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestionDto {
+    pub kind: &'static str,
+    pub tris: Vec<u32>,
+    pub count: usize,
 }
