@@ -62,6 +62,7 @@ pub fn run() {
             commands::undo,
             commands::export_3mf,
             commands::export_color_zip,
+            commands::export_color_assembly,
         ])
         .run(tauri::generate_context!())
         .expect("error while running BlendParser");

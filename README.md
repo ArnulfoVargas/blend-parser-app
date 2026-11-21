@@ -32,8 +32,11 @@ texturas en un `.3mf` que Bambu Studio abre **ya pintado por filamento**.
   simplificar la malla y aplanar la base, con estimación de cambios de filamento y purga.
 - Reparación de malla: une vértices duplicados, quita triángulos degenerados y caras repetidas,
   y elimina piezas sueltas menores que un tamaño dado.
-- Exportar por color: un `.zip` con un STL cerrado por color (cáscara del grosor elegido hacia
-  dentro; opcionalmente el color principal como sólido completo) y una lista de colores.
+- Exportar por color: un `.zip` con un STL cerrado por color y una lista de colores. Las piezas
+  siguen los bordes pintados (cada subdivisión de la pintura, no el color dominante de cada
+  triángulo) y cada color es una cáscara del grosor elegido hacia dentro. Opcionalmente el color
+  principal es el cuerpo, con un hueco de ese grosor donde encaja cada cáscara: juntos forman el
+  modelo sin solaparse.
 
 ## Perfiles de impresora en el 3MF
 
@@ -251,7 +254,7 @@ crates/
     optimize    Limpieza de islas de color por adyacencia
     estimate    Cambios de filamento por capa, con su sentido
     waste       Desperdicio: purga por par de colores, purga inicial y torre
-    split       Una pieza cerrada por color (cáscara o sólido completo)
+    split       Una pieza cerrada por color siguiendo la pintura (cáscara o cuerpo con huecos)
     bvh         Picking del pincel, consulta por esfera, punto más cercano
     project     Casos de uso: paleta, tamaño, operaciones, pincel, deshacer, vista previa
   bp-blend/   Infraestructura: ejecuta Blender headless con extract.py y lee el volcado binario

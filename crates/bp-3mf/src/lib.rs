@@ -85,12 +85,12 @@ fn objects_xml(model: &Model) -> String {
             x.push_str("\"/>\n");
         }
         x.push_str("    </vertices>\n    <triangles>\n");
-        for (t, paint) in p.tris.iter().zip(p.paint) {
-            let _ = writeln!(
-                x,
-                "     <triangle v1=\"{}\" v2=\"{}\" v3=\"{}\" paint_color=\"{}\"/>",
-                t[0], t[1], t[2], paint
-            );
+        for (i, [a, b, c]) in p.tris.iter().enumerate() {
+            let _ = write!(x, "     <triangle v1=\"{a}\" v2=\"{b}\" v3=\"{c}\"");
+            if let Some(paint) = p.paint.get(i) {
+                let _ = write!(x, " paint_color=\"{paint}\"");
+            }
+            x.push_str("/>\n");
         }
         x.push_str("    </triangles>\n   </mesh>\n  </object>\n");
     }
@@ -167,7 +167,7 @@ fn main_xml(model: &Model) -> String {
     )
 }
 
-fn settings_xml(model: &Model) -> String {
+fn settings_xml(model: &Model, part_filaments: &[u8]) -> String {
     let (mut objects_cfg, mut instances) = (String::new(), String::new());
     for (k, ids) in objects(model).iter().enumerate() {
         let id = object_id(model, k);
@@ -175,12 +175,16 @@ fn settings_xml(model: &Model) -> String {
         let mut parts = String::new();
         for &i in ids {
             let p = &model.parts[i];
+            let mut filament = String::new();
+            if let Some(&slot) = part_filaments.get(i) {
+                let _ = writeln!(filament, "      <metadata key=\"extruder\" value=\"{}\"/>", u16::from(slot) + 1);
+            }
             let _ = write!(
                 parts,
                 "    <part id=\"{}\" subtype=\"normal_part\">
       <metadata key=\"name\" value=\"{}\"/>
       <metadata key=\"matrix\" value=\"1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1\"/>
-      <mesh_stat face_count=\"{}\" edges_fixed=\"0\" degenerate_facets=\"0\" facets_removed=\"0\" facets_reversed=\"0\" backwards_edges=\"0\"/>
+{filament}      <mesh_stat face_count=\"{}\" edges_fixed=\"0\" degenerate_facets=\"0\" facets_removed=\"0\" facets_reversed=\"0\" backwards_edges=\"0\"/>
     </part>
 ",
                 i + 1,
@@ -308,6 +312,24 @@ fn rels(target: &str) -> String {
 }
 
 pub fn write<W: Write + Seek>(out: W, model: &Model) -> zip::result::ZipResult<()> {
+    write_package(out, model, &[])
+}
+
+/// Writes an assembly whose parts each use a single filament, indexed from zero.
+pub fn write_filament_parts<W: Write + Seek>(
+    out: W,
+    model: &Model,
+    part_filaments: &[u8],
+) -> zip::result::ZipResult<()> {
+    if part_filaments.len() != model.parts.len()
+        || part_filaments.iter().any(|&slot| usize::from(slot) >= model.filaments.len())
+    {
+        return Err(zip::result::ZipError::InvalidArchive("invalid filament assignment".into()));
+    }
+    write_package(out, model, part_filaments)
+}
+
+fn write_package<W: Write + Seek>(out: W, model: &Model, part_filaments: &[u8]) -> zip::result::ZipResult<()> {
     let mut z = zip::ZipWriter::new(out);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let files: [(&str, String); 7] = [
@@ -316,7 +338,7 @@ pub fn write<W: Write + Seek>(out: W, model: &Model) -> zip::result::ZipResult<(
         ("3D/3dmodel.model", main_xml(model)),
         ("3D/_rels/3dmodel.model.rels", rels("/3D/Objects/object_1.model")),
         ("3D/Objects/object_1.model", objects_xml(model)),
-        ("Metadata/model_settings.config", settings_xml(model)),
+        ("Metadata/model_settings.config", settings_xml(model, part_filaments)),
         ("Metadata/project_settings.config", project_json(model)),
     ];
     for (name, body) in files {
@@ -331,6 +353,43 @@ pub fn write<W: Write + Seek>(out: W, model: &Model) -> zip::result::ZipResult<(
 mod tests {
     use super::*;
     use std::io::{Cursor, Read};
+
+    #[test]
+    fn a_colour_assembly_keeps_component_coordinates_and_filament_slots() {
+        let positions = [[3.0, 4.0, 5.0], [4.0, 4.0, 5.0], [3.0, 5.0, 5.0]];
+        let tris = [[0, 1, 2]];
+        let parts =
+            ["Body", "Highlight"].map(|name| Part { name, positions: &positions, tris: &tris, paint: &[], object: 0 });
+        let model = Model {
+            name: "Assembly",
+            parts: Vec::from(parts),
+            filaments: vec!["#000000".into(), "#FF0000".into(), "#00FF00".into()],
+            printer: Printer::default(),
+            flush: Flush::default(),
+            layer_mm: None,
+            offset_mm: [0.0; 2],
+        };
+        let mut bytes = Cursor::new(Vec::new());
+        assert!(write_filament_parts(&mut bytes, &model, &[0, 3]).is_err());
+        write_filament_parts(&mut bytes, &model, &[0, 2]).unwrap();
+        let mut zip = zip::ZipArchive::new(bytes).unwrap();
+        let mut read = |file| {
+            let mut xml = String::new();
+            zip.by_name(file).unwrap().read_to_string(&mut xml).unwrap();
+            xml
+        };
+        let assembly = read("3D/3dmodel.model");
+        assert_eq!(assembly.matches("<component ").count(), 2);
+        assert_eq!(assembly.matches("<item ").count(), 1);
+        assert_eq!(assembly.matches("transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"").count(), 2);
+        let settings = read("Metadata/model_settings.config");
+        assert!(settings.contains("name\" value=\"Highlight\"/>\n      <metadata key=\"matrix"));
+        assert!(settings.contains("extruder\" value=\"3\""));
+        let mesh = read("3D/Objects/object_1.model");
+        assert_eq!(mesh.matches("<triangle ").count(), 2);
+        assert!(mesh.contains("x=\"3\" y=\"4\" z=\"5\""));
+        assert!(!mesh.contains("paint_color"));
+    }
 
     #[test]
     fn writes_a_bambu_package() {
@@ -394,7 +453,7 @@ mod tests {
         let main = main_xml(&model);
         assert_eq!(main.matches("<item ").count(), 2);
         assert!(main.contains("objectid=\"4\"") && main.contains("objectid=\"5\""));
-        let cfg = settings_xml(&model);
+        let cfg = settings_xml(&model, &[]);
         assert_eq!(cfg.matches("<model_instance>").count(), 2);
         assert!(cfg.contains("value=\"b (2)\""));
         // The model's object keeps both of its parts.
@@ -492,16 +551,18 @@ impl ZipText {
     pub const ES: ZipText = ZipText {
         index_file: "colores.txt",
         columns: ["Ranura", "Color", "Archivo"],
-        solid: "(sólido completo)",
-        footer: "Cada color es una pieza cerrada. Las cáscaras siguen la superficie del modelo hacia dentro;\n\
-                 el sólido completo, si lo hay, es el modelo entero en el color principal.\n",
+        solid: "(cuerpo principal)",
+        footer: "Cada color es una pieza cerrada que sigue los bordes pintados. Las cáscaras siguen la\n\
+                 superficie del modelo hacia dentro; el cuerpo principal, si lo hay, tiene un hueco del\n\
+                 mismo grosor donde encaja cada cáscara, y juntos forman el modelo sin solaparse.\n",
     };
     pub const EN: ZipText = ZipText {
         index_file: "colors.txt",
         columns: ["Slot", "Colour", "File"],
-        solid: "(full solid)",
-        footer: "Each colour is a closed piece. Shells follow the model's surface inwards;\n\
-                 the full solid, if there is one, is the whole model in the main colour.\n",
+        solid: "(main body)",
+        footer: "Each colour is a closed piece that follows the painted borders. Shells follow the model's\n\
+                 surface inwards; the main body, if there is one, has a pocket as deep for each shell to\n\
+                 drop into, and together they make up the model without overlapping.\n",
     };
 
     /// The text for a BCP 47 language tag; Spanish when there is none for it.
@@ -561,7 +622,7 @@ mod color_zip_tests {
         assert_eq!(zip.len(), 3);
         let mut index = String::new();
         zip.by_name("colors.txt").unwrap().read_to_string(&mut index).unwrap();
-        assert!(index.contains("Slot") && index.contains("(full solid)"), "{index}");
+        assert!(index.contains("Slot") && index.contains("(main body)"), "{index}");
         let mut stl = Vec::new();
         zip.by_name("02_spider_E9A462.stl").unwrap().read_to_end(&mut stl).unwrap();
         assert_eq!(stl.len(), 84 + 2 * 50);

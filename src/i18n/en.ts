@@ -380,11 +380,12 @@ export const en: Catalog = {
   "export.anyway": "Export anyway",
 
   "zip.title": "Export by colour",
-  "zip.help": "One closed STL per colour in a .zip, to print each colour as a separate piece.",
+  "zip.help": "Save the colour pieces as STLs in a ZIP or as a 3MF assembly that keeps each part in place with its filament.",
   "zip.thickness": "Thickness of each colour",
   "zip.thicknessHelp": "From {min} to {max} mm.",
-  "zip.mainSolid": "Main colour as a full solid",
+  "zip.mainSolid": "Main colour as a body with pockets the others fit into",
   "zip.export": "Export .zip",
+  "zip.exportAssembly": "Export 3MF assembly",
   "zip.saved": { one: "{n} colour saved to {path}", other: "{n} colours saved to {path}" },
 
   "printers.title": "My printers",
