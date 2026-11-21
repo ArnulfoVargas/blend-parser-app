@@ -33,7 +33,7 @@ import { menubar } from "./menubar";
 import { Picker, type PickerItem, type PickerTexts } from "./picker";
 import { companionsDrop, gatherCompanions } from "./companions";
 import { currentVersion, findUpdate, installUpdate, type Update } from "./updater";
-import { setupPrintability } from "./printability";
+import { setupPrintability, wallTarget } from "./printability";
 import { Viewer, type Analysis, type AnalysisData, type Axis, type Section, type Tool, type View } from "./viewer";
 
 type State = "empty" | "converting" | "error" | "ready";
@@ -208,7 +208,9 @@ const viewer = new Viewer($<HTMLCanvasElement>("#viewport"), {
     return s !== undefined;
   },
   rotate: async (axis, degrees) => (summary ? turn(() => api.rotate(axis, degrees)) : false),
-  section: (s) => syncSection(s),
+  // Malla's section slides the same plane as the cut; the cut's panel only follows its own.
+  section: (s) => (clipOn ? syncClip() : syncSection(s)),
+  thickness: (o, d) => void measureWall(o, d),
 });
 
 /** Points in preview units for the current size. */
@@ -263,6 +265,9 @@ async function turn(call: () => Promise<TurnResult>): Promise<boolean> {
       viewer.moveMesh(r.rigid.matrix, r.rigid.shift);
       syncBrush();
       syncMeasure();
+      wall = null;
+      syncWall();
+      if (wireOn) void refreshWire();
     } else {
       await reloadMesh();
     }
@@ -363,6 +368,90 @@ async function reloadMesh(frame = false) {
   viewer.load(await api.previewMesh(), frame);
   syncBrush();
   syncMeasure();
+  wall = null;
+  syncWall();
+  if (wireOn) void refreshWire();
+}
+
+// ---- Malla's view helpers: the section, the wireframe and the wall thickness ----------
+
+/** The section in Malla: the cut's plane, hiding what lies in front, without cutting anything. */
+let clipOn = false;
+/** Where each mode left the plane: Malla's section, and the cut's while Malla shows its own. */
+let meshClip: Section | null = null;
+let cutPlane: Section | null = null;
+function syncClip() {
+  const s = clipOn ? viewer.getSection() : null;
+  $<HTMLButtonElement>('button[data-tool="clip"]').dataset.on = String(clipOn);
+  document.querySelectorAll<HTMLButtonElement>("button[data-clip-axis]").forEach((b) => b.setAttribute("aria-pressed", String(s?.axis === Number(b.dataset.clipAxis))));
+  $<HTMLButtonElement>("#clip-flip").setAttribute("aria-pressed", String(s?.flip ?? false));
+}
+function clipStart() {
+  if (clipOn) return;
+  cutPlane = viewer.getSection();
+  clipOn = true;
+  viewer.setSection(meshClip ?? { axis: 2, t: 0.5, flip: false });
+  syncClip();
+}
+/** Takes the section away and gives the cut its plane back. */
+function clipEnd() {
+  if (!clipOn) return;
+  meshClip = viewer.getSection();
+  clipOn = false;
+  viewer.setSection(cutPlane);
+  syncSection(cutPlane);
+  syncClip();
+}
+document.querySelectorAll<HTMLButtonElement>("button[data-clip-axis]").forEach((b) => b.addEventListener("click", () => {
+  const s = viewer.getSection();
+  if (clipOn && s) viewer.setSection({ ...s, axis: Number(b.dataset.clipAxis) as Axis });
+  syncClip();
+}));
+$("#clip-flip").addEventListener("click", () => {
+  const s = viewer.getSection();
+  if (clipOn && s) viewer.setSection({ ...s, flip: !s.flip });
+  syncClip();
+});
+$("#clip-off").addEventListener("click", () => {
+  clipEnd();
+  setTool("orbit");
+});
+
+/** The wireframe: the mesh's edges over its faces, fetched again whenever the mesh changes. */
+let wireOn = false;
+let wireToken = 0;
+async function refreshWire() {
+  const mine = ++wireToken;
+  if (!wireOn || !summary) return viewer.setWire(null);
+  const wire = await api.wireMesh().catch(() => null);
+  if (mine === wireToken && wireOn) viewer.setWire(wire);
+}
+function setWire(on: boolean) {
+  if (on && app.dataset.tab !== "mesh") selectTab("mesh");
+  wireOn = on && !!summary;
+  $("#toggle-wire").setAttribute("aria-pressed", String(wireOn));
+  void refreshWire();
+}
+$("#toggle-wire").addEventListener("click", () => setWire(!wireOn));
+
+/** The wall measured with the thickness tool, kept on the model until the mesh changes. */
+let wall: { at: [Vec3, Vec3]; mm: number | null } | null = null;
+function syncWall() {
+  const text = !wall ? (app.dataset.tool === "thickness" ? t("thickness.first") : "")
+    : wall.mm === null ? t("thickness.open") : t("thickness.value", { mm: nf(wall.mm, 2) });
+  bind("thicknessOut", text);
+  viewer.setWall(wall && wall.mm !== null ? wall.at : null, wall?.mm != null ? `${nf(wall.mm, 2)} mm` : "");
+}
+async function measureWall(origin: Vec3, dir: Vec3) {
+  if (!summary) return;
+  const tolerance = Number(document.querySelector<HTMLInputElement>("#pa-toleranceMm")?.value) || 0.001;
+  try {
+    const w = await api.measureThickness(origin, dir, tolerance);
+    wall = w ? { at: [w.point, w.across], mm: w.mm } : null;
+  } catch (e) {
+    toast(errText(e), "error");
+  }
+  syncWall();
 }
 
 // ---- rendering the summary ------------------------------------------------------------
@@ -481,8 +570,11 @@ function render(s: Summary) {
   bind("meshSum", t("mesh.sum", { n: nf(s.triangles) }));
   bind("baseSum", st.flattenMm > 0 ? `${nf(st.flattenMm, 1)} mm` : "");
   // The mesh tab says when something there changes the model.
-  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || REPAIRS.some((op) => st[op]));
+  $("#mesh-dot").hidden = !(st.keepRatio < 1 || st.flattenMm > 0 || st.minPieceMm > 0 || st.subdivide > 0 || st.smooth > 0 || st.hollowMm > 0 || st.thickenMm > 0 || REPAIRS.some((op) => st[op]));
   renderRepairs(s);
+  syncSmoothForm(s);
+  syncHollowForm(s);
+  renderThicken(s);
   void refreshIssues();
   void refreshPlan();
   bind("colorSum", t("colour.sum", { count: s.slots.length, n: s.slots.length }));
@@ -1348,6 +1440,201 @@ const VIEW_OF: Record<string, Analysis> = {
   overhang: "overhang", thinWalls: "thickness", openEdges: "edges", nonManifoldEdges: "edges", winding: "edges",
 };
 
+// ---- subdivide and smooth ---------------------------------------------------------------
+
+const smoothPasses = $<HTMLInputElement>("#smooth-passes");
+const creaseDeg = $<HTMLInputElement>("#crease-deg");
+const triCap = $<HTMLInputElement>("#tri-cap");
+const CAP_KEY = "blendparser.triangleCap";
+try {
+  const saved = Number(localStorage.getItem(CAP_KEY));
+  if (saved >= 1000 && saved <= 8_000_000) triCap.value = String(saved);
+} catch {
+  // The default cap.
+}
+const subdivideLevel = () => Number(document.querySelector<HTMLInputElement>('input[name="subdivide"]:checked')?.value ?? 0);
+/** What the form asks for, or null with the offending field marked. */
+function readSmooth(): { subdivide: number; smooth: number; crease: number; cap: number } | null {
+  const fields: [HTMLInputElement, number, number][] = [[smoothPasses, 0, 20], [creaseDeg, 0, 180], [triCap, 1000, 8_000_000]];
+  let ok = true;
+  for (const [el, lo, hi] of fields) {
+    const v = Number(el.value);
+    const good = el.value.trim() !== "" && Number.isFinite(v) && v >= lo && v <= hi && (el !== smoothPasses || Number.isInteger(v));
+    el.setAttribute("aria-invalid", String(!good));
+    ok &&= good;
+  }
+  return ok ? { subdivide: subdivideLevel(), smooth: Number(smoothPasses.value), crease: Number(creaseDeg.value), cap: Number(triCap.value) } : null;
+}
+/** The triangles the choice would give, said before applying it; over the cap, it cannot be applied. */
+function renderSmooth() {
+  const s = summary;
+  const apply = $<HTMLButtonElement>("#smooth-apply");
+  const line = document.querySelector<HTMLElement>('[data-bind="smoothEstimate"]')!;
+  const st = s?.settings;
+  bind("smoothSum", st && (st.subdivide || st.smooth) ? t("smooth.sum", { levels: st.subdivide, passes: st.smooth }) : "");
+  const want = readSmooth();
+  if (!s || !st || !want) {
+    apply.disabled = true;
+    line.textContent = s && !want ? t("smooth.invalid") : "";
+    line.dataset.tone = "";
+    return;
+  }
+  const base = Math.round(s.triangles / 4 ** st.subdivide);
+  const result = base * 4 ** want.subdivide;
+  const same = want.subdivide === st.subdivide && want.smooth === st.smooth && want.crease === st.creaseDeg;
+  const over = result > want.cap;
+  line.dataset.tone = over ? "over" : "";
+  line.textContent = over
+    ? t("smooth.over", { n: nf(result), cap: nf(want.cap) })
+    : t("smooth.estimate", { from: nf(s.triangles), to: nf(result) });
+  apply.disabled = same || over;
+}
+/** The form shows what the model has, unless the user is changing it. */
+function syncSmoothForm(s: Summary) {
+  const st = s.settings;
+  const radio = document.querySelector<HTMLInputElement>(`#subdiv-${st.subdivide}`);
+  if (radio && !$("#smooth-group").contains(document.activeElement)) radio.checked = true;
+  setIfIdle("#smooth-passes", String(st.smooth));
+  setIfIdle("#crease-deg", String(st.creaseDeg));
+  renderSmooth();
+}
+$("#smooth-group").addEventListener("input", renderSmooth);
+$("#smooth-group").addEventListener("change", renderSmooth);
+triCap.addEventListener("change", () => {
+  try {
+    if (readSmooth()) localStorage.setItem(CAP_KEY, triCap.value);
+  } catch {
+    // Not remembered.
+  }
+});
+$("#smooth-apply").addEventListener("click", async () => {
+  const want = readSmooth();
+  if (!want || !summary) return;
+  if (summary.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("smooth.title"), kind: "warning" }))) return;
+  await apply(() => api.smoothMesh(want.subdivide, want.smooth, want.crease, want.cap), () => toast(t("smooth.done"), "ok", { label: t("stage.undo"), run: () => void undo() }));
+});
+
+// ---- thickening thin details ----------------------------------------------------------
+
+const thickenMm = $<HTMLInputElement>("#thicken-mm");
+/** Typed by the user; until then the field follows what printability asks of a wall. */
+let thickenTyped = false;
+thickenMm.addEventListener("input", () => (thickenTyped = true));
+/** What printability asks of a wall, from its parameters as the panel has them. */
+function paramWallTarget(): number {
+  const v = (id: string, d: number) => Number(document.querySelector<HTMLInputElement>(`#pa-${id}`)?.value) || d;
+  const nozzle = summary?.settings.nozzleMm ?? 0.4;
+  return wallTarget({ wallMm: v("wallMm", nozzle * 2.2), extrusionMm: v("extrusionMm", nozzle * 1.1), perimeters: v("perimeters", 2) } as Parameters<typeof wallTarget>[0]);
+}
+function readThicken(): number | null {
+  const v = Number(thickenMm.value);
+  const ok = thickenMm.value.trim() !== "" && v >= 0.1 && v <= 10;
+  thickenMm.setAttribute("aria-invalid", String(!ok));
+  return ok ? v : null;
+}
+/** How far thickening went and over how much surface. */
+function renderThicken(s: Summary | null) {
+  const st = s?.settings;
+  if (document.activeElement !== thickenMm && (st?.thickenMm || !thickenTyped)) thickenMm.value = String(st?.thickenMm || paramWallTarget());
+  const r = s?.thicken;
+  bind("thickenResult", !st?.thickenMm || !r ? "" : r.movedVertices
+    ? t("thicken.result", { area: nf(r.areaMm2 / 100, 2), mm: nf(r.maxOffsetMm, 2), count: r.movedVertices, n: nf(r.movedVertices) })
+    : t("thicken.nothing", { mm: mm(st.thickenMm) }));
+  bind("thickenSum", st?.thickenMm ? t("thicken.sum", { mm: mm(st.thickenMm) }) : "");
+  const want = readThicken();
+  $<HTMLButtonElement>("#thicken-apply").disabled = !s || want === null || want === st?.thickenMm;
+  $<HTMLButtonElement>("#thicken-off").disabled = !st?.thickenMm;
+}
+$("#thicken-group").addEventListener("input", () => renderThicken(summary));
+async function thickenTo(v: number) {
+  if (!summary) return;
+  await apply(() => api.fixMesh({ thickenMm: v }), () => {
+    if (v > 0) toast(t("thicken.done"), "ok", { label: t("stage.undo"), run: () => void undo() });
+  });
+}
+$("#thicken-apply").addEventListener("click", () => {
+  const v = readThicken();
+  if (v !== null) void thickenTo(v);
+});
+$("#thicken-off").addEventListener("click", () => void thickenTo(0));
+// The thin zones as the thickness view paints them: what thickening would change.
+$("#thicken-show").addEventListener("click", () => void showAnalysis("thickness"));
+
+// ---- hollowing -------------------------------------------------------------------------
+
+const hollowWall = $<HTMLInputElement>("#hollow-wall");
+const drainMm = $<HTMLInputElement>("#drain-mm");
+/** Two lines of the nozzle: the thinnest wall that prints. */
+const minWall = () => 2 * (summary?.settings.nozzleMm ?? 0.4);
+const drainCount = () => Number(document.querySelector<HTMLInputElement>('input[name="drains"]:checked')?.value ?? 0);
+function readHollow(): { wall: number; drains: number; drain: number } | null {
+  const wall = Number(hollowWall.value);
+  const drain = Number(drainMm.value);
+  const wallOk = hollowWall.value.trim() !== "" && wall >= minWall() - 1e-6 && wall <= 50;
+  const drainOk = drainMm.value.trim() !== "" && drain >= 1 && drain <= 20;
+  hollowWall.setAttribute("aria-invalid", String(!wallOk));
+  drainMm.setAttribute("aria-invalid", String(!drainOk));
+  return wallOk && drainOk ? { wall, drains: drainCount(), drain } : null;
+}
+/** What hollowing saves, or why it did nothing. */
+function renderHollow(s: Summary | null) {
+  const st = s?.settings;
+  const line = document.querySelector<HTMLElement>('[data-bind="hollowResult"]')!;
+  bind("hollowWallHelp", t("hollow.wallHelp", { min: mm(minWall()), nozzle: mm(st?.nozzleMm ?? 0.4) }));
+  const h = s?.hollow;
+  line.dataset.tone = "";
+  if (!s || !st || !h) {
+    line.textContent = "";
+    bind("hollowSum", "");
+  } else if (h.refused) {
+    line.dataset.tone = "warn";
+    line.textContent = t(h.refused === "open" ? "hollow.open" : "hollow.noRoom");
+    bind("hollowSum", "");
+  } else {
+    const saved = h.solidMm3 - h.volumeMm3;
+    const grams = (saved / 1000) * (s.waste.prefs.densityGCm3 ?? 1.24);
+    const parts = [t("hollow.saved", { pct: nf((saved / h.solidMm3) * 100), g: nf(grams) })];
+    if (h.drainsWanted) parts.push(t("hollow.drainsMade", { count: h.drains, n: h.drains, of: h.drainsWanted }));
+    if (h.drains < h.drainsWanted) parts.push(t("hollow.drainsHint"));
+    parts.push(t("hollow.accuracy", { mm: mm(h.cellMm) }));
+    line.textContent = parts.join(" ");
+    if (h.drains < h.drainsWanted) line.dataset.tone = "warn";
+    bind("hollowSum", t("hollow.sum", { mm: mm(st.hollowMm) }));
+  }
+  const want = readHollow();
+  const same = !!st && !!want && st.hollowMm === want.wall && st.drains === want.drains && st.drainMm === want.drain;
+  $<HTMLButtonElement>("#hollow-apply").disabled = !s || !want || same;
+  $<HTMLButtonElement>("#hollow-off").disabled = !st || st.hollowMm === 0;
+}
+function syncHollowForm(s: Summary) {
+  const st = s.settings;
+  if (st.hollowMm > 0) {
+    setIfIdle("#hollow-wall", String(st.hollowMm));
+    setIfIdle("#drain-mm", String(st.drainMm));
+    const radio = document.querySelector<HTMLInputElement>(`#drains-${st.drains}`);
+    if (radio && !$("#hollow-group").contains(document.activeElement)) radio.checked = true;
+  }
+  renderHollow(s);
+}
+$("#hollow-group").addEventListener("input", () => renderHollow(summary));
+$("#hollow-group").addEventListener("change", () => renderHollow(summary));
+async function hollowTo(wall: number, drains: number, drain: number) {
+  if (!summary) return;
+  if (summary.paintedTriangles && !(await ask(t("printability.fixPaint"), { title: t("hollow.title"), kind: "warning" }))) return;
+  await apply(() => api.hollowMesh(wall, drains, drain), () => {
+    const h = summary?.hollow;
+    if (wall > 0 && h && !h.refused) toast(t("hollow.done"), "ok", { label: t("stage.undo"), run: () => void undo() });
+  });
+}
+$("#hollow-apply").addEventListener("click", () => {
+  const want = readHollow();
+  if (want) void hollowTo(want.wall, want.drains, want.drain);
+});
+$("#hollow-off").addEventListener("click", () => {
+  const st = summary?.settings;
+  if (st) void hollowTo(0, st.drains, st.drainMm);
+});
+
 const colorOps = () => void apply(() => api.setColorOps(Number($<HTMLInputElement>("#detail").value), Number($<HTMLInputElement>("#island").value)));
 $("#detail").addEventListener("change", colorOps);
 $("#island").addEventListener("change", colorOps);
@@ -1686,6 +1973,13 @@ function selectTab(tab: Tab, focus = false) {
     if (on && focus) b.focus();
   }
   $(".side").scrollTo({ top: 0 });
+  // Malla's view helpers belong to it: they go off on the way out.
+  if (tab !== "mesh") {
+    clipEnd();
+    if (wireOn) setWire(false);
+    wall = null;
+    syncWall();
+  }
   placeToolOptions(tab);
   if (tab === "mesh") void refreshIssues();
   // The analysis views belong to Malla: elsewhere the model shows its colours, and the brush paints them.
@@ -1709,7 +2003,7 @@ function selectTab(tab: Tab, focus = false) {
 function placeToolOptions(tab: Tab) {
   const opts = $("#tool-options");
   const foot = $(".stage__foot");
-  for (const el of document.querySelectorAll<HTMLElement>('.place[data-for="move"], .place[data-for="rotate"]')) {
+  for (const el of document.querySelectorAll<HTMLElement>('.place[data-for="move"], .place[data-for="rotate"], .place[data-for="clip"]')) {
     if (tab === "model") foot.insertBefore(el, $("#measure-out"));
     else opts.append(el);
   }
@@ -1742,6 +2036,8 @@ function setView(v: View) {
 }
 
 function setTool(tool: Tool) {
+  // The section turns on with its tool and stays while other Malla tools are used.
+  if (tool === "clip") clipStart();
   app.dataset.tool = tool;
   // A tool from another mode (its key, say) opens that mode first.
   const modes = toolModes(tool);
@@ -1750,11 +2046,13 @@ function setTool(tool: Tool) {
   radiusInput.disabled = tool !== "brush";
   viewer.setTool(tool);
   // Picking the cut's tool turns the cut on.
-  syncSection(viewer.getSection());
+  if (clipOn) syncClip();
+  else syncSection(viewer.getSection());
   setHint(tool === "size" ? t("hint.size", { lock: locked ? t("size.locked") : t("size.unlocked") })
     : tool === "rotate" ? t("hint.rotate", { step: num(Number(turnStep.value)) })
     : t(`hint.${tool}`));
   syncMeasure();
+  syncWall();
 }
 
 // The plate in the view, remembered between sessions.
@@ -1806,7 +2104,14 @@ try {
 setExpanded(shelfOpen);
 
 document.querySelectorAll<HTMLButtonElement>("button[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view as View)));
-document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.addEventListener("click", () => setTool(b.dataset.tool as Tool)));
+// The section's button turns it off again when it is the tool in use.
+document.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.addEventListener("click", () => toolKey(b.dataset.tool as Tool)));
+function toolKey(tool: Tool) {
+  if (tool === "clip" && app.dataset.tool === "clip" && clipOn) {
+    clipEnd();
+    setTool("orbit");
+  } else setTool(tool);
+}
 
 async function undo() {
   if (!summary?.canUndo) return;
@@ -1828,6 +2133,9 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "g") setTool("move");
   else if (e.key === "r") setTool("rotate");
   else if (e.key === "c") setTool("section");
+  else if (e.key === "k") toolKey("clip");
+  else if (e.key === "t") setTool("thickness");
+  else if (e.key === "z") setWire(!wireOn);
   else if (e.key === "p") setBed(!bedOn);
   else if (e.key === "l") toggleLock();
   else if (e.key === "f") viewer.frameAll();

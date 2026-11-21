@@ -488,6 +488,49 @@ pub async fn pick(app: AppHandle, origin: [f32; 3], dir: [f32; 3]) -> CmdResult<
         .await
 }
 
+/// The wall where the ray lands, as the thickness check reads it. `mm` is None
+/// with nothing across (an open surface).
+#[tauri::command]
+pub async fn measure_thickness(
+    app: AppHandle,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    tolerance_mm: f32,
+) -> CmdResult<Option<dto::WallDto>> {
+    if !tolerance_mm.is_finite() || !(0.00001..=0.1).contains(&tolerance_mm) {
+        return Err(AppError::new("error.printabilityParams"));
+    }
+    with_doc(app, move |d, _| {
+        Ok(d.project.wall_at(origin, dir, tolerance_mm).map(|(point, across, mm)| dto::WallDto { point, across, mm }))
+    })
+    .await
+}
+
+/// The working mesh's edges, each once, as one binary blob:
+/// `u32 vertices, u32 edges | f32 positions[3 * vertices] | u32 ends[2 * edges]`.
+#[tauri::command]
+pub async fn wire_mesh(app: AppHandle) -> CmdResult<Response> {
+    let bytes = with_doc(app, |d, _| {
+        let (positions, edges) = d.project.wire();
+        let mut out = Vec::with_capacity(8 + positions.len() * 12 + edges.len() * 8);
+        out.extend((positions.len() as u32).to_le_bytes());
+        out.extend((edges.len() as u32).to_le_bytes());
+        for p in &positions {
+            for v in p {
+                out.extend(v.to_le_bytes());
+            }
+        }
+        for e in &edges {
+            for v in e {
+                out.extend(v.to_le_bytes());
+            }
+        }
+        Ok(out)
+    })
+    .await?;
+    Ok(Response::new(bytes))
+}
+
 #[tauri::command]
 pub async fn paint(
     app: AppHandle,
@@ -639,6 +682,7 @@ pub struct MeshFix {
     drop_floating: Option<bool>,
     min_piece_mm: Option<f32>,
     flatten_mm: Option<f32>,
+    thicken_mm: Option<f32>,
 }
 
 /// One undoable step, so Ctrl+Z restores geometry, colours and hand painting.
@@ -655,8 +699,61 @@ pub async fn fix_mesh(app: AppHandle, fix: MeshFix) -> CmdResult<Summary> {
             drop_floating: fix.drop_floating.unwrap_or(now.drop_floating),
             min_piece_mm: fix.min_piece_mm.map_or(now.min_piece_mm, |v| v.clamp(0.0, 100.0)),
             flatten_mm: fix.flatten_mm.map_or(now.flatten_mm, |v| v.clamp(0.0, 20.0)),
+            // NaN goes to 0: nothing thickened.
+            thicken_mm: fix.thicken_mm.map_or(now.thicken_mm, |v| if v.is_finite() { v.clamp(0.0, 10.0) } else { 0.0 }),
             ..now
         });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Hollows the model to a wall of `wall_mm` with `drains` holes of `drain_mm`
+/// through the base, as one undoable step; a wall of 0 fills it again. The wall
+/// is at least two lines of the nozzle.
+#[tauri::command]
+pub async fn hollow_mesh(app: AppHandle, wall_mm: f32, drains: u8, drain_mm: f32) -> CmdResult<Summary> {
+    if !wall_mm.is_finite()
+        || !(0.0..=50.0).contains(&wall_mm)
+        || drains > bp_core::mesh::MAX_DRAINS
+        || !(1.0..=20.0).contains(&drain_mm)
+    {
+        return Err(AppError::new("error.hollowParams"));
+    }
+    with_doc(app, move |d, prefs| {
+        let min = 2.0 * d.printer.nozzle_mm;
+        if wall_mm > 0.0 && wall_mm < min - 1e-4 {
+            return Err(AppError::with("error.hollowWall", json!({ "min": min })));
+        }
+        let now = d.project.mesh_ops();
+        d.project.fix_mesh(MeshOps { hollow_mm: wall_mm, drains, drain_mm, ..now });
+        Ok(dto::summary(d, prefs))
+    })
+    .await
+}
+
+/// Subdivides and smooths the model as one undoable step. Refused when the
+/// result would pass `max_triangles` (the panel's cap).
+#[tauri::command]
+pub async fn smooth_mesh(
+    app: AppHandle,
+    subdivide: u8,
+    smooth: u8,
+    crease_deg: f32,
+    max_triangles: usize,
+) -> CmdResult<Summary> {
+    if subdivide > bp_core::mesh::MAX_SUBDIVIDE || smooth > 20 || !(0.0..=180.0).contains(&crease_deg) {
+        return Err(AppError::new("error.smoothParams"));
+    }
+    let cap = max_triangles.clamp(1, bp_core::mesh::SUBDIVIDE_LIMIT);
+    with_doc(app, move |d, prefs| {
+        let now = d.project.mesh_ops();
+        let base = d.project.stats().triangles / 4usize.pow(now.subdivide as u32);
+        let result = base * 4usize.pow(subdivide as u32);
+        if result > cap {
+            return Err(AppError::with("error.subdivideCap", json!({ "n": result, "cap": cap })));
+        }
+        d.project.fix_mesh(MeshOps { subdivide, smooth, crease_deg, ..now });
         Ok(dto::summary(d, prefs))
     })
     .await

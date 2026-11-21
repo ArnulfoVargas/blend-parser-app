@@ -225,6 +225,8 @@ mod tests {
             parts: vec![MeshPart { name: "t".into(), positions, tris, origin: None }],
             repair: Default::default(),
             deviation: 0.0,
+            hollow: None,
+            thicken: None,
         }
     }
 
